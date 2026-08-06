@@ -1,0 +1,22 @@
+{
+  "name": "tapz",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "description": "TAPZ — commande par QR code pour bars & monde de la nuit",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "@supabase/supabase-js": "^2.45.4",
+    "qrcode": "^1.5.4",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-react": "^4.3.4",
+    "vite": "^6.0.5"
+  }
+}
