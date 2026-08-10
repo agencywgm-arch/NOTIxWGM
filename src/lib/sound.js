@@ -1,6 +1,6 @@
-// TAPZ — sons générés en WebAudio (aucun asset à charger).
+// Noti Calling — sons générés en WebAudio (aucun asset à charger).
 //  · chime()  : sonnerie douce côté client ("commande prête").
-//  · Alarm    : alarme agressive côté comptoir, qui ne s'arrête QUE sur "Accepter".
+//  · Alarm    : alarme agressive côté bar, qui ne s'arrête QUE sur "Accepter".
 
 let ctx = null
 

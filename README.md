@@ -1,91 +1,126 @@
-# 🍸 TAPZ — *Scanne. Commande. Trinque.*
+# Noti Calling — outil de commande par QR code
 
-SaaS multi-établissements de **commande par QR code** pour **bars & monde de la nuit**.
+Plateforme de commande par QR code pour **soirée événementielle**, développée d'après la
+feuille de route *v2.0 — août 2026* (cas pilote **Noti Club · Noti Calling**).
 
-> **Aucun paiement en ligne.** Le client commande, le comptoir prépare, le client
-> **règle au bar**. TAPZ génère une facture / récapitulatif et assure le suivi
-> d'encaissement — rien de plus. Aucune fonction de paiement n'existe dans ce dépôt.
+> **Principe validé : aucun paiement en ligne.** La plateforme affiche le prix,
+> l'encaissement se fait **à 100 % au bar**, sur le système existant du lieu.
+> C'est un outil de **commande + file + CRM + communication**, pas une caisse.
 
 ---
 
 ## Sommaire
 
-- [Ce que fait TAPZ](#ce-que-fait-tapz)
-- [Stack](#stack)
-- [Architecture des fichiers](#architecture-des-fichiers)
+- [Le schéma en 4 temps](#le-schéma-en-4-temps)
+- [Ce qui est implémenté](#ce-qui-est-implémenté)
+- [Stack & architecture](#stack--architecture)
 - [👉 CE QUE VOUS DEVEZ FAIRE À LA MAIN](#-ce-que-vous-devez-faire-à-la-main)
 - [Développement local](#développement-local)
-- [Notes d'implémentation](#notes-dimplémentation)
+- [Points d'attention & décisions](#points-dattention--décisions)
+- [Reste à faire](#reste-à-faire)
 
 ---
 
-## Ce que fait TAPZ
+## Le schéma en 4 temps
 
-**Côté client (téléphone, sans installation)**
-- Scan du QR → `/r/{bar_id}/t/{table_number}` (**format d'URL stable, jamais modifié**)
-- Sur place / à emporter → carte par catégories, photos, badges « Populaire »
-- Boissons composables : tunnel d'options (base alcool → sirop → garnitures) + ajouts payants
-- Panier, note pour le comptoir, code promo / happy hour automatique
-- Suivi temps réel : barre de progression, compte à rebours ETA réglable par le staff,
-  sonnerie douce + vibration + Web Push quand c'est prêt (même écran verrouillé)
-- Persistance au refresh (localStorage) : on retombe sur le suivi, pas au début
-- **Facture / récapitulatif** affichée + téléchargeable en PDF, mention « À régler au bar »
-
-**Côté comptoir / patron**
-- Kanban temps réel (Realtime + polling de secours) : À accepter → Au shaker → Prête → Servie
-- **Alarme sonore agressive** à chaque nouvelle commande, qui **ne s'arrête que** via « Accepter »
-- Vue **Caisse** : additions par table, fusion de plusieurs commandes en une note,
-  impression PDF de la note, marquage « réglé » (espèces / CB / autre)
-- Gestion de carte : CRUD, réordonnancement des catégories, photos, stock, TVA,
-  groupes d'options composables, **traduction automatique** (Edge Function Claude)
-- **Copie de la carte** vers un autre bar du même compte (photos + sous-groupes inclus)
-- Export carte : **PDF A4 imprimable** + **PNG format story**, avec **marge de prix
-  réglable à l'export** (n'affecte jamais la carte réelle)
-- Export de **tous les QR codes en un seul PDF A4** (6 par page, repères de découpe),
-  compatible iPhone via la feuille de partage iOS
-- CRM clients, avis, promotions / happy hour, réglages par établissement
-- **Multi-établissements** (mode groupe) avec partage de réglages entre bars du compte
+| | | |
+|---|---|---|
+| **1. Le client commande** | Il scanne le QR (entrée ou bar), s'identifie, commande — **sans payer**. |
+| **2. Le staff reçoit** | La commande arrive instantanément au bar, avec le nom du client, le détail et le **code de retrait**. |
+| **3. Le staff produit** | Il prépare, re-saisit dans le POS interne du lieu, puis notifie le client. |
+| **4. Retrait & règlement** | Le client présente son code au bar, récupère et **règle sur place**. Le staff marque « réglé ». |
 
 ---
 
-## Stack
+## Ce qui est implémenté
+
+### Côté client — `/s/{scan_point_id}`
+
+- Écran d'accueil aux couleurs Noti Calling (logo, contexte, point de scan)
+- **Identification obligatoire** : Nom + Prénom + Mobile, **vérifié par code SMS (OTP)**
+- **Consentements RGPD granulaires**, non pré-cochés, **horodatés** : CGU/CGV (obligatoire),
+  prospection, transmission à l'établissement
+- **Reconnaissance client au scan** : « Bon retour parmi nous », badge VIP, message dédié en cas
+  d'incident (impayé passé)
+- **Espace commande en 3 univers** : Boissons au verre · Food · Bouteilles, avec sous-catégories
+- Formats multiples (12 cl / 75 cl / magnum) et options composables ; panier, note libre, code promo
+- **Discipline de la file** : cumul autorisé tant que la commande est en préparation ;
+  **blocage dès qu'une commande passe à « prête »**, jusqu'au retrait au bar
+- Confirmation avec **code de retrait**, temps estimé et compte à rebours
+- Suivi temps réel (WebSocket) + sonnerie douce + vibration + Web Push
+- Récapitulatif PDF téléchargeable, mention « à régler au bar »
+- Avis 5 étoiles + commentaire en fin de soirée
+- Multilingue **FR / EN / ES** (pas de RTL)
+
+### Côté bar & cuisine
+
+- Écran de production temps réel : **Reçues → Prêtes → Retirées → Réglées**
+- **Alarme sonore** sur nouvelle commande, qui ne s'arrête que sur accusé de réception explicite
+- **Réglage du temps de préparation** selon le rush, répercuté sur le timer client
+- **Article « épuisé » en un clic** — il reste visible sur la carte, grisé et non commandable
+- **Impression de ticket** 80 mm — disponible, non obligatoire, non bloquante
+- Vue **Caisse** : suivi d'encaissement par client, sélection multiple, marquage « réglé »
+  (espèces / CB / autre), suivi des impayés
+
+### Côté organisateur
+
+- **Pilotage temps réel** : présents, commandes en cours, file d'attente, encaissé, impayés
+- **Leaderboard temps réel** (qui commande le plus, panier cumulé)
+- **Diffusion à toute la soirée** (avec modèles prêts à l'emploi) et **messagerie individuelle**
+  organisateur → client
+- **Base client cross-événement** : historique, nombre de soirées, taille du groupe,
+  **tags & segmentation** (VIP / habitué / gros panier / incident) — tags automatiques inclus
+- **Reporting post-événement** : panier moyen, top produits, pic horaire, nouveaux vs récurrents,
+  note moyenne — export **PDF** et **CSV**
+- **Clôture de soirée** : les commandes non réglées passent en « impayé », rattachées à
+  l'identité vérifiée (preuve horodatée)
+
+### Notifications (§09)
+
+| Déclencheur | Canal |
+|---|---|
+| Commande reçue | Push + SMS |
+| Commande prête | Push + SMS |
+| **Relance auto à 5 min** si non retirée | Push + SMS (Edge Function `reminders`, cron) |
+| **Relance renforcée 1 h avant fermeture** | Push + SMS, message impactant avec la conséquence explicite |
+| Diffusion / message individuel | Push + SMS |
+
+**Canal dégradé non bloquant** : un SMS qui échoue ne bloque jamais une commande. La plateforme
+reste la source de vérité du suivi.
+
+---
+
+## Stack & architecture
 
 | Couche | Choix |
 |---|---|
-| Front | React 19 + Vite (SPA), un gros `src/App.jsx`, styles en objets inline JS |
-| Back | Supabase — PostgreSQL + RLS + Auth email/password + Realtime + Edge Functions (Deno) + Storage |
+| Front | React 19 + Vite (SPA), un gros `src/App.jsx`, styles en objets inline |
+| Back | Supabase — PostgreSQL + RLS + Auth (OTP SMS clients / e-mail staff) + Realtime + Edge Functions (Deno) + Storage |
 | QR | lib `qrcode` |
-| PDF / images | **Canvas 2D natif + writer PDF maison** (`src/lib/pdf.js`) — *pas* de `html2canvas` (casse sur iOS Safari) |
+| PDF / images | **Canvas 2D natif + writer PDF maison** (`src/lib/pdf.js`) — *pas* de `html2canvas` |
 | Déploiement | GitHub Pages via GitHub Actions, base path par `VITE_BASE_PATH` |
-
----
-
-## Architecture des fichiers
 
 ```
 src/
-  App.jsx              ← tout l'applicatif (client + admin), styles inline
-  main.jsx
+  App.jsx                  tout l'applicatif (client + staff)
   lib/
-    supabase.js        client Supabase, erreurs Auth en français, tableUrl()
-    theme.js           palette Electric Violet + styles partagés + formats FR
-    pdf.js             writer PDF maison, helpers Canvas, partage iOS
-    push.js            Web Push (VAPID) + vibration
-    sound.js           sonnerie douce (client) + alarme comptoir (WebAudio)
-public/
-  sw.js                Service Worker (push + réveil de l'onglet suivi)
-  manifest.webmanifest
+    supabase.js            client, erreurs FR, scanUrl()
+    theme.js               charte Noti Calling + formats FR + normalisation E.164
+    pdf.js                 writer PDF maison, helpers Canvas, partage iOS
+    push.js                Web Push (VAPID) + appel de la fonction notify
+    sound.js               sonnerie client + alarme bar (WebAudio)
 supabase/
   migrations/
-    0001_schema.sql    tables, types, triggers, RPC ensure_table
-    0002_rls.sql       Row Level Security
-    0003_realtime.sql  publication Realtime
-    0004_storage.sql   bucket "tapz" (logos + photos)
+    0001_schema.sql        tables, RPC (place_order, upsert_me, register_scan…), triggers
+    0002_rls.sql           Row Level Security
+    0003_realtime_reporting.sql  Realtime, vues de pilotage, event_report, close_event
+    0004_storage.sql       bucket "noti"
+    0005_seed_noti_menu.sql      carte du Noti Club
   functions/
-    send-push/         Web Push VAPID
-    send-receipt/      e-mail récapitulatif (Resend)
-    translate-menu/    traduction de la carte via l'API Claude
-.github/workflows/deploy.yml
+    notify/                notification de statut / diffusion / message individuel
+    reminders/             relances automatiques (cron)
+    translate-menu/        traduction FR → EN / ES via l'API Claude
+    _shared/               CORS, envoi SMS multi-fournisseurs, dispatch
 ```
 
 ---
@@ -94,65 +129,68 @@ supabase/
 
 ### 1. Créer le projet Supabase
 
-1. [supabase.com](https://supabase.com) → **New project** (région Europe de préférence).
-2. Notez **Project URL** et **anon public key** (*Settings → API*).
+[supabase.com](https://supabase.com) → **New project**, **région Europe** (obligation RGPD de la
+feuille de route §10). Notez **Project URL** et **anon public key** (*Settings → API*).
 
 ### 2. Exécuter le SQL — dans cet ordre
 
-*Supabase → SQL Editor → New query* → collez le contenu de chaque fichier, puis **Run** :
+*SQL Editor → New query* → coller chaque fichier → **Run** :
 
 1. `supabase/migrations/0001_schema.sql`
 2. `supabase/migrations/0002_rls.sql`
-3. `supabase/migrations/0003_realtime.sql`
+3. `supabase/migrations/0003_realtime_reporting.sql`
 4. `supabase/migrations/0004_storage.sql`
-
-> ⚠️ **Lisez le commentaire en haut de `0002_rls.sql`.** Pour que le suivi temps réel
-> fonctionne, la lecture anonyme est autorisée sur les commandes **de moins de 12 h**
-> (une policy RLS filtre des lignes, elle ne peut pas dépendre du filtre de la requête).
-> L'app n'interroge jamais que par `id`, et aucune donnée de paiement n'est stockée.
-> Si ce compromis ne vous convient pas, remplacez-le par une RPC `security definer`
-> — vous perdrez alors le Realtime, le polling de secours prendra le relais.
+5. `supabase/migrations/0005_seed_noti_menu.sql` *(crée la fonction ; la carte est injectée
+   automatiquement à la création du lieu depuis l'app)*
 
 ### 3. Activer l'authentification
 
-*Authentication → Providers → Email* : activer.
+**Deux modes coexistent** — ne configurez pas que l'un des deux :
 
-- Pour un démarrage sans friction : **désactiver « Confirm email »**
-  (*Authentication → Sign In / Providers → Email → Confirm email = off*).
-  Le compte est alors auto-confirmé et l'app connecte directement après inscription.
-- Si vous laissez la confirmation active, l'app affiche « vérifiez votre boîte mail ».
+- **Staff** — *Authentication → Providers → **Email*** : activer.
+  Pour démarrer sans friction, désactivez « Confirm email ».
+- **Clients** — *Authentication → Providers → **Phone*** : activer, puis choisir le fournisseur SMS
+  (Twilio, Twilio Verify, Vonage, MessageBird ou Textlocal) et renseigner ses identifiants.
+  C'est Supabase qui envoie l'OTP — vous n'avez **rien à coder**.
+
+> Sans le provider Phone configuré, le parcours client s'arrête à l'envoi du code.
+> C'est le seul point réellement bloquant pour tester de bout en bout.
 
 ### 4. Générer les clés VAPID (Web Push)
-
-Sur votre machine :
 
 ```bash
 npx web-push generate-vapid-keys
 ```
 
-Vous obtenez une **clé publique** et une **clé privée**.
-
-### 5. Configurer les secrets Supabase (Edge Functions)
+### 5. Configurer les secrets Supabase
 
 *Project Settings → Edge Functions → Secrets*, ou en CLI :
 
 ```bash
 supabase secrets set \
-  VAPID_PUBLIC_KEY="BEl...votre clé publique..." \
-  VAPID_PRIVATE_KEY="votre clé privée" \
+  VAPID_PUBLIC_KEY="BEl..." \
+  VAPID_PRIVATE_KEY="..." \
   VAPID_SUBJECT="mailto:contact@votredomaine.fr" \
-  ANTHROPIC_API_KEY="sk-ant-..." \
-  RESEND_API_KEY="re_..." \
-  RESEND_FROM="TAPZ <hello@votredomaine.fr>"
+  CRON_SECRET="$(openssl rand -hex 24)" \
+  SMS_PROVIDER="twilio" \
+  SMS_SENDER="NotiCalling" \
+  TWILIO_ACCOUNT_SID="AC..." \
+  TWILIO_AUTH_TOKEN="..." \
+  TWILIO_FROM="+33..." \
+  ANTHROPIC_API_KEY="sk-ant-..."
 ```
 
-| Secret | Requis pour | Si absent |
+| Secret | Sert à | Si absent |
 |---|---|---|
-| `VAPID_PUBLIC_KEY` / `VAPID_PRIVATE_KEY` / `VAPID_SUBJECT` | notifications push | l'app fonctionne, sans push |
-| `ANTHROPIC_API_KEY` | traduction auto de la carte | bouton traduction en erreur |
-| `RESEND_API_KEY` / `RESEND_FROM` | e-mail de récapitulatif | pas d'e-mail envoyé |
+| `VAPID_*` | notifications Web Push | l'app marche, sans push |
+| `SMS_PROVIDER` + secrets du fournisseur | SMS de statut, relances, diffusion | les messages restent dans l'app (tracés, non envoyés) |
+| `CRON_SECRET` | protéger la fonction `reminders` | la fonction refuse tout appel |
+| `ANTHROPIC_API_KEY` | traduction auto FR → EN/ES | bouton de traduction en erreur |
 
-`SUPABASE_URL` et `SUPABASE_SERVICE_ROLE_KEY` sont injectés automatiquement, ne les définissez pas.
+`SMS_PROVIDER` accepte `twilio`, `vonage`, `brevo`, `ovh` ou `none`. Les quatre sont implémentés
+derrière la même interface (`supabase/functions/_shared/sms.ts`) — vous basculez de l'un à l'autre
+sans toucher au code. **Ce module ne sert qu'aux notifications métier** ; l'OTP d'identification
+passe par Supabase Phone Auth (étape 3).
 
 ### 6. Déployer les Edge Functions
 
@@ -161,52 +199,64 @@ npm install -g supabase
 supabase login
 supabase link --project-ref VOTRE_REF_PROJET
 
-supabase functions deploy send-push
-supabase functions deploy send-receipt
+supabase functions deploy notify
+supabase functions deploy reminders --no-verify-jwt
 supabase functions deploy translate-menu
 ```
 
-> `send-push` et `send-receipt` sont appelées par des **clients anonymes** (le téléphone
-> du client, la tablette du comptoir). Si votre projet refuse les appels non
-> authentifiés, déployez-les avec `--no-verify-jwt` :
-> `supabase functions deploy send-push --no-verify-jwt`
+`reminders` est appelée par un cron, pas par un utilisateur : elle se protège elle-même avec
+`CRON_SECRET`, d'où le `--no-verify-jwt`.
 
-### 7. Configurer les secrets GitHub
+### 7. Planifier les relances automatiques
 
-*Dépôt → Settings → Secrets and variables → Actions → New repository secret* :
+Dans *SQL Editor*, activez `pg_cron` et `pg_net`, puis :
+
+```sql
+create extension if not exists pg_cron;
+create extension if not exists pg_net;
+
+select cron.schedule(
+  'noti-reminders',
+  '* * * * *',                      -- toutes les minutes
+  $$
+  select net.http_post(
+    url     := 'https://VOTRE_REF.supabase.co/functions/v1/reminders',
+    headers := '{"Content-Type":"application/json","x-cron-secret":"LE_MEME_CRON_SECRET"}'::jsonb,
+    body    := '{}'::jsonb
+  );
+  $$
+);
+```
+
+### 8. Configurer les secrets GitHub
+
+*Settings → Secrets and variables → Actions* :
 
 | Nom | Valeur |
 |---|---|
-| `VITE_SUPABASE_URL` | l'URL de votre projet Supabase |
-| `VITE_SUPABASE_ANON_KEY` | la clé **anon public** |
-| `VITE_VAPID_PUBLIC_KEY` | la clé **publique** VAPID (étape 4) |
+| `VITE_SUPABASE_URL` | URL du projet Supabase |
+| `VITE_SUPABASE_ANON_KEY` | clé **anon public** |
+| `VITE_VAPID_PUBLIC_KEY` | clé **publique** VAPID (étape 4) |
 
-### 8. Activer GitHub Pages
+### 9. Activer GitHub Pages
 
-*Dépôt → Settings → Pages → Build and deployment → Source : **GitHub Actions***.
+*Settings → Pages → Source : **GitHub Actions***, puis pousser sur `main`.
 
-Puis poussez sur `main` (ou lancez le workflow à la main). Le site sera sur
-`https://<utilisateur>.github.io/<repo>/`.
+Le workflow calcule `VITE_BASE_PATH=/<repo>/` et copie `index.html` vers `404.html` — c'est ce qui
+fait fonctionner les liens profonds `/s/{scan_point_id}`.
 
-> Le workflow calcule `VITE_BASE_PATH=/<nom-du-repo>/` automatiquement. Si vous
-> déployez sur un Pages *user/org* (`<utilisateur>.github.io`), remplacez cette
-> ligne du workflow par `VITE_BASE_PATH: /`.
->
-> Le workflow copie `index.html` vers `404.html` : c'est ce qui fait fonctionner
-> les liens profonds `/r/{bar_id}/t/{n}` sur GitHub Pages.
+### 10. Première soirée
 
-### 9. Premier lancement
+1. Ouvrir le site → **Créer un compte** (staff, e-mail + mot de passe)
+2. Créer le lieu (**Noti Club**) et la première soirée (**Noti Calling**) — la carte du club et
+   deux points de scan (**Entrée** + **Bar**) sont créés automatiquement
+3. Onglet **QR** → *Exporter les affiches (PDF)* → imprimer, plastifier, poser à l'entrée et au bar
+4. Onglet **Réglages** → renseigner l'**heure de fermeture** (elle déclenche la relance renforcée)
+5. Sur la tablette du bar : onglet **Bar** → *Alertes* pour recevoir les notifications
+6. Scanner le QR avec un téléphone et passer une commande de test
 
-1. Ouvrez le site → **Créer un compte** (choisissez « un seul bar » ou « groupe »).
-2. Créez votre établissement : une carte de démarrage (cocktails, shots, bières,
-   softs, snacks) et vos tables sont générées automatiquement.
-3. Onglet **QR** → *Exporter les QR (PDF, 6/page)* → imprimez, découpez, collez.
-4. Sur la tablette du comptoir : onglet **Live** → *Recevoir les alertes sur cet appareil*.
-5. Scannez un QR avec un autre téléphone et passez une commande de test.
-
-> 🔊 **L'alarme du comptoir** nécessite une première interaction sur la page
-> (WebAudio est bloqué sinon, surtout sur iOS). Touchez un onglet une fois après
-> avoir ouvert le tableau de bord — c'est fait automatiquement au premier tap.
+> 🔊 L'alarme du bar nécessite une première interaction sur la page (WebAudio est bloqué sinon,
+> surtout sur iOS). Un simple appui sur un onglet suffit.
 
 ---
 
@@ -218,38 +268,58 @@ npm install
 npm run dev              # http://localhost:5173
 ```
 
-En local, `VITE_BASE_PATH` vaut `/`, donc une URL de table ressemble à
-`http://localhost:5173/r/<bar_id>/t/3`.
+---
+
+## Points d'attention & décisions
+
+**URL de QR** — `/s/{scan_point_id}`. Format contractuel : `parseScanRoute` et `scanUrl` sont les
+deux seuls endroits qui le connaissent. Le type `table` existe déjà dans `scan_points` pour que le
+service à table (phase 2) n'impose aucune migration.
+
+**Sécurité des prix** — les commandes ne sont jamais insérées directement par le client : elles
+passent par la fonction `place_order()` (security definer), qui **recalcule tous les prix côté
+serveur** depuis la carte et applique la discipline de file. Il n'existe volontairement aucune
+policy d'`INSERT` sur `orders` / `order_items`.
+
+**Codes promo non énumérables** — aucune lecture publique sur `promo_codes` : la validation se fait
+côté serveur dans `place_order()`.
+
+**RLS stricte** — le client porte un vrai JWT (Phone Auth), donc chacun ne voit que ses propres
+commandes et le staff celles de ses événements. Rien n'est ouvert en lecture publique à part la
+vitrine (soirée, points de scan, carte).
+
+**Prix des vins** — vos deux cartes divergent : Minuty 12 cl à **8 €** (carte bar) vs **10 €**
+(carte Noti Calling), 75 cl à **39 €** vs **50 €**. Le seed retient les prix *carte bar* au verre
+et les prix *Noti Calling* à la bouteille. **À arbitrer** avant la première soirée
+(`0005_seed_noti_menu.sql`).
+
+**Mentions légales** — l'arrêté éthylotests est daté *24 août 2011* sur la carte bar et
+*24 août 2021* sur la carte Noti Calling. C'est **2011** ; le récapitulatif PDF utilise cette date.
+Corrigez aussi « **Ces** chèques ne sont pas acceptés » → « **Les** ».
+
+**Typographies** — Playfair Display / Great Vibes / Oswald / Jost sont chargées depuis Google Fonts.
+C'est un appel réseau externe : si vous voulez l'éviter (connectivité instable sur une péniche,
+ou hébergement strictement UE), self-hostez les `.woff2` dans `public/fonts/`.
 
 ---
 
-## Notes d'implémentation
+## Reste à faire
 
-**URL de QR** — `/r/{bar_id}/t/{table_number}`. Format contractuel : le parseur de
-route (`parseClientRoute`) et le générateur (`tableUrl`) sont les deux seuls endroits
-qui le connaissent. Ne le changez pas : des QR sont déjà collés sur des tables.
+Ces points de la feuille de route ne sont **pas** dans ce livrable :
 
-**Table créée à la volée** — si un QR pointe vers un numéro de table inconnu, la RPC
-`ensure_table` (security definer) la crée. Vous pouvez donc imprimer 50 QR et n'en
-coller que 30.
+| Sujet | Phase | Note |
+|---|---|---|
+| Univers **Food** | 1 | Aucune donnée fournie (tapas, planches) — la structure existe, la carte est vide |
+| Service à table (QR par table + routage) | 2 | `scan_points.kind = 'table'` déjà prévu |
+| **Apple Wallet** (pass de commande) | 2 | PassKit, non commencé |
+| Croisement avec la billetterie **Shotgun** | 3 | Côté interne |
+| **API POS** du Noti Club | 3 | Re-saisie manuelle au lancement, comme validé |
+| Assistant concierge (allergènes / compo) | 3 | Optionnel |
 
-**PDF maison** — `src/lib/pdf.js` rend chaque page dans un `<canvas>`, l'exporte en
-JPEG et l'embarque comme XObject `/DCTDecode` dans un PDF assemblé octet par octet
-(catalogue, pages, xref, trailer). Zéro dépendance, rendu identique partout.
-`html2canvas` est volontairement absent : il casse sur iOS Safari.
-
-**Partage iOS** — les exports passent par `navigator.share({ files })` quand
-disponible (feuille de partage iOS), sinon par un téléchargement classique.
-
-**TVA** — chaque article porte son taux (20 % alcool, 10 % soft/nourriture sur place,
-5,5 % à emporter). Le récapitulatif PDF affiche le détail « dont TVA » par taux.
-C'est un document informatif : **il ne vaut pas reçu de paiement**, et la mention
-figure explicitement en pied de page.
-
-**Modèle Claude** — `translate-menu` appelle `claude-opus-5` à effort `low` (tâche
-routinière), avec sortie JSON contrainte par schéma et repli serveur automatique
-(`fallbacks: "default"`) si un classifieur décline la requête.
+**Non testé en conditions réelles** : OTP SMS, Web Push, relances cron, envoi SMS et traduction
+dépendent tous des secrets ci-dessus. Le build passe et le schéma est cohérent, mais le parcours
+complet reste à valider sur un vrai projet Supabase.
 
 ---
 
-*TAPZ ne traite aucun paiement en ligne. Le règlement se fait au bar.*
+*Noti Calling ne traite aucun paiement en ligne. Le règlement se fait au bar.*

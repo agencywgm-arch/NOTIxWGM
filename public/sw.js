@@ -1,4 +1,4 @@
-/* TAPZ — Service Worker (Web Push + réveil de l'onglet suivi) */
+/* Noti Calling — Service Worker (Web Push + réveil de l'onglet de suivi) */
 
 self.addEventListener('install', (e) => {
   self.skipWaiting()
@@ -13,15 +13,15 @@ self.addEventListener('push', (event) => {
   try {
     data = event.data ? event.data.json() : {}
   } catch (_) {
-    data = { title: 'TAPZ', body: event.data ? event.data.text() : '' }
+    data = { title: 'Noti Calling', body: event.data ? event.data.text() : '' }
   }
 
-  const title = data.title || 'TAPZ'
+  const title = data.title || 'Noti Calling'
   const options = {
     body: data.body || 'Votre commande avance.',
     icon: data.icon || undefined,
     badge: data.badge || undefined,
-    tag: data.tag || 'tapz-order',
+    tag: data.tag || 'noti-order',
     renotify: true,
     requireInteraction: !!data.requireInteraction,
     vibrate: data.vibrate || [180, 80, 180, 80, 320],
@@ -36,7 +36,7 @@ self.addEventListener('push', (event) => {
         includeUncontrolled: true,
       })
       for (const c of clientsList) {
-        c.postMessage({ type: 'TAPZ_PUSH', payload: data })
+        c.postMessage({ type: 'NOTI_PUSH', payload: data })
       }
     })()
   )

@@ -1,4 +1,4 @@
-// TAPZ — Web Push (Service Worker + VAPID) et retours haptiques.
+// Noti Calling — Web Push (Service Worker + VAPID) et retours haptiques.
 import { supabase, BASE_PATH } from './supabase.js'
 
 const VAPID_PUBLIC = import.meta.env.VITE_VAPID_PUBLIC_KEY || ''
@@ -23,22 +23,23 @@ export async function registerServiceWorker() {
   try {
     return await navigator.serviceWorker.register(`${BASE_PATH}sw.js`, { scope: BASE_PATH })
   } catch (e) {
-    console.warn('[TAPZ] SW non enregistré', e)
+    console.warn('[Noti] SW non enregistré', e)
     return null
   }
 }
 
 /**
- * Abonne l'appareil aux notifications pour une commande (client) ou un bar (staff).
- * Renvoie true si l'abonnement est enregistré côté Supabase.
+ * Abonne l'appareil : côté client (rattaché au customer + événement) ou côté
+ * staff (rattaché au lieu). Renvoie true si l'abonnement est enregistré.
  */
-export async function subscribePush({ orderId = null, barId = null, role = 'customer' }) {
+export async function subscribePush({ customerId = null, eventId = null, venueId = null, role = 'customer' }) {
   if (!pushSupported() || !VAPID_PUBLIC) return false
   try {
     const permission = await Notification.requestPermission()
     if (permission !== 'granted') return false
 
-    const reg = (await navigator.serviceWorker.getRegistration(BASE_PATH)) || (await registerServiceWorker())
+    const reg =
+      (await navigator.serviceWorker.getRegistration(BASE_PATH)) || (await registerServiceWorker())
     if (!reg) return false
     await navigator.serviceWorker.ready
 
@@ -52,8 +53,9 @@ export async function subscribePush({ orderId = null, barId = null, role = 'cust
 
     const json = sub.toJSON()
     const { error } = await supabase.from('push_subscriptions').insert({
-      order_id: orderId,
-      bar_id: barId,
+      customer_id: customerId,
+      event_id: eventId,
+      venue_id: venueId,
       role,
       endpoint: json.endpoint,
       p256dh: json.keys?.p256dh,
@@ -63,17 +65,23 @@ export async function subscribePush({ orderId = null, barId = null, role = 'cust
     if (error && error.code !== '23505') throw error
     return true
   } catch (e) {
-    console.warn('[TAPZ] push', e)
+    console.warn('[Noti] push', e)
     return false
   }
 }
 
-/** Déclenche l'envoi via l'Edge Function send-push. */
-export async function sendPush(payload) {
+/**
+ * Notification métier (statut / diffusion / message individuel).
+ * Best-effort : ne bloque jamais l'action en cours (canal dégradé, §09).
+ */
+export async function notify(payload) {
   try {
-    await supabase.functions.invoke('send-push', { body: payload })
+    const { data, error } = await supabase.functions.invoke('notify', { body: payload })
+    if (error) throw error
+    return data
   } catch (e) {
-    console.warn('[TAPZ] send-push', e)
+    console.warn('[Noti] notify', e)
+    return null
   }
 }
 

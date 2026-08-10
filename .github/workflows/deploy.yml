@@ -1,4 +1,4 @@
-name: Build & Deploy TAPZ to GitHub Pages
+name: Build & Deploy Noti Calling to GitHub Pages
 
 on:
   push:
@@ -37,7 +37,7 @@ jobs:
           VITE_BASE_PATH: /${{ github.event.repository.name }}/
         run: npm run build
 
-      - name: SPA fallback (deep links /r/{bar}/t/{table})
+      - name: SPA fallback (liens profonds /s/{scan_point_id})
         run: cp dist/index.html dist/404.html
 
       - name: No Jekyll

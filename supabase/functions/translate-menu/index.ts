@@ -17,17 +17,10 @@
 import Anthropic from 'npm:@anthropic-ai/sdk@0.68.0'
 import { json, preflight } from '../_shared/cors.ts'
 
+// Feuille de route §04 : Français / Anglais / Espagnol uniquement. Pas de RTL.
 const LANG_NAMES: Record<string, string> = {
   en: 'anglais',
   es: 'espagnol',
-  it: 'italien',
-  de: 'allemand',
-  pt: 'portugais',
-  nl: 'néerlandais',
-  ar: 'arabe',
-  ja: 'japonais',
-  zh: 'chinois simplifié',
-  ru: 'russe',
 }
 
 const client = new Anthropic({ apiKey: Deno.env.get('ANTHROPIC_API_KEY') ?? '' })
@@ -92,7 +85,7 @@ Deno.serve(async (req) => {
   }
 
   const system = [
-    "Tu traduis la carte d'un bar / club (cocktails, spiritueux, shots, softs, snacks).",
+    "Tu traduis la carte d'un club (cocktails, spiritueux, vins, bouteilles, softs, food).",
     'Registre : court, commercial, lisible sur un téléphone dans un bar sombre.',
     'Conserve tels quels les noms propres, marques et noms de cocktails établis',
     "(Mojito, Negroni, Aperol Spritz…) : ne les traduis pas, ne les invente pas.",

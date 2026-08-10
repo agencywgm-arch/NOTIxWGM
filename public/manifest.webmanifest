@@ -1,10 +1,10 @@
 {
-  "name": "TAPZ",
-  "short_name": "TAPZ",
-  "description": "Scanne. Commande. Trinque.",
+  "name": "Noti Calling",
+  "short_name": "Noti",
+  "description": "Commandez, retirez au bar.",
   "start_url": ".",
   "display": "standalone",
-  "background_color": "#0A0713",
-  "theme_color": "#0A0713",
+  "background_color": "#F7F1E9",
+  "theme_color": "#F7F1E9",
   "orientation": "portrait"
 }

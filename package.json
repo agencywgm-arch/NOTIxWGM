@@ -1,9 +1,9 @@
 {
-  "name": "tapz",
+  "name": "noti-calling",
   "private": true,
   "version": "1.0.0",
   "type": "module",
-  "description": "TAPZ — commande par QR code pour bars & monde de la nuit",
+  "description": "Noti Calling — outil de commande par QR code pour soirée événementielle",
   "scripts": {
     "dev": "vite",
     "build": "vite build",

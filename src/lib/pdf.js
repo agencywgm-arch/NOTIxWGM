@@ -1,5 +1,5 @@
 // ============================================================
-// TAPZ — writer PDF maison (zéro dépendance).
+// Noti Calling — writer PDF maison (zéro dépendance).
 // Chaque page est un <canvas> rendu en JPEG puis embarqué comme XObject
 // /DCTDecode. Volontairement PAS de html2canvas : ça casse sur iOS Safari.
 // ============================================================
@@ -133,7 +133,7 @@ export function downloadBlob(blob, filename) {
  * Partage un fichier via la feuille de partage iOS (navigator.share), avec repli
  * sur le téléchargement classique. C'est le seul chemin fiable sur iPhone.
  */
-export async function shareOrDownload(blob, filename, title = 'TAPZ') {
+export async function shareOrDownload(blob, filename, title = 'Noti Calling') {
   try {
     const file = new File([blob], filename, { type: blob.type })
     if (navigator.canShare && navigator.canShare({ files: [file] })) {
@@ -207,7 +207,7 @@ export function loadImage(src) {
 }
 
 /** Exporte un canvas en PNG (partage iOS inclus). */
-export async function canvasToPng(canvas, filename, title = 'TAPZ') {
+export async function canvasToPng(canvas, filename, title = 'Noti Calling') {
   const blob = await new Promise((res) => canvas.toBlob(res, 'image/png'))
   return shareOrDownload(blob, filename, title)
 }
