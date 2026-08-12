@@ -4058,6 +4058,7 @@ function CarteTab({ venue, showToast }) {
   const [universe, setUniverse] = useState('drinks')
   const [editing, setEditing] = useState(null)
   const [busy, setBusy] = useState('')
+  const [preview, setPreview] = useState(false)
 
   const load = useCallback(async () => {
     const { data } = await supabase
@@ -4152,6 +4153,13 @@ function CarteTab({ venue, showToast }) {
         >
           {busy === 'seed' ? '…' : '🍸 Carte Noti Club'}
         </button>
+        <button
+          onClick={() => setPreview(true)}
+          style={{ ...S.btnGhost, minHeight: 46, width: 'auto', padding: '0 16px', fontSize: 12 }}
+          title="Voir la carte telle qu'un client la voit"
+        >
+          👁️ Aperçu client
+        </button>
       </div>
 
       <div style={{ display: 'flex', gap: 8, marginBottom: 16 }}>
@@ -4243,7 +4251,116 @@ function CarteTab({ venue, showToast }) {
         }}
         showToast={showToast}
       />
+
+      <ClientMenuPreview products={products} open={preview} onClose={() => setPreview(false)} />
     </div>
+  )
+}
+
+// --------------------------------------------------- Aperçu client (lecture seule)
+// Rejoue exactement le rendu de la carte côté client (mêmes composants,
+// même filtre is_listed), sans passer par un QR ni une identification.
+function ClientMenuPreview({ products, open, onClose }) {
+  const [lang, setLang] = useState('fr')
+  const [universe, setUniverse] = useState('drinks')
+  const [subcat, setSubcat] = useState(null)
+
+  const listed = products.filter((p) => p.is_listed)
+
+  const universesAvailable = UNIVERSES.filter((u) => listed.some((p) => p.universe === u.k))
+  const subcats = [...new Set(listed.filter((p) => p.universe === universe).map((p) => p.subcategory))]
+
+  useEffect(() => {
+    if (!open) return
+    if (universesAvailable.length && !universesAvailable.some((u) => u.k === universe)) {
+      setUniverse(universesAvailable[0].k)
+    }
+  }, [open, universesAvailable, universe])
+
+  useEffect(() => {
+    setSubcat((s) => (subcats.includes(s) ? s : subcats[0] ?? null))
+  }, [subcats])
+
+  const visible = listed.filter((p) => p.universe === universe && p.subcategory === subcat)
+
+  return (
+    <Sheet open={open} onClose={onClose} title="Aperçu — vue client" maxHeight="92vh">
+      <div style={{ display: 'flex', gap: 8, marginBottom: 14 }}>
+        {['fr', 'en', 'es'].map((l) => (
+          <button
+            key={l}
+            onClick={() => setLang(l)}
+            style={{
+              ...S.chip,
+              borderColor: lang === l ? C.indigo : C.lineHi,
+              color: lang === l ? C.indigo : C.dim,
+            }}
+          >
+            {l.toUpperCase()}
+          </button>
+        ))}
+      </div>
+
+      {listed.length === 0 ? (
+        <Empty emoji="📋" title="Aucun article publié" sub="Rien à afficher tant que la carte est vide ou entièrement retirée." />
+      ) : (
+        <>
+          <div style={{ display: 'flex', gap: 8, marginBottom: 14 }}>
+            {universesAvailable.map((u) => (
+              <button
+                key={u.k}
+                onClick={() => setUniverse(u.k)}
+                style={{
+                  flex: 1,
+                  minHeight: 62,
+                  borderRadius: 16,
+                  cursor: 'pointer',
+                  border: `1.5px solid ${universe === u.k ? C.terracotta : C.line}`,
+                  background: universe === u.k ? 'rgba(185,106,76,.09)' : C.paper,
+                  color: universe === u.k ? C.terracotta : C.dim,
+                  fontFamily: FONT.label,
+                  fontSize: 12,
+                  fontWeight: 600,
+                  letterSpacing: 0.8,
+                  textTransform: 'uppercase',
+                }}
+              >
+                <div style={{ fontSize: 20, marginBottom: 3 }}>{u.e}</div>
+                {lang === 'en' ? u.en : lang === 'es' ? u.es : u.t}
+              </button>
+            ))}
+          </div>
+
+          <div style={{ display: 'flex', gap: 8, overflowX: 'auto', paddingBottom: 4, marginBottom: 14 }}>
+            {subcats.map((c) => (
+              <button
+                key={c}
+                onClick={() => setSubcat(c)}
+                style={{
+                  ...S.chip,
+                  borderColor: subcat === c ? C.indigo : C.lineHi,
+                  color: subcat === c ? C.indigo : C.dim,
+                  background: subcat === c ? 'rgba(106,95,214,.08)' : 'transparent',
+                }}
+              >
+                {c}
+              </button>
+            ))}
+          </div>
+
+          <div style={{ display: 'grid', gap: 10 }}>
+            {visible.map((p) => (
+              <ProductCard key={p.id} product={p} lang={lang} disabled onAdd={() => {}} />
+            ))}
+            {visible.length === 0 && <Empty emoji="🍸" title="Rien dans cette sélection" />}
+          </div>
+        </>
+      )}
+
+      <div style={{ textAlign: 'center', color: C.faint, fontSize: 11, marginTop: 18 }}>
+        Aperçu en lecture seule — le bouton d’ajout est désactivé.
+      </div>
+    </Sheet>
   )
 }
 
