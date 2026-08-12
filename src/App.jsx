@@ -1359,7 +1359,9 @@ function OrderingApp({ event, venue, scanPoint, lang, setLang, customer, showToa
             {subcats.map((c) => (
               <div
                 key={c}
-                ref={(el) => (sectionRefs.current[c] = el)}
+                ref={(el) => {
+                  sectionRefs.current[c] = el
+                }}
                 data-subcat={c}
                 style={{ marginBottom: 26, scrollMarginTop: 108 }}
               >
@@ -4425,7 +4427,9 @@ function ClientMenuPreview({ products, open, onClose }) {
           {subcats.map((c) => (
             <div
               key={c}
-              ref={(el) => (sectionRefs.current[c] = el)}
+              ref={(el) => {
+                sectionRefs.current[c] = el
+              }}
               data-subcat={c}
               style={{ marginBottom: 22, scrollMarginTop: 8 }}
             >
