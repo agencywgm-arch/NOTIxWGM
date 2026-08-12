@@ -13,7 +13,7 @@
 --     2. RLS           — Row Level Security
 --     3. Realtime      — publication + vues de pilotage + reporting
 --     4. Storage       — bucket « noti » (logos, visuels produits)
---     5. Carte         — fonction seed_noti_menu() (carte du Noti Club)
+--     5. Carte         — fonction seed_noti_menu() (carte du Noti Club, rejouable)
 --
 --   Après exécution, il reste à faire dans l'interface Supabase :
 --     · Authentication → Providers → Email : activer (staff)
@@ -23,6 +23,9 @@
 --   NOTE — installation déjà existante (créée avant l'identification par
 --   simple prénom) : exécutez en plus supabase/migrations/0006_simplify_identity.sql
 --   une fois, pour retirer l'obligation de téléphone sur les commandes passées.
+--   Idem pour supabase/migrations/0007_reload_menu_idempotent.sql si la carte
+--   avait déjà été seedée avant ce fichier (pour pouvoir la recharger sans
+--   dupliquer les articles).
 --
 -- ############################################################################
 
@@ -1145,6 +1148,13 @@ create policy noti_delete on storage.objects
 --  Usage : select public.seed_noti_menu('<venue_id>');
 -- ============================================================================
 
+-- Rejouable à volonté (bouton « Recharger la carte Noti Club » côté app) : les
+-- articles déjà présents sont mis à jour (prix, description, variantes...) au
+-- lieu d'être dupliqués. Le statut « épuisé » / « retiré », lui, appartient au
+-- staff et n'est jamais écrasé par un rechargement.
+create unique index if not exists products_venue_universe_name_uniq
+  on public.products (venue_id, universe, name);
+
 create or replace function public.seed_noti_menu(p_venue uuid)
 returns int
 language plpgsql volatile security definer set search_path = public
@@ -1290,7 +1300,16 @@ begin
   (p_venue,'bottles','Bouteilles','Vodka Grey Goose','Bouteille servie à table',180,true,true,20,2,'[]'),
   (p_venue,'bottles','Bouteilles','Jack Daniel''s','Bouteille servie à table',180,false,true,20,3,'[]'),
   (p_venue,'bottles','Bouteilles','Tanqueray','Bouteille servie à table',180,false,true,20,4,'[]'),
-  (p_venue,'bottles','Bouteilles','Rhum Havana 7 ans','Bouteille servie à table',180,false,true,20,5,'[]');
+  (p_venue,'bottles','Bouteilles','Rhum Havana 7 ans','Bouteille servie à table',180,false,true,20,5,'[]')
+  on conflict (venue_id, universe, name) do update
+    set subcategory = excluded.subcategory,
+        description = excluded.description,
+        price       = excluded.price,
+        is_popular  = excluded.is_popular,
+        is_alcohol  = excluded.is_alcohol,
+        vat_rate    = excluded.vat_rate,
+        sort_order  = excluded.sort_order,
+        variants    = excluded.variants;
 
   get diagnostics n = row_count;
   return n;

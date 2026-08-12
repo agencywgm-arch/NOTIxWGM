@@ -120,6 +120,7 @@ supabase/
     0004_storage.sql       bucket "noti"
     0005_seed_noti_menu.sql      carte du Noti Club
     0006_simplify_identity.sql   retrait de l'obligation de téléphone (patch, installs existantes)
+    0007_reload_menu_idempotent.sql  carte rechargeable sans doublons (patch, installs existantes)
   functions/
     notify/                notification de statut / diffusion / message individuel
     reminders/             relances automatiques (cron)
@@ -145,12 +146,19 @@ feuille de route §10). Notez **Project URL** et **anon public key** (*Settings 
 3. `supabase/migrations/0003_realtime_reporting.sql`
 4. `supabase/migrations/0004_storage.sql`
 5. `supabase/migrations/0005_seed_noti_menu.sql` *(crée la fonction ; la carte est injectée
-   automatiquement à la création du lieu depuis l'app)*
+   automatiquement à la création du lieu depuis l'app, et rechargeable ensuite à volonté
+   depuis l'onglet **Carte** → bouton **🍸 Carte Noti Club**)*
 
 > **Installation déjà faite avant l'identification par simple prénom ?** Exécutez en plus
 > `supabase/migrations/0006_simplify_identity.sql` — il retire l'obligation de téléphone sans
-> toucher aux commandes déjà enregistrées. Une base qui n'a encore rien exécuté n'en a pas besoin :
-> `0001_schema.sql` contient déjà directement ce schéma.
+> toucher aux commandes déjà enregistrées.
+>
+> **Installation déjà faite avant que la carte soit rechargeable ?** Exécutez en plus
+> `supabase/migrations/0007_reload_menu_idempotent.sql` — sans lui, cliquer sur **Carte Noti Club**
+> une deuxième fois duplique tous les articles au lieu de les mettre à jour.
+>
+> Une base qui n'a encore rien exécuté n'a besoin ni de 0006 ni de 0007 : `0001_schema.sql` et
+> `0005_seed_noti_menu.sql` contiennent déjà directement ces versions.
 
 ### 3. Activer l'authentification
 

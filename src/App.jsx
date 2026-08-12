@@ -4079,6 +4079,26 @@ function CarteTab({ venue, showToast }) {
     load()
   }
 
+  async function reloadNotiMenu() {
+    if (
+      !window.confirm(
+        'Charger / mettre à jour la carte type Noti Club ? Les articles déjà présents (même nom, même univers) seront mis à jour — prix, description, formats — sans être dupliqués. Vos autres articles ne sont pas touchés, et le statut « épuisé »/« retiré » est conservé.'
+      )
+    )
+      return
+    setBusy('seed')
+    try {
+      const { data, error } = await supabase.rpc('seed_noti_menu', { p_venue: venue.id })
+      if (error) throw error
+      showToast(`Carte Noti Club chargée (${data} articles).`, 'ok')
+      load()
+    } catch (e) {
+      showToast(frError(e), 'error')
+    } finally {
+      setBusy('')
+    }
+  }
+
   async function translate(langs) {
     setBusy('translate')
     try {
@@ -4123,6 +4143,14 @@ function CarteTab({ venue, showToast }) {
           style={{ ...S.btnGhost, minHeight: 46, width: 'auto', padding: '0 16px', fontSize: 12 }}
         >
           {busy === 'translate' ? '…' : 'EN / ES'}
+        </button>
+        <button
+          disabled={busy === 'seed'}
+          onClick={reloadNotiMenu}
+          style={{ ...S.btnGhost, minHeight: 46, width: 'auto', padding: '0 16px', fontSize: 12 }}
+          title="Charger ou mettre à jour la carte type Noti Club"
+        >
+          {busy === 'seed' ? '…' : '🍸 Carte Noti Club'}
         </button>
       </div>
 
