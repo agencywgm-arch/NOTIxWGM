@@ -16,21 +16,19 @@
 --     5. Carte         — fonction seed_noti_menu() (carte du Noti Club)
 --
 --   Après exécution, il reste à faire dans l'interface Supabase :
---     · Authentication → Providers → Email : activer
---     · Authentication → Providers → Phone : activer
---       (+ « Test phone numbers » pour tester sans fournisseur SMS)
+--     · Authentication → Providers → Email : activer (staff)
+--     · Authentication → Providers → Anonymous : activer (clients — aucun
+--       SMS, aucun compte : le client saisit juste son prénom)
 --
---   RAPPEL : aucun paiement en ligne. Le règlement se fait au bar.
+--   NOTE — installation déjà existante (créée avant l'identification par
+--   simple prénom) : exécutez en plus supabase/migrations/0006_simplify_identity.sql
+--   une fois, pour retirer l'obligation de téléphone sur les commandes passées.
 --
 -- ############################################################################
 
-
-
-
--- ############################################################################
--- ###  0001_schema.sql
--- ############################################################################
-
+-- ============================================================================
+--  0001_schema.sql
+-- ============================================================================
 -- ============================================================================
 --  NOTI Calling — 0001_schema.sql
 --  Outil de commande par QR code pour soirée événementielle.
@@ -156,11 +154,12 @@ comment on column public.products.option_groups is
   '[{"id":"cuisson","name":"Cuisson","required":true,"min":1,"max":1,"options":[{"id":"s","name":"Saignant","price":0}]}]';
 
 -- ------------------------------------------------------------------ CLIENTS
--- Identité vérifiée par OTP SMS (Supabase Phone Auth). Base cross-événement.
+-- Identification légère : prénom + session anonyme Supabase (pas d'OTP SMS,
+-- pas de compte). `phone` reste disponible pour une saisie manuelle future.
 create table if not exists public.customers (
   id            uuid primary key default gen_random_uuid(),
   auth_user_id  uuid unique references auth.users (id) on delete set null,
-  phone         text not null unique,            -- E.164, vérifié
+  phone         text unique,
   first_name    text,
   last_name     text,
   email         text,
@@ -308,7 +307,7 @@ create index if not exists push_venue_idx    on public.push_subscriptions (venue
 --  FONCTIONS
 -- ============================================================================
 
-/** Le client courant (identifié par OTP SMS via Supabase Phone Auth). */
+/** Le client courant (identifié par prénom via une session anonyme Supabase). */
 create or replace function public.my_customer_id()
 returns uuid
 language sql stable security definer set search_path = public
@@ -349,40 +348,25 @@ as $$
 $$;
 
 -- ---------------------------------------------------------------------------
---  Inscription / mise à jour du client après vérification OTP.
---  Appelée par le front juste après verifyOtp() : auth.uid() est déjà le client.
+--  Inscription / mise à jour du client après identification.
+--  Appelée par le front juste après signInAnonymously() : auth.uid() est déjà
+--  le client, il n'y a rien d'autre à vérifier.
 -- ---------------------------------------------------------------------------
-create or replace function public.upsert_me(
-  p_first_name text,
-  p_last_name  text,
-  p_consents   jsonb default '{}'::jsonb
-)
+create or replace function public.upsert_me(p_first_name text)
 returns public.customers
 language plpgsql volatile security definer set search_path = public
 as $$
 declare
-  v_phone text;
-  v_row   public.customers;
+  v_row public.customers;
 begin
   if auth.uid() is null then
     raise exception 'not_authenticated';
   end if;
 
-  select phone into v_phone from auth.users where id = auth.uid();
-  if v_phone is null or length(v_phone) = 0 then
-    raise exception 'phone_not_verified';
-  end if;
-  if left(v_phone, 1) <> '+' then
-    v_phone := '+' || v_phone;
-  end if;
-
-  insert into public.customers (auth_user_id, phone, first_name, last_name, consents)
-  values (auth.uid(), v_phone, nullif(trim(p_first_name), ''), nullif(trim(p_last_name), ''), p_consents)
-  on conflict (phone) do update
-    set auth_user_id = excluded.auth_user_id,
-        first_name   = coalesce(excluded.first_name, public.customers.first_name),
-        last_name    = coalesce(excluded.last_name,  public.customers.last_name),
-        consents     = public.customers.consents || excluded.consents,
+  insert into public.customers (auth_user_id, first_name)
+  values (auth.uid(), nullif(trim(p_first_name), ''))
+  on conflict (auth_user_id) do update
+    set first_name   = coalesce(excluded.first_name, public.customers.first_name),
         last_seen_at = now()
   returning * into v_row;
 
@@ -582,7 +566,7 @@ $$;
 
 grant execute on function public.is_staff(uuid)                        to authenticated;
 grant execute on function public.is_event_staff(uuid)                  to authenticated;
-grant execute on function public.upsert_me(text, text, jsonb)          to authenticated;
+grant execute on function public.upsert_me(text)                       to authenticated;
 grant execute on function public.register_scan(uuid, int)              to authenticated;
 grant execute on function public.can_order(uuid)                       to authenticated;
 grant execute on function public.place_order(uuid, uuid, jsonb, text, text) to authenticated;
@@ -683,11 +667,9 @@ create trigger trg_venue_staff
   after insert on public.venues
   for each row execute function public.venue_owner_is_staff();
 
-
--- ############################################################################
--- ###  0002_rls.sql
--- ############################################################################
-
+-- ============================================================================
+--  0002_rls.sql
+-- ============================================================================
 -- ============================================================================
 --  NOTI Calling — 0002_rls.sql
 --
@@ -924,11 +906,9 @@ create policy push_delete on public.push_subscriptions
     or (venue_id is not null and public.is_staff(venue_id))
   );
 
-
--- ############################################################################
--- ###  0003_realtime_reporting.sql
--- ############################################################################
-
+-- ============================================================================
+--  0003_realtime_reporting.sql
+-- ============================================================================
 -- ============================================================================
 --  NOTI Calling — 0003_realtime_reporting.sql
 --  Temps réel (WebSocket, pas de polling — cf. feuille de route §14) + vues de
@@ -1093,11 +1073,9 @@ $$;
 
 grant execute on function public.close_event(uuid) to authenticated;
 
-
--- ############################################################################
--- ###  0004_storage.sql
--- ############################################################################
-
+-- ============================================================================
+--  0004_storage.sql
+-- ============================================================================
 -- ============================================================================
 --  NOTI Calling — 0004_storage.sql
 --  Bucket public « noti » : logos de lieu + visuels produits.
@@ -1144,11 +1122,9 @@ create policy noti_delete on storage.objects
     and public.is_staff(nullif(split_part(name, '/', 1), '')::uuid)
   );
 
-
--- ############################################################################
--- ###  0005_seed_noti_menu.sql
--- ############################################################################
-
+-- ============================================================================
+--  0005_seed_noti_menu.sql
+-- ============================================================================
 -- ============================================================================
 --  NOTI Calling — 0005_seed_noti_menu.sql
 --  Carte du NOTI CLUB, saisie depuis les cartes fournies (Drinks & Cocktails,
@@ -1322,3 +1298,4 @@ end;
 $$;
 
 grant execute on function public.seed_noti_menu(uuid) to authenticated;
+

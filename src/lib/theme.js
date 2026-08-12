@@ -192,16 +192,3 @@ export const phoneFR = (p) => {
   const local = d.startsWith('33') ? '0' + d.slice(2) : d
   return local.replace(/(\d{2})(?=\d)/g, '$1 ').trim()
 }
-
-/** Normalise un mobile FR en E.164 (+33…) pour l'OTP. */
-export function toE164(input) {
-  const raw = String(input || '').trim().replace(/[\s.\-()]/g, '')
-  if (raw.startsWith('+')) return raw
-  const d = raw.replace(/\D/g, '')
-  if (d.startsWith('33')) return `+${d}`
-  if (d.startsWith('0')) return `+33${d.slice(1)}`
-  if (d.length === 9) return `+33${d}`
-  return `+${d}`
-}
-
-export const isMobileFR = (p) => /^\+33[67]\d{8}$/.test(toE164(p)) || /^\+\d{8,15}$/.test(toE164(p))

@@ -31,7 +31,7 @@ export function scanUrl(scanPointId) {
   return `${origin}${BASE_PATH}s/${scanPointId}`.replace(/([^:]\/)\/+/g, '$1')
 }
 
-/** Messages d'erreur Supabase traduits, y compris ceux de l'auth par SMS. */
+/** Messages d'erreur Supabase traduits. */
 export function frError(err) {
   const raw = err?.message || String(err || '')
   const m = raw.toLowerCase()
@@ -43,24 +43,15 @@ export function frError(err) {
   if (m.includes('empty_cart')) return 'Votre panier est vide.'
   if (m.includes('product_unavailable')) return 'Un article de votre panier n’est plus disponible.'
   if (m.includes('variant_required')) return 'Choisissez un format pour chaque article.'
-  if (m.includes('not_a_customer')) return 'Identifiez-vous pour commander.'
-  if (m.includes('phone_not_verified')) return 'Numéro non vérifié. Recommencez la vérification par SMS.'
+  if (m.includes('not_a_customer') || m.includes('not_authenticated')) return 'Identifiez-vous pour commander.'
   if (m.includes('forbidden')) return 'Action non autorisée.'
 
   // Auth
+  if (m.includes('anonymous sign-ins are disabled'))
+    return "L'identification client n'est pas activée sur le projet Supabase (Authentication → Providers → Anonymous)."
   if (m.includes('invalid login credentials')) return 'E-mail ou mot de passe incorrect.'
   if (m.includes('user already registered') || m.includes('already been registered'))
     return 'Cet e-mail est déjà utilisé. Connectez-vous.'
-  if (m.includes('token has expired') || m.includes('otp_expired'))
-    return 'Le code a expiré. Demandez-en un nouveau.'
-  if (m.includes('invalid otp') || m.includes('token is invalid') || m.includes('otp'))
-    return 'Code incorrect. Vérifiez les 6 chiffres reçus par SMS.'
-  if (m.includes('sms') && m.includes('not') && m.includes('enabl'))
-    return "L'authentification par SMS n'est pas activée sur le projet Supabase."
-  if (m.includes('rate limit') || m.includes('too many') || m.includes('over_sms_send_rate_limit'))
-    return 'Trop de tentatives. Patientez une minute avant de réessayer.'
-  if (m.includes('invalid phone') || m.includes('phone'))
-    return 'Numéro de mobile invalide. Format attendu : 06 12 34 56 78.'
   if (m.includes('password should be at least'))
     return 'Le mot de passe doit faire au moins 6 caractères.'
   if (m.includes('failed to fetch') || m.includes('network'))

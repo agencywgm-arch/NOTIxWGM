@@ -37,9 +37,9 @@ feuille de route *v2.0 — août 2026* (cas pilote **Noti Club · Noti Calling**
 ### Côté client — `/s/{scan_point_id}`
 
 - Écran d'accueil aux couleurs Noti Calling (logo, contexte, point de scan)
-- **Identification obligatoire** : Nom + Prénom + Mobile, **vérifié par code SMS (OTP)**
-- **Consentements RGPD granulaires**, non pré-cochés, **horodatés** : CGU/CGV (obligatoire),
-  prospection, transmission à l'établissement
+- **Identification légère** : le prénom seul, aucun numéro ni SMS. Une session anonyme Supabase
+  (`signInAnonymously`) porte le JWT ; elle persiste sur l'appareil tant que le stockage local
+  n'est pas effacé
 - **Reconnaissance client au scan** : « Bon retour parmi nous », badge VIP, message dédié en cas
   d'incident (impayé passé)
 - **Espace commande en 3 univers** : Boissons au verre · Food · Bouteilles, avec sous-catégories
@@ -68,8 +68,10 @@ feuille de route *v2.0 — août 2026* (cas pilote **Noti Club · Noti Calling**
 - **Leaderboard temps réel** (qui commande le plus, panier cumulé)
 - **Diffusion à toute la soirée** (avec modèles prêts à l'emploi) et **messagerie individuelle**
   organisateur → client
-- **Base client cross-événement** : historique, nombre de soirées, taille du groupe,
-  **tags & segmentation** (VIP / habitué / gros panier / incident) — tags automatiques inclus
+- **Base client** : historique, nombre de soirées, taille du groupe, **tags & segmentation**
+  (VIP / habitué / gros panier / incident) — tags automatiques inclus. Le suivi cross-soirée
+  repose sur la session anonyme de l'appareil (pas de numéro) : il tient tant que le client garde
+  le même téléphone et ne vide pas son stockage local
 - **Reporting post-événement** : panier moyen, top produits, pic horaire, nouveaux vs récurrents,
   note moyenne — export **PDF** et **CSV**
 - **Clôture de soirée** : les commandes non réglées passent en « impayé », rattachées à
@@ -79,14 +81,15 @@ feuille de route *v2.0 — août 2026* (cas pilote **Noti Club · Noti Calling**
 
 | Déclencheur | Canal |
 |---|---|
-| Commande reçue | Push + SMS |
-| Commande prête | Push + SMS |
-| **Relance auto à 5 min** si non retirée | Push + SMS (Edge Function `reminders`, cron) |
-| **Relance renforcée 1 h avant fermeture** | Push + SMS, message impactant avec la conséquence explicite |
-| Diffusion / message individuel | Push + SMS |
+| Commande reçue | Push (+ SMS si un numéro est renseigné) |
+| Commande prête | Push (+ SMS si un numéro est renseigné) |
+| **Relance auto à 5 min** si non retirée | Push (+ SMS) — Edge Function `reminders`, cron |
+| **Relance renforcée 1 h avant fermeture** | Push (+ SMS), message impactant avec la conséquence explicite |
+| Diffusion / message individuel | Push (+ SMS) |
 
-**Canal dégradé non bloquant** : un SMS qui échoue ne bloque jamais une commande. La plateforme
-reste la source de vérité du suivi.
+**Canal dégradé non bloquant** : un SMS qui échoue — ou l'absence de numéro, le client
+n'en saisissant plus à l'identification — ne bloque jamais une commande. Le suivi temps réel
+(WebSocket) et le Web Push restent le canal principal ; la plateforme reste la source de vérité.
 
 ---
 
@@ -95,7 +98,7 @@ reste la source de vérité du suivi.
 | Couche | Choix |
 |---|---|
 | Front | React 19 + Vite (SPA), un gros `src/App.jsx`, styles en objets inline |
-| Back | Supabase — PostgreSQL + RLS + Auth (OTP SMS clients / e-mail staff) + Realtime + Edge Functions (Deno) + Storage |
+| Back | Supabase — PostgreSQL + RLS + Auth (session anonyme clients / e-mail staff) + Realtime + Edge Functions (Deno) + Storage |
 | QR | lib `qrcode` |
 | PDF / images | **Canvas 2D natif + writer PDF maison** (`src/lib/pdf.js`) — *pas* de `html2canvas` |
 | Déploiement | **Cloudflare Pages** (build depuis le dépôt), base path par `VITE_BASE_PATH` |
@@ -105,7 +108,7 @@ src/
   App.jsx                  tout l'applicatif (client + staff)
   lib/
     supabase.js            client, erreurs FR, scanUrl()
-    theme.js               charte Noti Calling + formats FR + normalisation E.164
+    theme.js               charte Noti Calling + formats FR
     pdf.js                 writer PDF maison, helpers Canvas, partage iOS
     push.js                Web Push (VAPID) + appel de la fonction notify
     sound.js               sonnerie client + alarme bar (WebAudio)
@@ -116,6 +119,7 @@ supabase/
     0003_realtime_reporting.sql  Realtime, vues de pilotage, event_report, close_event
     0004_storage.sql       bucket "noti"
     0005_seed_noti_menu.sql      carte du Noti Club
+    0006_simplify_identity.sql   retrait de l'obligation de téléphone (patch, installs existantes)
   functions/
     notify/                notification de statut / diffusion / message individuel
     reminders/             relances automatiques (cron)
@@ -143,18 +147,24 @@ feuille de route §10). Notez **Project URL** et **anon public key** (*Settings 
 5. `supabase/migrations/0005_seed_noti_menu.sql` *(crée la fonction ; la carte est injectée
    automatiquement à la création du lieu depuis l'app)*
 
+> **Installation déjà faite avant l'identification par simple prénom ?** Exécutez en plus
+> `supabase/migrations/0006_simplify_identity.sql` — il retire l'obligation de téléphone sans
+> toucher aux commandes déjà enregistrées. Une base qui n'a encore rien exécuté n'en a pas besoin :
+> `0001_schema.sql` contient déjà directement ce schéma.
+
 ### 3. Activer l'authentification
 
 **Deux modes coexistent** — ne configurez pas que l'un des deux :
 
 - **Staff** — *Authentication → Providers → **Email*** : activer.
   Pour démarrer sans friction, désactivez « Confirm email ».
-- **Clients** — *Authentication → Providers → **Phone*** : activer, puis choisir le fournisseur SMS
-  (Twilio, Twilio Verify, Vonage, MessageBird ou Textlocal) et renseigner ses identifiants.
-  C'est Supabase qui envoie l'OTP — vous n'avez **rien à coder**.
+- **Clients** — *Authentication → Providers → **Anonymous*** : activer. Le client saisit son
+  prénom, un clic déclenche `signInAnonymously()` — **aucun SMS, aucun compte, aucun fournisseur
+  à configurer.**
 
-> Sans le provider Phone configuré, le parcours client s'arrête à l'envoi du code.
-> C'est le seul point réellement bloquant pour tester de bout en bout.
+> Sans le provider Anonymous activé, l'écran d'identification renvoie une erreur. C'est le seul
+> point bloquant pour tester le parcours client de bout en bout — et il ne demande qu'un bouton à
+> cocher dans le dashboard.
 
 ### 4. Générer les clés VAPID (Web Push)
 
@@ -182,15 +192,15 @@ supabase secrets set \
 
 | Secret | Sert à | Si absent |
 |---|---|---|
-| `VAPID_*` | notifications Web Push | l'app marche, sans push |
-| `SMS_PROVIDER` + secrets du fournisseur | SMS de statut, relances, diffusion | les messages restent dans l'app (tracés, non envoyés) |
+| `VAPID_*` | notifications Web Push — canal principal du suivi client | l'app marche, sans push |
+| `SMS_PROVIDER` + secrets du fournisseur | SMS de statut, relances, diffusion — **optionnel** : le client n'a plus de numéro par défaut (identification au prénom seul), ce canal ne sert que si un téléphone est ajouté manuellement | les messages restent dans l'app (tracés, non envoyés) |
 | `CRON_SECRET` | protéger la fonction `reminders` | la fonction refuse tout appel |
 | `ANTHROPIC_API_KEY` | traduction auto FR → EN/ES | bouton de traduction en erreur |
 
 `SMS_PROVIDER` accepte `twilio`, `vonage`, `brevo`, `ovh` ou `none`. Les quatre sont implémentés
 derrière la même interface (`supabase/functions/_shared/sms.ts`) — vous basculez de l'un à l'autre
-sans toucher au code. **Ce module ne sert qu'aux notifications métier** ; l'OTP d'identification
-passe par Supabase Phone Auth (étape 3).
+sans toucher au code. Laissez `none` (ou omettez le secret) tant qu'aucun téléphone client n'est
+collecté : l'identification (étape 3) n'en a plus besoin, c'est une session anonyme Supabase.
 
 ### 6. Déployer les Edge Functions
 
@@ -320,9 +330,9 @@ policy d'`INSERT` sur `orders` / `order_items`.
 **Codes promo non énumérables** — aucune lecture publique sur `promo_codes` : la validation se fait
 côté serveur dans `place_order()`.
 
-**RLS stricte** — le client porte un vrai JWT (Phone Auth), donc chacun ne voit que ses propres
-commandes et le staff celles de ses événements. Rien n'est ouvert en lecture publique à part la
-vitrine (soirée, points de scan, carte).
+**RLS stricte** — le client porte un vrai JWT, même en session anonyme (`signInAnonymously`),
+donc chacun ne voit que ses propres commandes et le staff celles de ses événements. Rien n'est
+ouvert en lecture publique à part la vitrine (soirée, points de scan, carte).
 
 **Prix des vins** — vos deux cartes divergent : Minuty 12 cl à **8 €** (carte bar) vs **10 €**
 (carte Noti Calling), 75 cl à **39 €** vs **50 €**. Le seed retient les prix *carte bar* au verre
@@ -352,9 +362,9 @@ Ces points de la feuille de route ne sont **pas** dans ce livrable :
 | **API POS** du Noti Club | 3 | Re-saisie manuelle au lancement, comme validé |
 | Assistant concierge (allergènes / compo) | 3 | Optionnel |
 
-**Non testé en conditions réelles** : OTP SMS, Web Push, relances cron, envoi SMS et traduction
-dépendent tous des secrets ci-dessus. Le build passe et le schéma est cohérent, mais le parcours
-complet reste à valider sur un vrai projet Supabase.
+**Non testé en conditions réelles** : session anonyme, Web Push, relances cron, envoi SMS et
+traduction dépendent tous des réglages/secrets ci-dessus. Le build passe et le schéma est
+cohérent, mais le parcours complet reste à valider sur un vrai projet Supabase.
 
 ---
 
