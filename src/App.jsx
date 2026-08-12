@@ -2499,7 +2499,7 @@ function StaffLogin() {
         </form>
 
         <div style={{ textAlign: 'center', color: C.faint, fontSize: 11.5, marginTop: 20, lineHeight: 1.7 }}>
-          Les clients, eux, s’identifient par SMS en scannant le QR de la soirée.
+          Les clients, eux, se contentent de leur prénom en scannant le QR de la soirée.
         </div>
       </div>
     </div>
