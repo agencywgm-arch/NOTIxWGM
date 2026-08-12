@@ -1031,7 +1031,25 @@ function OrderingApp({ event, venue, scanPoint, lang, setLang, customer, showToa
     setSubcat((s) => (subcats.includes(s) ? s : subcats[0] ?? null))
   }, [subcats])
 
-  const visible = products.filter((p) => p.universe === universe && p.subcategory === subcat)
+  // ---- Défilement continu : chaque catégorie s'enchaîne, la puce active se
+  // repère automatiquement selon la section visible (pas besoin de cliquer). --
+  const sectionRefs = useRef({})
+  useEffect(() => {
+    const els = subcats.map((c) => sectionRefs.current[c]).filter(Boolean)
+    if (!els.length) return
+    const io = new IntersectionObserver(
+      (entries) => {
+        const hit = entries.filter((e) => e.isIntersecting)
+        if (hit.length) {
+          const top = hit.reduce((a, b) => (a.boundingClientRect.top < b.boundingClientRect.top ? a : b))
+          setSubcat(top.target.dataset.subcat)
+        }
+      },
+      { rootMargin: '-96px 0px -75% 0px', threshold: 0 }
+    )
+    els.forEach((el) => io.observe(el))
+    return () => io.disconnect()
+  }, [subcats])
 
   const subtotal = cart.reduce((s, l) => s + lineTotal(l), 0)
   const cartCount = cart.reduce((s, l) => s + l.quantity, 0)
@@ -1300,7 +1318,8 @@ function OrderingApp({ event, venue, scanPoint, lang, setLang, customer, showToa
               ))}
             </div>
 
-            {/* Sous-catégories */}
+            {/* Sous-catégories — ancres : un tap fait défiler jusqu'à la section,
+                la puce active suit ensuite le défilement toute seule. */}
             <div
               style={{
                 display: 'flex',
@@ -1308,12 +1327,23 @@ function OrderingApp({ event, venue, scanPoint, lang, setLang, customer, showToa
                 overflowX: 'auto',
                 paddingBottom: 4,
                 marginBottom: 14,
+                position: 'sticky',
+                top: 60,
+                zIndex: 40,
+                background: `${C.cream}f2`,
+                backdropFilter: 'blur(10px)',
+                marginLeft: -16,
+                marginRight: -16,
+                paddingLeft: 16,
+                paddingRight: 16,
               }}
             >
               {subcats.map((c) => (
                 <button
                   key={c}
-                  onClick={() => setSubcat(c)}
+                  onClick={() =>
+                    sectionRefs.current[c]?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+                  }
                   style={{
                     ...S.chip,
                     borderColor: subcat === c ? C.indigo : C.lineHi,
@@ -1326,23 +1356,35 @@ function OrderingApp({ event, venue, scanPoint, lang, setLang, customer, showToa
               ))}
             </div>
 
-            <div style={{ display: 'grid', gap: 10 }}>
-              {visible.map((p) => (
-                <ProductCard
-                  key={p.id}
-                  product={p}
-                  lang={lang}
-                  disabled={blocked}
-                  onAdd={() => {
-                    const needsChoice =
-                      (p.variants || []).length > 0 || (p.option_groups || []).length > 0
-                    if (needsChoice) setSheetProduct(p)
-                    else addToCart(p, null, [], 1)
-                  }}
-                />
-              ))}
-              {visible.length === 0 && <Empty emoji="🍸" title="Rien dans cette sélection" />}
-            </div>
+            {subcats.map((c) => (
+              <div
+                key={c}
+                ref={(el) => (sectionRefs.current[c] = el)}
+                data-subcat={c}
+                style={{ marginBottom: 26, scrollMarginTop: 108 }}
+              >
+                <div style={{ ...S.h2, marginBottom: 10, fontSize: 13 }}>{c}</div>
+                <div style={{ display: 'grid', gap: 10 }}>
+                  {products
+                    .filter((p) => p.universe === universe && p.subcategory === c)
+                    .map((p) => (
+                      <ProductCard
+                        key={p.id}
+                        product={p}
+                        lang={lang}
+                        disabled={blocked}
+                        onAdd={() => {
+                          const needsChoice =
+                            (p.variants || []).length > 0 || (p.option_groups || []).length > 0
+                          if (needsChoice) setSheetProduct(p)
+                          else addToCart(p, null, [], 1)
+                        }}
+                      />
+                    ))}
+                </div>
+              </div>
+            ))}
+            {subcats.length === 0 && <Empty emoji="🍸" title="Rien dans cette sélection" />}
           </>
         )}
       </div>
@@ -4281,7 +4323,25 @@ function ClientMenuPreview({ products, open, onClose }) {
     setSubcat((s) => (subcats.includes(s) ? s : subcats[0] ?? null))
   }, [subcats])
 
-  const visible = listed.filter((p) => p.universe === universe && p.subcategory === subcat)
+  // Défilement continu, comme côté client : la puce active suit le scroll.
+  const sectionRefs = useRef({})
+  useEffect(() => {
+    if (!open) return
+    const els = subcats.map((c) => sectionRefs.current[c]).filter(Boolean)
+    if (!els.length) return
+    const io = new IntersectionObserver(
+      (entries) => {
+        const hit = entries.filter((e) => e.isIntersecting)
+        if (hit.length) {
+          const top = hit.reduce((a, b) => (a.boundingClientRect.top < b.boundingClientRect.top ? a : b))
+          setSubcat(top.target.dataset.subcat)
+        }
+      },
+      { rootMargin: '-8px 0px -75% 0px', threshold: 0 }
+    )
+    els.forEach((el) => io.observe(el))
+    return () => io.disconnect()
+  }, [subcats, open])
 
   return (
     <Sheet open={open} onClose={onClose} title="Aperçu — vue client" maxHeight="92vh">
@@ -4331,11 +4391,25 @@ function ClientMenuPreview({ products, open, onClose }) {
             ))}
           </div>
 
-          <div style={{ display: 'flex', gap: 8, overflowX: 'auto', paddingBottom: 4, marginBottom: 14 }}>
+          <div
+            style={{
+              display: 'flex',
+              gap: 8,
+              overflowX: 'auto',
+              paddingBottom: 4,
+              marginBottom: 14,
+              position: 'sticky',
+              top: 0,
+              zIndex: 40,
+              background: C.creamSoft,
+            }}
+          >
             {subcats.map((c) => (
               <button
                 key={c}
-                onClick={() => setSubcat(c)}
+                onClick={() =>
+                  sectionRefs.current[c]?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+                }
                 style={{
                   ...S.chip,
                   borderColor: subcat === c ? C.indigo : C.lineHi,
@@ -4348,12 +4422,24 @@ function ClientMenuPreview({ products, open, onClose }) {
             ))}
           </div>
 
-          <div style={{ display: 'grid', gap: 10 }}>
-            {visible.map((p) => (
-              <ProductCard key={p.id} product={p} lang={lang} disabled onAdd={() => {}} />
-            ))}
-            {visible.length === 0 && <Empty emoji="🍸" title="Rien dans cette sélection" />}
-          </div>
+          {subcats.map((c) => (
+            <div
+              key={c}
+              ref={(el) => (sectionRefs.current[c] = el)}
+              data-subcat={c}
+              style={{ marginBottom: 22, scrollMarginTop: 8 }}
+            >
+              <div style={{ ...S.h2, marginBottom: 10, fontSize: 13 }}>{c}</div>
+              <div style={{ display: 'grid', gap: 10 }}>
+                {listed
+                  .filter((p) => p.universe === universe && p.subcategory === c)
+                  .map((p) => (
+                    <ProductCard key={p.id} product={p} lang={lang} disabled onAdd={() => {}} />
+                  ))}
+              </div>
+            </div>
+          ))}
+          {subcats.length === 0 && <Empty emoji="🍸" title="Rien dans cette sélection" />}
         </>
       )}
 
