@@ -1,8 +1,18 @@
-name: Build & Deploy Noti Calling to GitHub Pages
+name: Deploy to GitHub Pages (optionnel)
+
+# ⚠️ NON UTILISÉ PAR DÉFAUT.
+#
+# Le déploiement de Noti Calling passe par Cloudflare Pages (voir README) :
+# GitHub Pages ne fonctionne pas sur un dépôt privé en plan gratuit.
+#
+# Ce workflow reste ici au cas où le dépôt passerait en public. Il ne se
+# déclenche QUE manuellement (Actions → ce workflow → « Run workflow »), pour
+# ne pas échouer bruyamment à chaque push.
+#
+# Avant de l'utiliser : Settings → Pages → Source : GitHub Actions, et créer les
+# secrets VITE_SUPABASE_URL, VITE_SUPABASE_ANON_KEY, VITE_VAPID_PUBLIC_KEY.
 
 on:
-  push:
-    branches: [main]
   workflow_dispatch:
 
 permissions:
@@ -26,14 +36,14 @@ jobs:
           cache: npm
 
       - name: Install
-        run: npm ci || npm install
+        run: npm ci
 
       - name: Build
         env:
           VITE_SUPABASE_URL: ${{ secrets.VITE_SUPABASE_URL }}
           VITE_SUPABASE_ANON_KEY: ${{ secrets.VITE_SUPABASE_ANON_KEY }}
           VITE_VAPID_PUBLIC_KEY: ${{ secrets.VITE_VAPID_PUBLIC_KEY }}
-          # Pages "projet" => /<repo>/ ; Pages "user/org" => mettre "/"
+          # Pages « projet » => /<repo>/ ; Pages « user/org » => mettre "/"
           VITE_BASE_PATH: /${{ github.event.repository.name }}/
         run: npm run build
 

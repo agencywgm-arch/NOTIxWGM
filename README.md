@@ -98,7 +98,7 @@ reste la source de vérité du suivi.
 | Back | Supabase — PostgreSQL + RLS + Auth (OTP SMS clients / e-mail staff) + Realtime + Edge Functions (Deno) + Storage |
 | QR | lib `qrcode` |
 | PDF / images | **Canvas 2D natif + writer PDF maison** (`src/lib/pdf.js`) — *pas* de `html2canvas` |
-| Déploiement | GitHub Pages via GitHub Actions, base path par `VITE_BASE_PATH` |
+| Déploiement | **Cloudflare Pages** (build depuis le dépôt), base path par `VITE_BASE_PATH` |
 
 ```
 src/
@@ -228,22 +228,58 @@ select cron.schedule(
 );
 ```
 
-### 8. Configurer les secrets GitHub
+### 8. Déployer le front sur Cloudflare Pages
 
-*Settings → Secrets and variables → Actions* :
+Le dépôt étant **privé en plan gratuit**, GitHub Pages n'est pas utilisable (il exige un plan
+Pro/Team/Enterprise pour les dépôts privés). Le déploiement passe donc par **Cloudflare Pages** :
+gratuit, dépôts privés acceptés, usage commercial autorisé, bande passante illimitée.
 
-| Nom | Valeur |
-|---|---|
-| `VITE_SUPABASE_URL` | URL du projet Supabase |
-| `VITE_SUPABASE_ANON_KEY` | clé **anon public** |
-| `VITE_VAPID_PUBLIC_KEY` | clé **publique** VAPID (étape 4) |
+1. [dash.cloudflare.com](https://dash.cloudflare.com) → **Workers & Pages** → **Create** →
+   onglet **Pages** → **Connect to Git**
+2. Autoriser GitHub, sélectionner **`agencywgm-arch/NOTIxWGM`**
+3. Configuration de build :
 
-### 9. Activer GitHub Pages
+   | Réglage | Valeur |
+   |---|---|
+   | Production branch | `main` |
+   | Framework preset | *None* |
+   | Build command | `npm run build` |
+   | Build output directory | `dist` |
 
-*Settings → Pages → Source : **GitHub Actions***, puis pousser sur `main`.
+4. **Environment variables** (section *Production* — et *Preview* si vous voulez tester les branches) :
 
-Le workflow calcule `VITE_BASE_PATH=/<repo>/` et copie `index.html` vers `404.html` — c'est ce qui
-fait fonctionner les liens profonds `/s/{scan_point_id}`.
+   | Nom | Valeur |
+   |---|---|
+   | `VITE_SUPABASE_URL` | URL du projet Supabase |
+   | `VITE_SUPABASE_ANON_KEY` | clé **anon public** |
+   | `VITE_VAPID_PUBLIC_KEY` | clé **publique** VAPID (étape 4) |
+   | `VITE_BASE_PATH` | `/` |
+   | `NODE_VERSION` | `22` |
+
+5. **Save and Deploy**
+
+Le site sort sur `https://notixwgm.pages.dev` (ou le nom que vous choisissez). Pour un domaine
+propre : onglet **Custom domains** → `commande.noticalling.fr` par exemple.
+
+> ⚠️ **Les variables sont lues à la compilation**, pas à l'exécution : après toute modification
+> d'une variable d'environnement, il faut **relancer un déploiement** (*Deployments → … →
+> Retry deployment*) pour qu'elle soit prise en compte.
+
+> Le fichier `public/_redirects` (`/* /index.html 200`) assure le routage SPA. Sans lui, un QR
+> scanné renverrait une 404 au lieu d'ouvrir l'application. Il fonctionne aussi sur Netlify.
+
+**Si vous préférez repasser sur GitHub Pages plus tard** (dépôt rendu public, ou plan payant) :
+le workflow `.github/workflows/deploy-github-pages.yml` est prêt, en déclenchement manuel. Activez
+*Settings → Pages → Source : GitHub Actions*, créez les trois secrets, puis lancez-le depuis
+l'onglet Actions.
+
+### 9. Vérifier le déploiement
+
+Ouvrez l'URL Cloudflare :
+
+- Si l'écran **« Configuration requise »** s'affiche → les variables `VITE_SUPABASE_*` ne sont pas
+  arrivées dans le build. Vérifiez-les et relancez le déploiement.
+- Sinon, l'écran de connexion **Espace équipe** apparaît : le front est en ligne.
 
 ### 10. Première soirée
 

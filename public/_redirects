@@ -1,0 +1,4 @@
+# SPA fallback — Cloudflare Pages & Netlify
+# Indispensable pour les liens profonds /s/{scan_point_id} : sans cette règle,
+# un QR scanné renvoie une 404 au lieu de charger l'application.
+/*    /index.html   200
