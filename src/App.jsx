@@ -13,7 +13,7 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import QRCode from 'qrcode'
 import { supabase, isConfigured, frError, BASE_PATH, scanUrl } from './lib/supabase.js'
-import { C, S, FONT, GRADIENT, eur, timeFR, dateFR, phoneFR, toE164, isMobileFR } from './lib/theme.js'
+import { C, S, FONT, GRADIENT, eur, timeFR, dateFR, phoneFR } from './lib/theme.js'
 import {
   canvasesToPdfBlob,
   shareOrDownload,
@@ -110,15 +110,6 @@ const T = {
     start: 'Commander',
     identify: 'Faisons connaissance',
     firstName: 'Prénom',
-    lastName: 'Nom',
-    mobile: 'Mobile',
-    sendCode: 'Recevoir mon code',
-    codeSent: 'Code envoyé par SMS',
-    enterCode: 'Saisissez le code à 6 chiffres',
-    verify: 'Vérifier',
-    resend: 'Renvoyer le code',
-    consents: 'Conditions & consentements',
-    accept: 'J’accepte et j’entre',
     backAgain: 'Bon retour parmi nous',
     order: 'Commander',
     cart: 'Panier',
@@ -137,15 +128,6 @@ const T = {
     start: 'Order',
     identify: 'Let’s get to know you',
     firstName: 'First name',
-    lastName: 'Last name',
-    mobile: 'Mobile',
-    sendCode: 'Send my code',
-    codeSent: 'Code sent by SMS',
-    enterCode: 'Enter the 6-digit code',
-    verify: 'Verify',
-    resend: 'Resend code',
-    consents: 'Terms & consents',
-    accept: 'I accept and enter',
     backAgain: 'Welcome back',
     order: 'Order',
     cart: 'Cart',
@@ -164,15 +146,6 @@ const T = {
     start: 'Pedir',
     identify: 'Vamos a conocernos',
     firstName: 'Nombre',
-    lastName: 'Apellido',
-    mobile: 'Móvil',
-    sendCode: 'Enviar mi código',
-    codeSent: 'Código enviado por SMS',
-    enterCode: 'Introduce el código de 6 dígitos',
-    verify: 'Verificar',
-    resend: 'Reenviar código',
-    consents: 'Condiciones y consentimientos',
-    accept: 'Acepto y entro',
     backAgain: 'Bienvenido de nuevo',
     order: 'Pedir',
     cart: 'Carrito',
@@ -496,8 +469,7 @@ function ConfigScreen() {
 
 // ============================================================================
 //  CÔTÉ CLIENT — /s/{scan_point_id}
-//  Parcours : accueil → identification → OTP SMS → consentements RGPD →
-//             reconnaissance → espace commande
+//  Parcours : accueil → identification (prénom) → reconnaissance → espace commande
 // ============================================================================
 
 function ClientApp({ scanPointId, session }) {
@@ -507,7 +479,7 @@ function ClientApp({ scanPointId, session }) {
   const [customer, setCustomer] = useState(null)
   const [loading, setLoading] = useState(true)
   const [fatal, setFatal] = useState('')
-  const [step, setStep] = useState('welcome') // welcome|identify|otp|consents|hello|app
+  const [step, setStep] = useState('welcome') // welcome|identify|hello|app
   const [lang, setLang] = useState(LS.get('noti:lang', 'fr'))
   const [toast, showToast] = useToast()
 
@@ -564,17 +536,11 @@ function ClientApp({ scanPointId, session }) {
   // ---- Aiguillage du parcours ---------------------------------------------
   useEffect(() => {
     if (loading || fatal) return
-    if (!session?.user) {
-      setStep((s) => (s === 'welcome' || s === 'identify' || s === 'otp' ? s : 'welcome'))
+    if (!session?.user || !customer) {
+      setStep((s) => (s === 'welcome' || s === 'identify' ? s : 'welcome'))
       return
     }
-    if (!customer) return
-    const cgu = customer.consents?.cgu?.granted
-    if (!cgu) {
-      setStep('consents')
-    } else {
-      setStep((s) => (s === 'hello' || s === 'app' ? s : 'hello'))
-    }
+    setStep((s) => (s === 'hello' || s === 'app' ? s : 'hello'))
   }, [loading, fatal, session, customer])
 
   if (loading)
@@ -597,26 +563,12 @@ function ClientApp({ scanPointId, session }) {
   if (step === 'welcome')
     return <WelcomeScreen {...shared} onStart={() => setStep(session?.user ? 'hello' : 'identify')} />
 
-  if (step === 'identify' || step === 'otp')
+  if (step === 'identify')
     return (
       <IdentifyScreen
         {...shared}
-        step={step}
-        setStep={setStep}
         onVerified={async () => {
           await loadCustomer()
-        }}
-      />
-    )
-
-  if (step === 'consents')
-    return (
-      <ConsentsScreen
-        {...shared}
-        customer={customer}
-        onAccepted={async () => {
-          await loadCustomer()
-          setStep('hello')
         }}
       />
     )
@@ -787,59 +739,27 @@ function WelcomeScreen({ event, venue, scanPoint, lang, setLang, onStart }) {
   )
 }
 
-// ------------------------------------------------- Identification + OTP SMS
-function IdentifyScreen({ event, lang, step, setStep, onVerified, showToast }) {
+// ------------------------------------------------------------ Identification
+// Une session anonyme Supabase (aucun SMS, aucun compte) porte le prénom saisi.
+function IdentifyScreen({ lang, onVerified }) {
   const t = useT(lang)
   const [firstName, setFirstName] = useState(LS.get('noti:firstName', ''))
-  const [lastName, setLastName] = useState(LS.get('noti:lastName', ''))
-  const [mobile, setMobile] = useState(LS.get('noti:mobile', ''))
-  const [code, setCode] = useState('')
   const [busy, setBusy] = useState(false)
   const [err, setErr] = useState('')
-  const [cooldown, setCooldown] = useState(0)
 
-  useEffect(() => {
-    if (cooldown <= 0) return
-    const id = setInterval(() => setCooldown((c) => Math.max(0, c - 1)), 1000)
-    return () => clearInterval(id)
-  }, [cooldown])
-
-  async function sendCode() {
+  async function submit() {
     setErr('')
-    if (!firstName.trim() || !lastName.trim()) return setErr('Nom et prénom sont obligatoires.')
-    if (!isMobileFR(mobile)) return setErr('Numéro de mobile invalide.')
+    if (!firstName.trim()) return setErr('Le prénom est obligatoire.')
     setBusy(true)
     try {
-      const { error } = await supabase.auth.signInWithOtp({ phone: toE164(mobile) })
-      if (error) throw error
-      LS.set('noti:firstName', firstName)
-      LS.set('noti:lastName', lastName)
-      LS.set('noti:mobile', mobile)
-      setStep('otp')
-      setCooldown(45)
-    } catch (e) {
-      setErr(frError(e))
-    } finally {
-      setBusy(false)
-    }
-  }
-
-  async function verify() {
-    setErr('')
-    setBusy(true)
-    try {
-      const { error } = await supabase.auth.verifyOtp({
-        phone: toE164(mobile),
-        token: code.trim(),
-        type: 'sms',
-      })
-      if (error) throw error
-      const { error: e2 } = await supabase.rpc('upsert_me', {
-        p_first_name: firstName.trim(),
-        p_last_name: lastName.trim(),
-        p_consents: {},
-      })
+      const { data } = await supabase.auth.getSession()
+      if (!data.session) {
+        const { error } = await supabase.auth.signInAnonymously()
+        if (error) throw error
+      }
+      const { error: e2 } = await supabase.rpc('upsert_me', { p_first_name: firstName.trim() })
       if (e2) throw e2
+      LS.set('noti:firstName', firstName)
       await onVerified()
     } catch (e) {
       setErr(frError(e))
@@ -853,242 +773,41 @@ function IdentifyScreen({ event, lang, step, setStep, onVerified, showToast }) {
       <Keyframes />
       <div style={{ textAlign: 'center', marginBottom: 26 }}>
         <Logo />
-        <h1 style={{ ...S.h1, fontSize: 26, marginTop: 20 }}>
-          {step === 'identify' ? t.identify : t.codeSent}
-        </h1>
+        <h1 style={{ ...S.h1, fontSize: 26, marginTop: 20 }}>{t.identify}</h1>
         <div style={{ color: C.dim, fontSize: 13.5, marginTop: 8, lineHeight: 1.6 }}>
-          {step === 'identify'
-            ? 'Votre numéro nous sert à vous prévenir quand la commande est prête.'
-            : `Nous avons envoyé un code à 6 chiffres au ${phoneFR(mobile)}.`}
+          Comment souhaitez-vous être appelé·e au retrait de votre commande ?
         </div>
       </div>
 
       <div style={S.card}>
-        {step === 'identify' ? (
-          <>
-            <div style={{ display: 'flex', gap: 10 }}>
-              <div style={{ flex: 1 }}>
-                <Field label={t.firstName}>
-                  <input
-                    style={S.input}
-                    value={firstName}
-                    onChange={(e) => setFirstName(e.target.value)}
-                    autoComplete="given-name"
-                    placeholder="Alex"
-                  />
-                </Field>
-              </div>
-              <div style={{ flex: 1 }}>
-                <Field label={t.lastName}>
-                  <input
-                    style={S.input}
-                    value={lastName}
-                    onChange={(e) => setLastName(e.target.value)}
-                    autoComplete="family-name"
-                    placeholder="Martin"
-                  />
-                </Field>
-              </div>
-            </div>
+        <Field label={t.firstName}>
+          <input
+            style={S.input}
+            value={firstName}
+            onChange={(e) => setFirstName(e.target.value)}
+            onKeyDown={(e) => e.key === 'Enter' && submit()}
+            autoComplete="given-name"
+            placeholder="Alex"
+            autoFocus
+          />
+        </Field>
 
-            <Field label={t.mobile} hint="Format : 06 12 34 56 78">
-              <input
-                style={S.input}
-                value={mobile}
-                onChange={(e) => setMobile(e.target.value)}
-                type="tel"
-                inputMode="tel"
-                autoComplete="tel"
-                placeholder="06 12 34 56 78"
-              />
-            </Field>
-
-            {err && (
-              <div style={{ marginBottom: 12 }}>
-                <Banner tone="danger">{err}</Banner>
-              </div>
-            )}
-
-            <button disabled={busy} onClick={sendCode} style={{ ...S.btn, opacity: busy ? 0.6 : 1 }}>
-              {busy ? '…' : t.sendCode}
-            </button>
-          </>
-        ) : (
-          <>
-            <Field label={t.enterCode}>
-              <input
-                style={{
-                  ...S.input,
-                  fontSize: 28,
-                  letterSpacing: 10,
-                  textAlign: 'center',
-                  fontFamily: FONT.label,
-                  minHeight: 62,
-                }}
-                value={code}
-                onChange={(e) => setCode(e.target.value.replace(/\D/g, '').slice(0, 6))}
-                type="tel"
-                inputMode="numeric"
-                autoComplete="one-time-code"
-                maxLength={6}
-                autoFocus
-                placeholder="······"
-              />
-            </Field>
-
-            {err && (
-              <div style={{ marginBottom: 12 }}>
-                <Banner tone="danger">{err}</Banner>
-              </div>
-            )}
-
-            <button
-              disabled={busy || code.length < 6}
-              onClick={verify}
-              style={{ ...S.btn, opacity: busy || code.length < 6 ? 0.5 : 1 }}
-            >
-              {busy ? '…' : t.verify}
-            </button>
-
-            <div style={{ display: 'flex', gap: 8, marginTop: 10 }}>
-              <button
-                onClick={() => {
-                  setStep('identify')
-                  setCode('')
-                  setErr('')
-                }}
-                style={{ ...S.btnGhost, flex: 1, minHeight: 44, fontSize: 12 }}
-              >
-                Modifier
-              </button>
-              <button
-                disabled={cooldown > 0 || busy}
-                onClick={sendCode}
-                style={{ ...S.btnGhost, flex: 1, minHeight: 44, fontSize: 12, opacity: cooldown ? 0.5 : 1 }}
-              >
-                {cooldown > 0 ? `${t.resend} (${cooldown})` : t.resend}
-              </button>
-            </div>
-          </>
+        {err && (
+          <div style={{ marginBottom: 12 }}>
+            <Banner tone="danger">{err}</Banner>
+          </div>
         )}
+
+        <button disabled={busy} onClick={submit} style={{ ...S.btn, opacity: busy ? 0.6 : 1 }}>
+          {busy ? '…' : t.start}
+        </button>
       </div>
 
       <div style={{ textAlign: 'center', color: C.faint, fontSize: 11.5, marginTop: 20, lineHeight: 1.7 }}>
-        Données hébergées dans l’Union européenne.
+        En commandant, vous acceptez nos CGU — retrait et règlement au bar obligatoires.
         <br />
-        Aucun paiement en ligne — règlement au bar.
+        Données hébergées dans l’Union européenne. Aucun paiement en ligne.
       </div>
-    </div>
-  )
-}
-
-// -------------------------------------------------- Consentements RGPD (§10)
-const CGU_VERSION = '1.0'
-
-function ConsentsScreen({ lang, venue, customer, onAccepted, showToast }) {
-  const t = useT(lang)
-  const [cgu, setCgu] = useState(false)
-  const [prospection, setProspection] = useState(false)
-  const [shareVenue, setShareVenue] = useState(false)
-  const [busy, setBusy] = useState(false)
-
-  async function accept() {
-    if (!cgu) return
-    setBusy(true)
-    const at = new Date().toISOString()
-    const consents = {
-      cgu: { granted: true, at, version: CGU_VERSION },
-      prospection: { granted: prospection, at },
-      share_with_venue: { granted: shareVenue, at, venue: venue?.name ?? null },
-    }
-    const { error } = await supabase
-      .from('customers')
-      .update({ consents: { ...(customer?.consents || {}), ...consents } })
-      .eq('id', customer.id)
-    setBusy(false)
-    if (error) return showToast(frError(error), 'error')
-    await onAccepted()
-  }
-
-  const Check = ({ on, set, required, title, children }) => (
-    <button
-      onClick={() => set(!on)}
-      style={{
-        display: 'flex',
-        gap: 12,
-        alignItems: 'flex-start',
-        textAlign: 'left',
-        width: '100%',
-        padding: 14,
-        borderRadius: 14,
-        cursor: 'pointer',
-        border: `1.5px solid ${on ? C.terracotta : C.lineHi}`,
-        background: on ? 'rgba(185,106,76,.07)' : C.paper,
-        color: C.text,
-        marginBottom: 10,
-      }}
-    >
-      <div
-        style={{
-          width: 22,
-          height: 22,
-          flexShrink: 0,
-          marginTop: 2,
-          borderRadius: 6,
-          border: `2px solid ${on ? C.terracotta : C.lineHi}`,
-          background: on ? C.terracotta : 'transparent',
-          color: '#fff',
-          fontSize: 13,
-          display: 'flex',
-          alignItems: 'center',
-          justifyContent: 'center',
-          fontWeight: 700,
-        }}
-      >
-        {on ? '✓' : ''}
-      </div>
-      <div>
-        <div style={{ fontWeight: 500, fontSize: 14 }}>
-          {title}
-          {required && <span style={{ color: C.danger }}> *</span>}
-        </div>
-        <div style={{ fontSize: 12, color: C.dim, marginTop: 4, lineHeight: 1.5 }}>{children}</div>
-      </div>
-    </button>
-  )
-
-  return (
-    <div style={{ ...S.page, padding: 22 }}>
-      <Keyframes />
-      <div style={{ textAlign: 'center', margin: '10px 0 22px' }}>
-        <Logo />
-        <h1 style={{ ...S.h1, fontSize: 24, marginTop: 18 }}>{t.consents}</h1>
-      </div>
-
-      <Check on={cgu} set={setCgu} required title="J’accepte les CGU / CGV">
-        Elles incluent l’<strong>obligation de retirer et de régler</strong> ma commande au bar.
-        Toute commande non retirée en fin de soirée <strong>reste due et facturable</strong>,
-        avec suites possibles.
-      </Check>
-
-      <Check on={prospection} set={setProspection} title="Informez-moi des prochains événements">
-        Réutilisation de mon numéro à des fins de prospection pour d’autres soirées.
-      </Check>
-
-      <Check on={shareVenue} set={setShareVenue} title="Partage avec l’établissement">
-        Transmission de mes coordonnées à {venue?.name || 'l’établissement partenaire'}.
-      </Check>
-
-      <div style={{ margin: '16px 0' }}>
-        <Banner tone="info">
-          Consentements horodatés et enregistrés séparément. Données hébergées dans l’Union
-          européenne. Vous gardez à tout moment un droit d’accès et d’effacement.
-        </Banner>
-      </div>
-
-      <button disabled={!cgu || busy} onClick={accept} style={{ ...S.btn, opacity: !cgu || busy ? 0.5 : 1 }}>
-        {busy ? '…' : t.accept}
-      </button>
     </div>
   )
 }
@@ -2780,7 +2499,7 @@ function StaffLogin() {
         </form>
 
         <div style={{ textAlign: 'center', color: C.faint, fontSize: 11.5, marginTop: 20, lineHeight: 1.7 }}>
-          Les clients, eux, s’identifient par SMS en scannant le QR de la soirée.
+          Les clients, eux, se contentent de leur prénom en scannant le QR de la soirée.
         </div>
       </div>
     </div>
@@ -2862,8 +2581,8 @@ function StaffApp({ session }) {
       </div>
     )
 
-  // Un client identifié par SMS qui atterrirait sur la racine.
-  if (venues.length === 0 && session.user.phone) {
+  // Un client (session anonyme) qui atterrirait sur la racine staff.
+  if (venues.length === 0 && session.user.is_anonymous) {
     return (
       <div style={{ ...S.page, padding: 26, display: 'flex', flexDirection: 'column', justifyContent: 'center' }}>
         <Keyframes />
@@ -3798,7 +3517,7 @@ function CaisseTab({ event, venue, showToast }) {
                   {c?.first_name} {c?.last_name}
                 </div>
                 <div style={{ fontSize: 11.5, color: C.faint, marginTop: 2 }}>
-                  {phoneFR(c?.phone)} · {list.length} commande{list.length > 1 ? 's' : ''}
+                  {list.length} commande{list.length > 1 ? 's' : ''}
                 </div>
               </div>
               <div style={{ textAlign: 'right' }}>
@@ -4360,6 +4079,26 @@ function CarteTab({ venue, showToast }) {
     load()
   }
 
+  async function reloadNotiMenu() {
+    if (
+      !window.confirm(
+        'Charger / mettre à jour la carte type Noti Club ? Les articles déjà présents (même nom, même univers) seront mis à jour — prix, description, formats — sans être dupliqués. Vos autres articles ne sont pas touchés, et le statut « épuisé »/« retiré » est conservé.'
+      )
+    )
+      return
+    setBusy('seed')
+    try {
+      const { data, error } = await supabase.rpc('seed_noti_menu', { p_venue: venue.id })
+      if (error) throw error
+      showToast(`Carte Noti Club chargée (${data} articles).`, 'ok')
+      load()
+    } catch (e) {
+      showToast(frError(e), 'error')
+    } finally {
+      setBusy('')
+    }
+  }
+
   async function translate(langs) {
     setBusy('translate')
     try {
@@ -4404,6 +4143,14 @@ function CarteTab({ venue, showToast }) {
           style={{ ...S.btnGhost, minHeight: 46, width: 'auto', padding: '0 16px', fontSize: 12 }}
         >
           {busy === 'translate' ? '…' : 'EN / ES'}
+        </button>
+        <button
+          disabled={busy === 'seed'}
+          onClick={reloadNotiMenu}
+          style={{ ...S.btnGhost, minHeight: 46, width: 'auto', padding: '0 16px', fontSize: 12 }}
+          title="Charger ou mettre à jour la carte type Noti Club"
+        >
+          {busy === 'seed' ? '…' : '🍸 Carte Noti Club'}
         </button>
       </div>
 
@@ -4844,7 +4591,7 @@ function ClientsTab({ event, showToast }) {
                 {r.first_name} {r.last_name}
               </div>
               <div style={{ fontSize: 11.5, color: C.faint, marginTop: 2 }}>
-                {phoneFR(r.phone)} · {r.events_count || 1} soirée
+                {r.events_count || 1} soirée
                 {(r.events_count || 1) > 1 ? 's' : ''} · {r.orders_count || 0} commande
                 {(r.orders_count || 0) > 1 ? 's' : ''}
                 {r.group_size > 1 ? ` · groupe de ${r.group_size}` : ''}
@@ -4884,7 +4631,6 @@ function ClientsTab({ event, showToast }) {
           <>
             <div style={{ ...S.card, padding: 14, marginBottom: 14 }}>
               {[
-                ['Mobile vérifié', phoneFR(detail.phone)],
                 ['Soirées', detail.events_count || 1],
                 ['Commandes réglées', detail.orders_count || 0],
                 ['Total dépensé', eur(detail.total_spent)],
@@ -4917,21 +4663,6 @@ function ClientsTab({ event, showToast }) {
                     {on ? '✓ ' : ''}
                     {TAG_LABEL[t]}
                   </button>
-                )
-              })}
-            </div>
-
-            <div style={S.label}>Consentements</div>
-            <div style={{ ...S.card, padding: 12, fontSize: 12.5, color: C.dim }}>
-              {['cgu', 'prospection', 'share_with_venue'].map((k) => {
-                const c = detail.consents?.[k]
-                return (
-                  <div key={k} style={{ display: 'flex', justifyContent: 'space-between', padding: '3px 0' }}>
-                    <span>{k}</span>
-                    <span style={{ color: c?.granted ? C.ok : C.faint }}>
-                      {c?.granted ? `oui · ${dateFR(c.at)}` : 'non'}
-                    </span>
-                  </div>
                 )
               })}
             </div>

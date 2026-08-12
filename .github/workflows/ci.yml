@@ -1,7 +1,7 @@
 name: CI — build
 
 # Vérifie que l'application compile. Le déploiement lui-même est assuré par
-# Cloudflare Pages, qui construit directement depuis le dépôt (voir README).
+# Vercel, qui construit directement depuis le dépôt (voir README).
 on:
   push:
     branches: ['**']
