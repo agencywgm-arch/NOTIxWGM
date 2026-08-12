@@ -1,0 +1,22 @@
+{
+  "name": "noti-calling",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "description": "Noti Calling — outil de commande par QR code pour soirée événementielle",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "@supabase/supabase-js": "^2.45.4",
+    "qrcode": "^1.5.4",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-react": "^4.3.4",
+    "vite": "^6.0.5"
+  }
+}
