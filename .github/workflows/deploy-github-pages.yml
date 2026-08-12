@@ -2,7 +2,7 @@ name: Deploy to GitHub Pages (optionnel)
 
 # ⚠️ NON UTILISÉ PAR DÉFAUT.
 #
-# Le déploiement de Noti Calling passe par Cloudflare Pages (voir README) :
+# Le déploiement de Noti Calling passe par Vercel (voir README) :
 # GitHub Pages ne fonctionne pas sur un dépôt privé en plan gratuit.
 #
 # Ce workflow reste ici au cas où le dépôt passerait en public. Il ne se

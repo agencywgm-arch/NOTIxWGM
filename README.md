@@ -101,7 +101,7 @@ n'en saisissant plus à l'identification — ne bloque jamais une commande. Le s
 | Back | Supabase — PostgreSQL + RLS + Auth (session anonyme clients / e-mail staff) + Realtime + Edge Functions (Deno) + Storage |
 | QR | lib `qrcode` |
 | PDF / images | **Canvas 2D natif + writer PDF maison** (`src/lib/pdf.js`) — *pas* de `html2canvas` |
-| Déploiement | **Cloudflare Pages** (build depuis le dépôt), base path par `VITE_BASE_PATH` |
+| Déploiement | **Vercel** (build depuis le dépôt), routage SPA via `vercel.json`, base path par `VITE_BASE_PATH` |
 
 ```
 src/
@@ -238,25 +238,23 @@ select cron.schedule(
 );
 ```
 
-### 8. Déployer le front sur Cloudflare Pages
+### 8. Déployer le front sur Vercel
 
 Le dépôt étant **privé en plan gratuit**, GitHub Pages n'est pas utilisable (il exige un plan
-Pro/Team/Enterprise pour les dépôts privés). Le déploiement passe donc par **Cloudflare Pages** :
-gratuit, dépôts privés acceptés, usage commercial autorisé, bande passante illimitée.
+Pro/Team/Enterprise pour les dépôts privés). Le déploiement passe par **Vercel**, qui accepte les
+dépôts privés sur son plan gratuit *Hobby* et détecte Vite nativement (zéro configuration de build).
 
-1. [dash.cloudflare.com](https://dash.cloudflare.com) → **Workers & Pages** → **Create** →
-   onglet **Pages** → **Connect to Git**
-2. Autoriser GitHub, sélectionner **`agencywgm-arch/NOTIxWGM`**
-3. Configuration de build :
+> ⚠️ **Plan Hobby = usage non commercial.** Les conditions d'utilisation de Vercel réservent le
+> plan gratuit *Hobby* aux projets personnels / non commerciaux ; une exploitation pour le compte
+> d'un établissement qui facture ses clients (le cas du Noti Club) relève normalement du plan
+> **Pro** (~20 $/mois). Continuez sur Hobby pour la mise au point et les tests, mais prévoyez de
+> passer sur Pro avant la première vraie soirée facturée.
 
-   | Réglage | Valeur |
-   |---|---|
-   | Production branch | `main` |
-   | Framework preset | *None* |
-   | Build command | `npm run build` |
-   | Build output directory | `dist` |
-
-4. **Environment variables** (section *Production* — et *Preview* si vous voulez tester les branches) :
+1. [vercel.com/new](https://vercel.com/new) → **Import Git Repository**
+2. Autoriser l'accès GitHub, sélectionner **`agencywgm-arch/NOTIxWGM`**
+3. Vercel détecte automatiquement le framework (**Vite**) — build command et dossier de sortie
+   (`dist`) sont préremplis, rien à changer.
+4. **Environment Variables** (cochez *Production*, *Preview* et *Development*) :
 
    | Nom | Valeur |
    |---|---|
@@ -264,19 +262,19 @@ gratuit, dépôts privés acceptés, usage commercial autorisé, bande passante 
    | `VITE_SUPABASE_ANON_KEY` | clé **anon public** |
    | `VITE_VAPID_PUBLIC_KEY` | clé **publique** VAPID (étape 4) |
    | `VITE_BASE_PATH` | `/` |
-   | `NODE_VERSION` | `22` |
 
-5. **Save and Deploy**
+5. **Deploy**
 
-Le site sort sur `https://notixwgm.pages.dev` (ou le nom que vous choisissez). Pour un domaine
-propre : onglet **Custom domains** → `commande.noticalling.fr` par exemple.
+Le site sort sur `https://notixwgm.vercel.app` (ou le nom du projet choisi). Pour un domaine
+propre : onglet **Settings → Domains** → `commande.noticalling.fr` par exemple.
 
 > ⚠️ **Les variables sont lues à la compilation**, pas à l'exécution : après toute modification
-> d'une variable d'environnement, il faut **relancer un déploiement** (*Deployments → … →
-> Retry deployment*) pour qu'elle soit prise en compte.
+> d'une variable d'environnement, il faut **redéployer** (*Deployments → … → Redeploy*) pour
+> qu'elle soit prise en compte.
 
-> Le fichier `public/_redirects` (`/* /index.html 200`) assure le routage SPA. Sans lui, un QR
-> scanné renverrait une 404 au lieu d'ouvrir l'application. Il fonctionne aussi sur Netlify.
+> Le fichier `vercel.json` (rewrite `/(.*) → /index.html`) assure le routage SPA. Sans lui, un QR
+> scanné (`/s/{scan_point_id}`) renverrait une 404 au lieu d'ouvrir l'application. `public/_redirects`
+> reste dans le dépôt pour Cloudflare Pages / Netlify, au cas où vous en changeriez plus tard.
 
 **Si vous préférez repasser sur GitHub Pages plus tard** (dépôt rendu public, ou plan payant) :
 le workflow `.github/workflows/deploy-github-pages.yml` est prêt, en déclenchement manuel. Activez
@@ -285,10 +283,10 @@ l'onglet Actions.
 
 ### 9. Vérifier le déploiement
 
-Ouvrez l'URL Cloudflare :
+Ouvrez l'URL Vercel :
 
 - Si l'écran **« Configuration requise »** s'affiche → les variables `VITE_SUPABASE_*` ne sont pas
-  arrivées dans le build. Vérifiez-les et relancez le déploiement.
+  arrivées dans le build. Vérifiez-les et redéployez.
 - Sinon, l'écran de connexion **Espace équipe** apparaît : le front est en ligne.
 
 ### 10. Première soirée
