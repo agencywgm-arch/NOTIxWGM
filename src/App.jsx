@@ -3706,9 +3706,11 @@ function OrgaTab({ event, venue, showToast, onEventChange }) {
   const [dmFor, setDmFor] = useState(null)
   const [report, setReport] = useState(null)
   const [busy, setBusy] = useState(false)
+  const [promoCodes, setPromoCodes] = useState([])
+  const [editingPromo, setEditingPromo] = useState(null)
 
   const load = useCallback(async () => {
-    const [l, b, m] = await Promise.all([
+    const [l, b, m, pc] = await Promise.all([
       supabase.from('v_event_live').select('*').eq('event_id', event.id).maybeSingle(),
       supabase
         .from('v_event_leaderboard')
@@ -3723,10 +3725,16 @@ function OrgaTab({ event, venue, showToast, onEventChange }) {
         .neq('kind', 'status')
         .order('created_at', { ascending: false })
         .limit(10),
+      supabase
+        .from('promo_codes')
+        .select('*')
+        .eq('event_id', event.id)
+        .order('created_at', { ascending: false }),
     ])
     setLive(l.data || null)
     setBoard(b.data || [])
     setMessages(m.data || [])
+    setPromoCodes(pc.data || [])
   }, [event.id])
 
   useEffect(() => {
@@ -3917,6 +3925,69 @@ function OrgaTab({ event, venue, showToast, onEventChange }) {
         </button>
       </div>
 
+      {/* Codes promo */}
+      <div style={{ ...S.h2, marginBottom: 10 }}>Codes promo</div>
+      <div style={{ marginBottom: 10 }}>
+        <button onClick={() => setEditingPromo(EMPTY_PROMO)} style={{ ...S.btn, minHeight: 46 }}>
+          + Code promo
+        </button>
+      </div>
+      {promoCodes.length === 0 && <Empty emoji="🏷️" title="Aucun code promo" />}
+      <div style={{ display: 'grid', gap: 8, marginBottom: 18 }}>
+        {promoCodes.map((p) => (
+          <button
+            key={p.id}
+            onClick={() => setEditingPromo(p)}
+            style={{
+              ...S.card,
+              padding: 12,
+              display: 'flex',
+              justifyContent: 'space-between',
+              alignItems: 'center',
+              textAlign: 'left',
+              border: 'none',
+              cursor: 'pointer',
+              color: C.text,
+              opacity: p.active ? 1 : 0.55,
+            }}
+          >
+            <div style={{ minWidth: 0 }}>
+              <div style={{ fontFamily: FONT.label, fontWeight: 600, letterSpacing: 1, fontSize: 14 }}>
+                {p.code}
+              </div>
+              <div style={{ fontSize: 11.5, color: C.faint, marginTop: 2 }}>
+                {p.kind === 'percent' ? `-${p.value}%` : `-${eur(p.value)}`}
+                {p.min_total > 0 ? ` · dès ${eur(p.min_total)}` : ''}
+                {' · '}
+                {p.uses_count}
+                {p.max_uses ? `/${p.max_uses}` : ''} utilisé{p.uses_count > 1 ? 's' : ''}
+              </div>
+            </div>
+            <span
+              style={{
+                ...S.chip,
+                flexShrink: 0,
+                borderColor: p.active ? C.ok : C.lineHi,
+                color: p.active ? C.ok : C.faint,
+              }}
+            >
+              {p.active ? 'ACTIF' : 'INACTIF'}
+            </span>
+          </button>
+        ))}
+      </div>
+
+      <PromoCodeSheet
+        promo={editingPromo}
+        event={event}
+        onClose={() => setEditingPromo(null)}
+        onSaved={() => {
+          setEditingPromo(null)
+          load()
+        }}
+        showToast={showToast}
+      />
+
       {/* Clôture */}
       {event.is_active && (
         <button
@@ -4072,6 +4143,163 @@ function DirectMessageSheet({ target, event, onClose, onSent, showToast }) {
       >
         {busy ? 'Envoi…' : 'Envoyer'}
       </button>
+    </Sheet>
+  )
+}
+
+// ------------------------------------------------------------- CODES PROMO
+const EMPTY_PROMO = {
+  code: '',
+  label: '',
+  kind: 'percent',
+  value: 10,
+  min_total: 0,
+  max_uses: null,
+  active: true,
+}
+
+function PromoCodeSheet({ promo, event, onClose, onSaved, showToast }) {
+  const [f, setF] = useState(EMPTY_PROMO)
+  const [busy, setBusy] = useState(false)
+
+  useEffect(() => {
+    if (promo) setF({ ...EMPTY_PROMO, ...promo })
+  }, [promo])
+
+  if (!promo) return null
+  const set = (k, v) => setF((p) => ({ ...p, [k]: v }))
+
+  async function save() {
+    if (!f.code.trim()) return showToast('Le code est obligatoire.', 'error')
+    setBusy(true)
+    const payload = {
+      event_id: event.id,
+      code: f.code.trim().toUpperCase(),
+      label: f.label?.trim() || 'Promo',
+      kind: f.kind,
+      value: Number(f.value) || 0,
+      min_total: Number(f.min_total) || 0,
+      max_uses: f.max_uses === '' || f.max_uses == null ? null : Number(f.max_uses),
+      active: !!f.active,
+    }
+    const { error } = f.id
+      ? await supabase.from('promo_codes').update(payload).eq('id', f.id)
+      : await supabase.from('promo_codes').insert(payload)
+    setBusy(false)
+    if (error) return showToast(frError(error), 'error')
+    onSaved()
+  }
+
+  async function remove() {
+    setBusy(true)
+    const { error } = await supabase.from('promo_codes').delete().eq('id', f.id)
+    setBusy(false)
+    if (error) return showToast(frError(error), 'error')
+    onSaved()
+  }
+
+  return (
+    <Sheet open={!!promo} onClose={onClose} title={f.id ? 'Modifier le code' : 'Nouveau code promo'}>
+      <Field label="Code" hint="Ce que le client saisit au checkout">
+        <input
+          style={{ ...S.input, textTransform: 'uppercase', letterSpacing: 1.5, fontFamily: FONT.label }}
+          value={f.code}
+          onChange={(e) => set('code', e.target.value.toUpperCase())}
+          placeholder="NOTI10"
+        />
+      </Field>
+
+      <Field label="Libellé" hint="Usage interne, non affiché au client">
+        <input
+          style={S.input}
+          value={f.label || ''}
+          onChange={(e) => set('label', e.target.value)}
+          placeholder="Réduction soirée lancement"
+        />
+      </Field>
+
+      <Field label="Type de réduction">
+        <div style={{ display: 'flex', gap: 8 }}>
+          <button
+            onClick={() => set('kind', 'percent')}
+            style={{
+              ...S.chip,
+              flex: 1,
+              minHeight: 44,
+              borderColor: f.kind === 'percent' ? C.terracotta : C.lineHi,
+              color: f.kind === 'percent' ? C.terracotta : C.dim,
+            }}
+          >
+            Pourcentage %
+          </button>
+          <button
+            onClick={() => set('kind', 'amount')}
+            style={{
+              ...S.chip,
+              flex: 1,
+              minHeight: 44,
+              borderColor: f.kind === 'amount' ? C.terracotta : C.lineHi,
+              color: f.kind === 'amount' ? C.terracotta : C.dim,
+            }}
+          >
+            Montant fixe €
+          </button>
+        </div>
+      </Field>
+
+      <Field label={f.kind === 'percent' ? 'Valeur (%)' : 'Valeur (€)'}>
+        <input
+          style={S.input}
+          type="number"
+          min="0"
+          step={f.kind === 'percent' ? 1 : 0.5}
+          value={f.value}
+          onChange={(e) => set('value', e.target.value)}
+        />
+      </Field>
+
+      <Field label="Panier minimum" hint="0 = aucun minimum requis">
+        <input style={S.input} type="number" min="0" step="0.5" value={f.min_total} onChange={(e) => set('min_total', e.target.value)} />
+      </Field>
+
+      <Field label="Nombre d'utilisations max" hint="Vide = illimité">
+        <input
+          style={S.input}
+          type="number"
+          min="1"
+          value={f.max_uses ?? ''}
+          onChange={(e) => set('max_uses', e.target.value)}
+          placeholder="Illimité"
+        />
+      </Field>
+
+      <button
+        onClick={() => set('active', !f.active)}
+        style={{
+          ...S.btnGhost,
+          marginBottom: 16,
+          borderColor: f.active ? C.ok : C.lineHi,
+          color: f.active ? C.ok : C.dim,
+        }}
+      >
+        {f.active ? '✓ Actif' : 'Inactif'}
+      </button>
+
+      <button disabled={busy} onClick={save} style={{ ...S.btn, opacity: busy ? 0.6 : 1 }}>
+        {busy ? '…' : 'Enregistrer'}
+      </button>
+
+      {f.id && (
+        <button
+          disabled={busy}
+          onClick={() => {
+            if (confirm('Supprimer ce code promo ?')) remove()
+          }}
+          style={{ ...S.btnGhost, marginTop: 10, borderColor: C.danger, color: C.danger }}
+        >
+          Supprimer
+        </button>
+      )}
     </Sheet>
   )
 }
