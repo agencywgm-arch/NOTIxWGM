@@ -121,6 +121,7 @@ supabase/
     0005_seed_noti_menu.sql      carte du Noti Club
     0006_simplify_identity.sql   retrait de l'obligation de téléphone (patch, installs existantes)
     0007_reload_menu_idempotent.sql  carte rechargeable sans doublons (patch, installs existantes)
+    0008_promo_preview.sql       aperçu code promo au checkout (patch, installs existantes)
   functions/
     notify/                notification de statut / diffusion / message individuel
     reminders/             relances automatiques (cron)
@@ -148,6 +149,8 @@ feuille de route §10). Notez **Project URL** et **anon public key** (*Settings 
 5. `supabase/migrations/0005_seed_noti_menu.sql` *(crée la fonction ; la carte est injectée
    automatiquement à la création du lieu depuis l'app, et rechargeable ensuite à volonté
    depuis l'onglet **Carte** → bouton **🍸 Carte Noti Club**)*
+6. `supabase/migrations/0008_promo_preview.sql` *(aperçu du code promo au checkout — voir la note
+   ci-dessous, le fichier 0006 n'est utile qu'aux bases déjà existantes)*
 
 > **Installation déjà faite avant l'identification par simple prénom ?** Exécutez en plus
 > `supabase/migrations/0006_simplify_identity.sql` — il retire l'obligation de téléphone sans
@@ -159,6 +162,11 @@ feuille de route §10). Notez **Project URL** et **anon public key** (*Settings 
 >
 > Une base qui n'a encore rien exécuté n'a besoin ni de 0006 ni de 0007 : `0001_schema.sql` et
 > `0005_seed_noti_menu.sql` contiennent déjà directement ces versions.
+>
+> **`0008_promo_preview.sql` s'exécute dans tous les cas**, base neuve ou existante — c'est un
+> ajout pur (fonction `preview_promo`, aucune version antérieure à remplacer). Sans elle, le champ
+> code promo au checkout reste fonctionnel (validé côté serveur par `place_order()`), mais sans
+> aperçu ni message avant l'envoi de la commande.
 
 ### 3. Activer l'authentification
 

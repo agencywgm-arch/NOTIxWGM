@@ -1099,6 +1099,12 @@ function OrderingApp({ event, venue, scanPoint, lang, setLang, customer, showToa
     })
     if (error) throw error
 
+    // Le serveur ignore silencieusement un code invalide plutôt que de bloquer
+    // la commande (canal dégradé) — on prévient quand même le client ici.
+    if (promo && promo.trim() && !(Number(data?.discount) > 0)) {
+      showToast('Commande envoyée, mais le code promo n’a pas été appliqué (invalide, expiré ou conditions non remplies).', 'error')
+    }
+
     setCart([])
     setCartCheckout(false)
     setCartOpen(false)
@@ -1456,6 +1462,7 @@ function OrderingApp({ event, venue, scanPoint, lang, setLang, customer, showToa
       <CheckoutSheet
         open={checkoutOpen}
         lang={lang}
+        event={event}
         subtotal={subtotal}
         prepMin={event.default_prep_min ?? 1}
         onClose={() => setCartCheckout(false)}
@@ -1842,11 +1849,38 @@ function CartSheet({ open, cart, lang, subtotal, onClose, onQty, onCheckout }) {
 }
 
 // ----------------------------------------------------------------- Validation
-function CheckoutSheet({ open, lang, subtotal, prepMin, onClose, onSubmit }) {
+function CheckoutSheet({ open, lang, event, subtotal, prepMin, onClose, onSubmit }) {
   const t = useT(lang)
   const [note, setNote] = useState('')
   const [promo, setPromo] = useState('')
+  const [promoResult, setPromoResult] = useState(null) // null tant que non vérifié
+  const [checkingPromo, setCheckingPromo] = useState(false)
   const [busy, setBusy] = useState(false)
+
+  useEffect(() => {
+    setPromoResult(null)
+  }, [promo, open])
+
+  async function applyPromo() {
+    if (!promo.trim()) return
+    setCheckingPromo(true)
+    try {
+      const { data, error } = await supabase.rpc('preview_promo', {
+        p_event: event.id,
+        p_code: promo.trim(),
+        p_subtotal: subtotal,
+      })
+      if (error) throw error
+      setPromoResult(data)
+    } catch (e) {
+      setPromoResult({ valid: false })
+    } finally {
+      setCheckingPromo(false)
+    }
+  }
+
+  const discount = promoResult?.valid ? Number(promoResult.discount) : 0
+  const total = Math.max(0, subtotal - discount)
 
   return (
     <Sheet open={open} onClose={onClose} title="Valider la commande">
@@ -1860,12 +1894,37 @@ function CheckoutSheet({ open, lang, subtotal, prepMin, onClose, onSubmit }) {
       </Field>
 
       <Field label={t.promo}>
-        <input
-          style={{ ...S.input, textTransform: 'uppercase' }}
-          value={promo}
-          onChange={(e) => setPromo(e.target.value)}
-          placeholder="Optionnel"
-        />
+        <div style={{ display: 'flex', gap: 8 }}>
+          <input
+            style={{ ...S.input, textTransform: 'uppercase', flex: 1 }}
+            value={promo}
+            onChange={(e) => setPromo(e.target.value)}
+            onKeyDown={(e) => e.key === 'Enter' && applyPromo()}
+            placeholder="Optionnel"
+          />
+          <button
+            disabled={!promo.trim() || checkingPromo}
+            onClick={applyPromo}
+            style={{
+              ...S.btnGhost,
+              width: 'auto',
+              minHeight: 'auto',
+              padding: '0 18px',
+              opacity: !promo.trim() || checkingPromo ? 0.5 : 1,
+            }}
+          >
+            {checkingPromo ? '…' : 'Vérifier'}
+          </button>
+        </div>
+        {promoResult && (
+          <div style={{ marginTop: 8 }}>
+            {promoResult.valid ? (
+              <Banner tone="ok">Code valide — réduction de {eur(discount)} appliquée ci-dessous.</Banner>
+            ) : (
+              <Banner tone="danger">Code invalide, expiré, épuisé ou panier insuffisant.</Banner>
+            )}
+          </div>
+        )}
       </Field>
 
       <div
@@ -1881,8 +1940,15 @@ function CheckoutSheet({ open, lang, subtotal, prepMin, onClose, onSubmit }) {
         }}
       >
         <span style={{ ...S.label, marginBottom: 0 }}>{t.total}</span>
-        <span style={{ ...S.money, fontSize: 25, fontWeight: 600, color: C.terracotta }}>
-          {eur(subtotal)}
+        <span style={{ display: 'flex', alignItems: 'baseline', gap: 8 }}>
+          {discount > 0 && (
+            <span style={{ textDecoration: 'line-through', color: C.faint, fontSize: 14 }}>
+              {eur(subtotal)}
+            </span>
+          )}
+          <span style={{ ...S.money, fontSize: 25, fontWeight: 600, color: C.terracotta }}>
+            {eur(total)}
+          </span>
         </span>
       </div>
 
