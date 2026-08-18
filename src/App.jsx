@@ -3970,23 +3970,86 @@ function OrgaTab({ event, venue, showToast, onEventChange }) {
     setReport(data)
   }
 
-  function exportCsv() {
+  async function exportCsv() {
     if (!board.length) return showToast('Rien à exporter.', 'error')
-    const head = ['Prénom', 'Nom', 'Tags', 'Commandes', 'Total EUR', 'Dernière commande']
-    const rows = board.map((r) => [
-      r.first_name ?? '',
-      r.last_name ?? '',
-      (r.tags || []).join('|'),
-      r.orders_count,
-      Number(r.total_spent).toFixed(2),
-      r.last_order_at ? dateFR(r.last_order_at) : '',
-    ])
-    const csv =
-      '﻿' +
-      [head, ...rows]
-        .map((r) => r.map((c) => `"${String(c).replace(/"/g, '""')}"`).join(';'))
-        .join('\r\n')
-    downloadBlob(new Blob([csv], { type: 'text/csv;charset=utf-8' }), `noti-${event.id.slice(0, 8)}.csv`)
+    setBusy(true)
+    try {
+      const ids = board.map((r) => r.customer_id)
+
+      const [{ data: custs }, { data: att }, { data: ords }] = await Promise.all([
+        supabase.from('customers').select('id, email').in('id', ids),
+        supabase
+          .from('attendances')
+          .select('customer_id, first_scan_at, scan_points ( label, kind )')
+          .eq('event_id', event.id),
+        supabase
+          .from('orders')
+          .select('customer_id, order_items ( name_snapshot, quantity, variant_label )')
+          .eq('event_id', event.id)
+          .neq('status', 'CANCELLED'),
+      ])
+
+      const emailById = Object.fromEntries((custs || []).map((c) => [c.id, c.email || '']))
+
+      const scanLabel = (sp) =>
+        sp?.label || (sp?.kind === 'entrance' ? 'Entrée' : sp?.kind === 'bar' ? 'Bar' : sp?.kind || '')
+      const scanById = Object.fromEntries(
+        (att || []).map((a) => [
+          a.customer_id,
+          { label: scanLabel(a.scan_points), at: a.first_scan_at ? `${dateFR(a.first_scan_at)} ${timeFR(a.first_scan_at)}` : '' },
+        ])
+      )
+
+      const itemsById = {}
+      for (const o of ords || []) {
+        const counts = itemsById[o.customer_id] || (itemsById[o.customer_id] = {})
+        for (const it of o.order_items || []) {
+          const key = it.variant_label ? `${it.name_snapshot} (${it.variant_label})` : it.name_snapshot
+          counts[key] = (counts[key] || 0) + it.quantity
+        }
+      }
+      const itemsSummary = (customerId) => {
+        const counts = itemsById[customerId] || {}
+        return Object.entries(counts)
+          .map(([name, qty]) => `${qty}× ${name}`)
+          .join(', ')
+      }
+
+      const head = [
+        'Prénom',
+        'Nom',
+        'E-mail',
+        'Point de scan',
+        'Heure d’entrée',
+        'Commande',
+        'Tags',
+        'Commandes',
+        'Total EUR',
+        'Dernière commande',
+      ]
+      const rows = board.map((r) => [
+        r.first_name ?? '',
+        r.last_name ?? '',
+        emailById[r.customer_id] ?? '',
+        scanById[r.customer_id]?.label ?? '',
+        scanById[r.customer_id]?.at ?? '',
+        itemsSummary(r.customer_id),
+        (r.tags || []).join('|'),
+        r.orders_count,
+        Number(r.total_spent).toFixed(2),
+        r.last_order_at ? dateFR(r.last_order_at) : '',
+      ])
+      const csv =
+        '﻿' +
+        [head, ...rows]
+          .map((r) => r.map((c) => `"${String(c).replace(/"/g, '""')}"`).join(';'))
+          .join('\r\n')
+      downloadBlob(new Blob([csv], { type: 'text/csv;charset=utf-8' }), `noti-${event.id.slice(0, 8)}.csv`)
+    } catch (e) {
+      showToast(frError(e), 'error')
+    } finally {
+      setBusy(false)
+    }
   }
 
   async function exportReportPdf() {
@@ -4007,6 +4070,7 @@ function OrgaTab({ event, venue, showToast, onEventChange }) {
     <div>
       {/* Temps réel */}
       <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginBottom: 14 }}>
+        {stat('Scans QR', live?.present_count ?? 0, C.indigo)}
         {stat('Présents', live?.headcount ?? 0, C.indigo)}
         {stat('En prépa', live?.in_preparation ?? 0, C.navy)}
         {stat('À retirer', live?.awaiting_pickup ?? 0, C.terracotta)}
@@ -4131,8 +4195,8 @@ function OrgaTab({ event, venue, showToast, onEventChange }) {
             </button>
           </>
         )}
-        <button onClick={exportCsv} style={S.btnGhost}>
-          Exporter les clients (CSV)
+        <button disabled={busy} onClick={exportCsv} style={{ ...S.btnGhost, opacity: busy ? 0.6 : 1 }}>
+          {busy ? '…' : 'Exporter les clients (CSV)'}
         </button>
       </div>
 
