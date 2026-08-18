@@ -47,6 +47,8 @@ export function frError(err) {
   if (m.includes('forbidden')) return 'Action non autorisée.'
   if (m.includes('scan_point_orphan'))
     return 'Ce QR code ne pointe plus vers une soirée valide. Demandez au staff un QR à jour.'
+  if (m.includes('missing_profile')) return 'Prénom et nom sont obligatoires.'
+  if (m.includes('invalid_email')) return 'Adresse e-mail invalide.'
 
   // Auth
   if (m.includes('anonymous sign-ins are disabled'))

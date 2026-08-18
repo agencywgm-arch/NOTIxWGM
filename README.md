@@ -37,9 +37,10 @@ feuille de route *v2.0 — août 2026* (cas pilote **Noti Club · Noti Calling**
 ### Côté client — `/s/{scan_point_id}`
 
 - Écran d'accueil aux couleurs Noti Calling (logo, contexte, point de scan)
-- **Identification légère** : le prénom seul, aucun numéro ni SMS. Une session anonyme Supabase
-  (`signInAnonymously`) porte le JWT ; elle persiste sur l'appareil tant que le stockage local
-  n'est pas effacé
+- **Identification obligatoire** : prénom, nom et e-mail (aucun numéro ni SMS) — la commande ne
+  peut pas être envoyée sans cette fiche, exploitable ensuite côté CRM (relances, historique,
+  profil). Une session anonyme Supabase (`signInAnonymously`) porte le JWT ; elle persiste sur
+  l'appareil tant que le stockage local n'est pas effacé
 - **Reconnaissance client au scan** : « Bon retour parmi nous », badge VIP, message dédié en cas
   d'incident (impayé passé)
 - **Espace commande en 3 univers** : Boissons au verre · Food · Bouteilles, avec sous-catégories
@@ -122,6 +123,7 @@ supabase/
     0006_simplify_identity.sql   retrait de l'obligation de téléphone (patch, installs existantes)
     0007_reload_menu_idempotent.sql  carte rechargeable sans doublons (patch, installs existantes)
     0008_promo_preview.sql       aperçu code promo au checkout (patch, installs existantes)
+    0009_require_profile.sql     prénom + nom + e-mail obligatoires (patch, installs existantes)
   functions/
     notify/                notification de statut / diffusion / message individuel
     reminders/             relances automatiques (cron)
@@ -160,8 +162,12 @@ feuille de route §10). Notez **Project URL** et **anon public key** (*Settings 
 > `supabase/migrations/0007_reload_menu_idempotent.sql` — sans lui, cliquer sur **Carte Noti Club**
 > une deuxième fois duplique tous les articles au lieu de les mettre à jour.
 >
-> Une base qui n'a encore rien exécuté n'a besoin ni de 0006 ni de 0007 : `0001_schema.sql` et
-> `0005_seed_noti_menu.sql` contiennent déjà directement ces versions.
+> **Installation déjà faite avant que nom et e-mail soient obligatoires ?** Exécutez en plus
+> `supabase/migrations/0009_require_profile.sql` — sinon `upsert_me()` continue d'accepter le
+> prénom seul.
+>
+> Une base qui n'a encore rien exécuté n'a besoin ni de 0006, ni de 0007, ni de 0009 :
+> `0001_schema.sql` et `0005_seed_noti_menu.sql` contiennent déjà directement ces versions.
 >
 > **`0008_promo_preview.sql` s'exécute dans tous les cas**, base neuve ou existante — c'est un
 > ajout pur (fonction `preview_promo`, aucune version antérieure à remplacer). Sans elle, le champ
@@ -209,7 +215,7 @@ supabase secrets set \
 | Secret | Sert à | Si absent |
 |---|---|---|
 | `VAPID_*` | notifications Web Push — canal principal du suivi client | l'app marche, sans push |
-| `SMS_PROVIDER` + secrets du fournisseur | SMS de statut, relances, diffusion — **optionnel** : le client n'a plus de numéro par défaut (identification au prénom seul), ce canal ne sert que si un téléphone est ajouté manuellement | les messages restent dans l'app (tracés, non envoyés) |
+| `SMS_PROVIDER` + secrets du fournisseur | SMS de statut, relances, diffusion — **optionnel** : le client n'a pas de numéro par défaut (identification par prénom/nom/e-mail, pas de téléphone), ce canal ne sert que si un téléphone est ajouté manuellement | les messages restent dans l'app (tracés, non envoyés) |
 | `CRON_SECRET` | protéger la fonction `reminders` | la fonction refuse tout appel |
 | `ANTHROPIC_API_KEY` | traduction auto FR → EN/ES | bouton de traduction en erreur |
 

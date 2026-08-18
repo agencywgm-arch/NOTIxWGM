@@ -651,7 +651,11 @@ function ClientApp({ scanPointId, session }) {
             // stockage local restauré sans la ligne customers correspondante)
             // — on la recrée puis on retente une fois avant d'abandonner.
             if (String(e?.message || '').includes('not_a_customer')) {
-              await supabase.rpc('upsert_me', { p_first_name: LS.get('noti:firstName', '') })
+              await supabase.rpc('upsert_me', {
+                p_first_name: LS.get('noti:firstName', ''),
+                p_last_name: LS.get('noti:lastName', ''),
+                p_email: LS.get('noti:email', ''),
+              })
               await loadCustomer()
               await supabase.rpc('register_scan', { p_scan_point: scanPointId, p_group_size: 1 })
             } else {
@@ -816,16 +820,23 @@ function WelcomeScreen({ event, venue, scanPoint, lang, setLang, onStart }) {
 }
 
 // ------------------------------------------------------------ Identification
-// Une session anonyme Supabase (aucun SMS, aucun compte) porte le prénom saisi.
+// Une session anonyme Supabase (aucun SMS, aucun compte) porte la fiche client.
+// Prénom, nom et e-mail sont obligatoires : c'est ce qui alimente le CRM
+// (relance, historique, profil) une fois la commande transmise en cuisine.
+const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/
+
 function IdentifyScreen({ lang, onVerified }) {
   const t = useT(lang)
   const [firstName, setFirstName] = useState(LS.get('noti:firstName', ''))
+  const [lastName, setLastName] = useState(LS.get('noti:lastName', ''))
+  const [email, setEmail] = useState(LS.get('noti:email', ''))
   const [busy, setBusy] = useState(false)
   const [err, setErr] = useState('')
 
   async function submit() {
     setErr('')
-    if (!firstName.trim()) return setErr('Le prénom est obligatoire.')
+    if (!firstName.trim() || !lastName.trim()) return setErr('Prénom et nom sont obligatoires.')
+    if (!EMAIL_RE.test(email.trim())) return setErr('Adresse e-mail invalide.')
     setBusy(true)
     try {
       const { data } = await supabase.auth.getSession()
@@ -833,9 +844,15 @@ function IdentifyScreen({ lang, onVerified }) {
         const { error } = await supabase.auth.signInAnonymously()
         if (error) throw error
       }
-      const { error: e2 } = await supabase.rpc('upsert_me', { p_first_name: firstName.trim() })
+      const { error: e2 } = await supabase.rpc('upsert_me', {
+        p_first_name: firstName.trim(),
+        p_last_name: lastName.trim(),
+        p_email: email.trim(),
+      })
       if (e2) throw e2
       LS.set('noti:firstName', firstName)
+      LS.set('noti:lastName', lastName)
+      LS.set('noti:email', email)
       await onVerified()
     } catch (e) {
       setErr(frError(e))
@@ -851,20 +868,46 @@ function IdentifyScreen({ lang, onVerified }) {
         <Logo />
         <h1 style={{ ...S.h1, fontSize: 26, marginTop: 20 }}>{t.identify}</h1>
         <div style={{ color: C.dim, fontSize: 13.5, marginTop: 8, lineHeight: 1.6 }}>
-          Comment souhaitez-vous être appelé·e au retrait de votre commande ?
+          Pour commander : vos coordonnées, pour vous appeler au retrait et vous tenir informé·e.
         </div>
       </div>
 
       <div style={S.card}>
-        <Field label={t.firstName}>
+        <div style={{ display: 'flex', gap: 10 }}>
+          <div style={{ flex: 1 }}>
+            <Field label={t.firstName}>
+              <input
+                style={S.input}
+                value={firstName}
+                onChange={(e) => setFirstName(e.target.value)}
+                autoComplete="given-name"
+                placeholder="Alex"
+                autoFocus
+              />
+            </Field>
+          </div>
+          <div style={{ flex: 1 }}>
+            <Field label="Nom">
+              <input
+                style={S.input}
+                value={lastName}
+                onChange={(e) => setLastName(e.target.value)}
+                autoComplete="family-name"
+                placeholder="Martin"
+              />
+            </Field>
+          </div>
+        </div>
+
+        <Field label="E-mail">
           <input
             style={S.input}
-            value={firstName}
-            onChange={(e) => setFirstName(e.target.value)}
+            type="email"
+            value={email}
+            onChange={(e) => setEmail(e.target.value)}
             onKeyDown={(e) => e.key === 'Enter' && submit()}
-            autoComplete="given-name"
-            placeholder="Alex"
-            autoFocus
+            autoComplete="email"
+            placeholder="alex@exemple.fr"
           />
         </Field>
 
@@ -1187,7 +1230,11 @@ function OrderingApp({ event, venue, scanPoint, lang, setLang, customer, showToa
     if (error && String(error.message || '').includes('not_a_customer')) {
       // Session valide mais fiche client absente côté serveur — on la
       // recrée (même prénom que la dernière identification) puis on retente.
-      await supabase.rpc('upsert_me', { p_first_name: LS.get('noti:firstName', '') })
+      await supabase.rpc('upsert_me', {
+        p_first_name: LS.get('noti:firstName', ''),
+        p_last_name: LS.get('noti:lastName', ''),
+        p_email: LS.get('noti:email', ''),
+      })
       await onReloadCustomer?.()
       ;({ data, error } = await place())
     }
