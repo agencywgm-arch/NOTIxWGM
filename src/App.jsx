@@ -1207,9 +1207,9 @@ function OrderingApp({ event, venue, scanPoint, lang, setLang, customer, showToa
 
     // Notification de statut « commande reçue » (best-effort).
     notify({
-      eventId: event.id,
+      eventId: event?.id,
       kind: 'status',
-      customerId: customer.id,
+      customerId: customer?.id,
       orderId: data?.id,
       title: 'Commande reçue',
       body: `Votre commande ${data?.pickup_code} est bien arrivée au bar. Vous serez prévenu dès qu’elle est prête.`,
@@ -1340,7 +1340,7 @@ function OrderingApp({ event, venue, scanPoint, lang, setLang, customer, showToa
                   {timeFR(m.created_at)}
                 </div>
                 <div style={{ fontSize: 14, lineHeight: 1.55 }}>{m.body}</div>
-                {m.customer_id === customer.id && (
+                {m.customer_id === customer?.id && (
                   <button
                     onClick={async () => {
                       await supabase
@@ -1376,8 +1376,8 @@ function OrderingApp({ event, venue, scanPoint, lang, setLang, customer, showToa
             pushOn={pushOn}
             onEnablePush={async () => {
               const ok = await subscribePush({
-                customerId: customer.id,
-                eventId: event.id,
+                customerId: customer?.id,
+                eventId: event?.id,
                 role: 'customer',
               })
               setPushOn(ok)
@@ -2382,8 +2382,8 @@ function ReviewSheet({ order, event, customer, onClose, onDone }) {
           onClick={async () => {
             setBusy(true)
             await supabase.from('reviews').insert({
-              event_id: event.id,
-              customer_id: customer.id,
+              event_id: event?.id,
+              customer_id: customer?.id,
               order_id: order.id,
               rating,
               comment: comment || null,
