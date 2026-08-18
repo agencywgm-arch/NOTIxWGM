@@ -597,13 +597,16 @@ function ClientApp({ scanPointId, session }) {
   }, [loadCustomer])
 
   // ---- Aiguillage du parcours ---------------------------------------------
+  // Filet de sécurité uniquement : si la session/fiche client disparaît en
+  // cours de route, on ramène à l'accueil. On ne saute JAMAIS automatiquement
+  // vers « hello »/« app » au seul motif qu'une session persiste sur
+  // l'appareil — chaque scan doit repasser par l'identification explicite
+  // (voir WelcomeScreen.onStart).
   useEffect(() => {
     if (loading || fatal) return
     if (!session?.user || !customer) {
       setStep((s) => (s === 'welcome' || s === 'identify' ? s : 'welcome'))
-      return
     }
-    setStep((s) => (s === 'hello' || s === 'app' ? s : 'hello'))
   }, [loading, fatal, session, customer])
 
   if (loading)
@@ -624,7 +627,7 @@ function ClientApp({ scanPointId, session }) {
   const shared = { event, venue, scanPoint, lang, setLang, showToast }
 
   if (step === 'welcome')
-    return <WelcomeScreen {...shared} onStart={() => setStep(session?.user ? 'hello' : 'identify')} />
+    return <WelcomeScreen {...shared} onStart={() => setStep('identify')} />
 
   if (step === 'identify')
     return (
@@ -632,6 +635,7 @@ function ClientApp({ scanPointId, session }) {
         {...shared}
         onVerified={async () => {
           await loadCustomer()
+          setStep('hello')
         }}
       />
     )
