@@ -644,7 +644,20 @@ function ClientApp({ scanPointId, session }) {
         onEnter={async () => {
           // La présence est enregistrée après la reconnaissance, pour que le
           // message « déjà venu » se base sur les soirées PRÉCÉDENTES.
-          await supabase.rpc('register_scan', { p_scan_point: scanPointId, p_group_size: 1 })
+          try {
+            await supabase.rpc('register_scan', { p_scan_point: scanPointId, p_group_size: 1 })
+          } catch (e) {
+            // Session valide mais fiche client absente côté serveur (rare :
+            // stockage local restauré sans la ligne customers correspondante)
+            // — on la recrée puis on retente une fois avant d'abandonner.
+            if (String(e?.message || '').includes('not_a_customer')) {
+              await supabase.rpc('upsert_me', { p_first_name: LS.get('noti:firstName', '') })
+              await loadCustomer()
+              await supabase.rpc('register_scan', { p_scan_point: scanPointId, p_group_size: 1 })
+            } else {
+              throw e
+            }
+          }
           setStep('app')
         }}
       />
@@ -876,7 +889,7 @@ function IdentifyScreen({ lang, onVerified }) {
 }
 
 // ------------------------------------------------------ Reconnaissance client
-function RecognitionScreen({ lang, customer, event, onEnter }) {
+function RecognitionScreen({ lang, customer, event, onEnter, showToast }) {
   const t = useT(lang)
   const [busy, setBusy] = useState(false)
   const returning = (customer?.events_count ?? 0) >= 1
@@ -950,7 +963,13 @@ function RecognitionScreen({ lang, customer, event, onEnter }) {
         disabled={busy}
         onClick={async () => {
           setBusy(true)
-          await onEnter()
+          try {
+            await onEnter()
+          } catch (e) {
+            showToast?.(frError(e), 'error')
+          } finally {
+            setBusy(false)
+          }
         }}
         style={{ ...S.btn, opacity: busy ? 0.6 : 1 }}
       >
@@ -1155,13 +1174,23 @@ function OrderingApp({ event, venue, scanPoint, lang, setLang, customer, showToa
       options: l.options.map((o) => ({ id: o.id, name: o.name, price: o.price })),
     }))
 
-    const { data, error } = await supabase.rpc('place_order', {
-      p_event: event.id,
-      p_scan_point: scanPoint.id,
-      p_items: items,
-      p_note: note || null,
-      p_promo: promo || null,
-    })
+    const place = () =>
+      supabase.rpc('place_order', {
+        p_event: event.id,
+        p_scan_point: scanPoint.id,
+        p_items: items,
+        p_note: note || null,
+        p_promo: promo || null,
+      })
+
+    let { data, error } = await place()
+    if (error && String(error.message || '').includes('not_a_customer')) {
+      // Session valide mais fiche client absente côté serveur — on la
+      // recrée (même prénom que la dernière identification) puis on retente.
+      await supabase.rpc('upsert_me', { p_first_name: LS.get('noti:firstName', '') })
+      await onReloadCustomer?.()
+      ;({ data, error } = await place())
+    }
     if (error) throw error
 
     // Le serveur ignore silencieusement un code invalide plutôt que de bloquer
