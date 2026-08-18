@@ -45,6 +45,8 @@ export function frError(err) {
   if (m.includes('variant_required')) return 'Choisissez un format pour chaque article.'
   if (m.includes('not_a_customer') || m.includes('not_authenticated')) return 'Identifiez-vous pour commander.'
   if (m.includes('forbidden')) return 'Action non autorisée.'
+  if (m.includes('scan_point_orphan'))
+    return 'Ce QR code ne pointe plus vers une soirée valide. Demandez au staff un QR à jour.'
 
   // Auth
   if (m.includes('anonymous sign-ins are disabled'))

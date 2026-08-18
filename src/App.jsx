@@ -558,10 +558,11 @@ function ClientApp({ scanPointId, session }) {
           .eq('id', scanPointId)
           .single()
         if (error) throw error
+        if (!sp.events || !sp.events.venues) throw new Error('scan_point_orphan')
         if (dead) return
         setScanPoint(sp)
         setEvent(sp.events)
-        setVenue(sp.events?.venues ?? null)
+        setVenue(sp.events.venues)
         if (sp.events?.languages?.length && !sp.events.languages.includes(lang)) {
           setLang(sp.events.languages[0])
         }
@@ -985,8 +986,8 @@ function OrderingApp({ event, venue, scanPoint, lang, setLang, customer, showToa
     const { data } = await supabase
       .from('orders')
       .select('*, order_items ( * )')
-      .eq('event_id', event.id)
-      .eq('customer_id', customer.id)
+      .eq('event_id', event?.id)
+      .eq('customer_id', customer?.id)
       .order('created_at', { ascending: false })
     setOrders(data || [])
   }, [event.id, customer.id])
@@ -995,13 +996,14 @@ function OrderingApp({ event, venue, scanPoint, lang, setLang, customer, showToa
     const { data } = await supabase
       .from('messages')
       .select('*')
-      .eq('event_id', event.id)
+      .eq('event_id', event?.id)
       .order('created_at', { ascending: false })
       .limit(20)
     setMessages(data || [])
-  }, [event.id])
+  }, [event?.id])
 
   useEffect(() => {
+    if (!venue?.id) return
     let dead = false
     ;(async () => {
       const { data } = await supabase
@@ -1020,10 +1022,11 @@ function OrderingApp({ event, venue, scanPoint, lang, setLang, customer, showToa
     return () => {
       dead = true
     }
-  }, [venue.id, loadOrders, loadMessages])
+  }, [venue?.id, loadOrders, loadMessages])
 
   // ---- Temps réel (WebSocket) + repli en polling doux ---------------------
   useEffect(() => {
+    if (!customer?.id || !event?.id) return
     const ch = supabase
       .channel(`client-${customer.id}`)
       .on(
@@ -1053,7 +1056,7 @@ function OrderingApp({ event, venue, scanPoint, lang, setLang, customer, showToa
       clearInterval(poll)
       navigator.serviceWorker?.removeEventListener('message', onSw)
     }
-  }, [customer.id, event.id, loadOrders, loadMessages])
+  }, [customer?.id, event?.id, loadOrders, loadMessages])
 
   // ---- Sonnerie douce quand une commande passe à « prête » ----------------
   useEffect(() => {
