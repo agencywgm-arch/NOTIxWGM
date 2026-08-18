@@ -990,7 +990,7 @@ function OrderingApp({ event, venue, scanPoint, lang, setLang, customer, showToa
       .eq('customer_id', customer?.id)
       .order('created_at', { ascending: false })
     setOrders(data || [])
-  }, [event.id, customer.id])
+  }, [event?.id, customer?.id])
 
   const loadMessages = useCallback(async () => {
     const { data } = await supabase
