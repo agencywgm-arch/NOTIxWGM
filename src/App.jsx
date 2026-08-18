@@ -419,7 +419,69 @@ function PayAtBar({ compact = false }) {
 //  RACINE
 // ============================================================================
 
+// Filet de sécurité : sans ça, la moindre exception pendant un rendu fait
+// disparaître toute l'app (page blanche silencieuse, invisible à distance).
+// On affiche l'erreur à l'écran pour qu'elle soit au moins signalable.
+class ErrorBoundary extends React.Component {
+  constructor(props) {
+    super(props)
+    this.state = { error: null }
+  }
+  static getDerivedStateFromError(error) {
+    return { error }
+  }
+  componentDidCatch(error, info) {
+    console.error('[Noti] crash', error, info)
+  }
+  render() {
+    if (!this.state.error) return this.props.children
+    return (
+      <div style={{ ...S.page, padding: 24, display: 'flex', flexDirection: 'column', justifyContent: 'center' }}>
+        <Keyframes />
+        <div style={{ textAlign: 'center', marginBottom: 22 }}>
+          <Logo />
+        </div>
+        <div style={S.card}>
+          <div style={{ ...S.h1, fontSize: 20, marginBottom: 10 }}>Un problème est survenu</div>
+          <p style={{ color: C.dim, fontSize: 13.5, lineHeight: 1.6, marginBottom: 14 }}>
+            L’application a rencontré une erreur inattendue. Réessayez ; si ça persiste, envoyez
+            une capture de ce message.
+          </p>
+          <div
+            style={{
+              background: 'rgba(192,57,43,.07)',
+              border: `1px solid ${C.danger}55`,
+              borderRadius: 12,
+              padding: 12,
+              fontSize: 11.5,
+              fontFamily: 'monospace',
+              color: C.danger,
+              marginBottom: 16,
+              wordBreak: 'break-word',
+              maxHeight: 160,
+              overflowY: 'auto',
+            }}
+          >
+            {String(this.state.error?.message || this.state.error)}
+          </div>
+          <button onClick={() => window.location.reload()} style={S.btn}>
+            Recharger la page
+          </button>
+        </div>
+      </div>
+    )
+  }
+}
+
 export default function App() {
+  return (
+    <ErrorBoundary>
+      <AppInner />
+    </ErrorBoundary>
+  )
+}
+
+function AppInner() {
   const route = useRoute()
   const scanPointId = parseScanRoute(route)
   const [session, setSession] = useState(undefined)
