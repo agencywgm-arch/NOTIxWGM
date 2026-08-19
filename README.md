@@ -188,6 +188,16 @@ feuille de route §10). Notez **Project URL** et **anon public key** (*Settings 
 > point bloquant pour tester le parcours client de bout en bout — et il ne demande qu'un bouton à
 > cocher dans le dashboard.
 
+**Mot de passe oublié (staff)** — l'écran de connexion a un lien *Mot de passe oublié ?* qui envoie
+un e-mail de réinitialisation (`resetPasswordForEmail`). Pour qu'il fonctionne :
+
+- *Authentication → URL Configuration → Redirect URLs* : ajoutez l'URL de votre déploiement
+  (`https://votre-site.vercel.app/*`) — sans elle, Supabase refuse de rediriger vers le lien de
+  réinitialisation et l'e-mail échoue silencieusement.
+- L'envoi passe par le service e-mail intégré de Supabase par défaut (volume limité, parfois classé
+  en spam) ; pour un usage réel, configurez un SMTP dédié dans *Authentication → Settings → SMTP
+  Settings*.
+
 ### 4. Générer les clés VAPID (Web Push)
 
 ```bash

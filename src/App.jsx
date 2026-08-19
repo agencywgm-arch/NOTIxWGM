@@ -485,11 +485,18 @@ function AppInner() {
   const route = useRoute()
   const scanPointId = parseScanRoute(route)
   const [session, setSession] = useState(undefined)
+  const [recovery, setRecovery] = useState(false)
 
   useEffect(() => {
     if (!isConfigured) return
     supabase.auth.getSession().then(({ data }) => setSession(data.session ?? null))
-    const { data } = supabase.auth.onAuthStateChange((_e, s) => setSession(s ?? null))
+    const { data } = supabase.auth.onAuthStateChange((event, s) => {
+      setSession(s ?? null)
+      // Supabase ouvre une session temporaire quand on suit le lien reçu par
+      // e-mail : on intercepte cet événement pour proposer un nouveau mot de
+      // passe avant de laisser entrer dans l'espace équipe.
+      if (event === 'PASSWORD_RECOVERY') setRecovery(true)
+    })
     return () => data.subscription.unsubscribe()
   }, [])
 
@@ -504,8 +511,92 @@ function AppInner() {
         <Spinner />
       </div>
     )
+  if (recovery) return <ResetPasswordScreen onDone={() => setRecovery(false)} />
   if (scanPointId) return <ClientApp scanPointId={scanPointId} session={session} />
   return session ? <StaffApp session={session} /> : <StaffLogin />
+}
+
+function ResetPasswordScreen({ onDone }) {
+  const [password, setPassword] = useState('')
+  const [confirm, setConfirm] = useState('')
+  const [busy, setBusy] = useState(false)
+  const [err, setErr] = useState('')
+  const [done, setDone] = useState(false)
+
+  async function submit(e) {
+    e.preventDefault()
+    setErr('')
+    if (password.length < 6) return setErr('6 caractères minimum.')
+    if (password !== confirm) return setErr('Les deux mots de passe ne correspondent pas.')
+    setBusy(true)
+    const { error } = await supabase.auth.updateUser({ password })
+    setBusy(false)
+    if (error) return setErr(frError(error))
+    setDone(true)
+  }
+
+  return (
+    <div style={{ ...S.page, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 22 }}>
+      <Keyframes />
+      <div style={{ width: '100%', maxWidth: 420 }}>
+        <div style={{ textAlign: 'center', marginBottom: 26 }}>
+          <Logo size={1.2} />
+          <div style={{ ...S.label, marginTop: 18, marginBottom: 0, letterSpacing: 2.4 }}>
+            Nouveau mot de passe
+          </div>
+        </div>
+
+        <div style={S.card}>
+          {done ? (
+            <>
+              <div style={{ marginBottom: 16 }}>
+                <Banner tone="ok">Mot de passe mis à jour.</Banner>
+              </div>
+              <button onClick={onDone} style={S.btn}>
+                Continuer vers l’espace équipe
+              </button>
+            </>
+          ) : (
+            <form onSubmit={submit}>
+              <Field label="Nouveau mot de passe">
+                <input
+                  style={S.input}
+                  type="password"
+                  required
+                  minLength={6}
+                  autoComplete="new-password"
+                  value={password}
+                  onChange={(e) => setPassword(e.target.value)}
+                  autoFocus
+                />
+              </Field>
+              <Field label="Confirmer le mot de passe">
+                <input
+                  style={S.input}
+                  type="password"
+                  required
+                  minLength={6}
+                  autoComplete="new-password"
+                  value={confirm}
+                  onChange={(e) => setConfirm(e.target.value)}
+                />
+              </Field>
+
+              {err && (
+                <div style={{ marginBottom: 12 }}>
+                  <Banner tone="danger">{err}</Banner>
+                </div>
+              )}
+
+              <button type="submit" disabled={busy} style={{ ...S.btn, opacity: busy ? 0.6 : 1 }}>
+                {busy ? '…' : 'Enregistrer'}
+              </button>
+            </form>
+          )}
+        </div>
+      </div>
+    </div>
+  )
 }
 
 function ConfigScreen() {
@@ -2639,7 +2730,13 @@ function StaffLogin() {
     setInfo('')
     setBusy(true)
     try {
-      if (mode === 'signup') {
+      if (mode === 'forgot') {
+        const { error } = await supabase.auth.resetPasswordForEmail(email.trim(), {
+          redirectTo: `${window.location.origin}${BASE_PATH}`,
+        })
+        if (error) throw error
+        setInfo('E-mail envoyé si ce compte existe. Suivez le lien reçu pour choisir un nouveau mot de passe.')
+      } else if (mode === 'signup') {
         const { data, error } = await supabase.auth.signUp({ email: email.trim(), password })
         if (error) throw error
         if (data.user && Array.isArray(data.user.identities) && data.user.identities.length === 0) {
@@ -2725,17 +2822,63 @@ function StaffLogin() {
               onChange={(e) => setEmail(e.target.value)}
             />
           </Field>
-          <Field label="Mot de passe">
-            <input
-              style={S.input}
-              type="password"
-              required
-              minLength={6}
-              autoComplete={mode === 'login' ? 'current-password' : 'new-password'}
-              value={password}
-              onChange={(e) => setPassword(e.target.value)}
-            />
-          </Field>
+
+          {mode !== 'forgot' && (
+            <Field label="Mot de passe">
+              <input
+                style={S.input}
+                type="password"
+                required
+                minLength={6}
+                autoComplete={mode === 'login' ? 'current-password' : 'new-password'}
+                value={password}
+                onChange={(e) => setPassword(e.target.value)}
+              />
+            </Field>
+          )}
+
+          {mode === 'login' && (
+            <button
+              type="button"
+              onClick={() => {
+                setMode('forgot')
+                setErr('')
+                setInfo('')
+              }}
+              style={{
+                background: 'none',
+                border: 'none',
+                color: C.dim,
+                fontSize: 12,
+                padding: 0,
+                marginBottom: 16,
+                cursor: 'pointer',
+              }}
+            >
+              Mot de passe oublié ?
+            </button>
+          )}
+          {mode === 'forgot' && (
+            <button
+              type="button"
+              onClick={() => {
+                setMode('login')
+                setErr('')
+                setInfo('')
+              }}
+              style={{
+                background: 'none',
+                border: 'none',
+                color: C.dim,
+                fontSize: 12,
+                padding: 0,
+                marginBottom: 16,
+                cursor: 'pointer',
+              }}
+            >
+              ← Retour à la connexion
+            </button>
+          )}
 
           {err && (
             <div style={{ marginBottom: 12 }}>
@@ -2749,7 +2892,13 @@ function StaffLogin() {
           )}
 
           <button type="submit" disabled={busy} style={{ ...S.btn, opacity: busy ? 0.6 : 1 }}>
-            {busy ? '…' : mode === 'login' ? 'Se connecter' : 'Créer mon compte'}
+            {busy
+              ? '…'
+              : mode === 'forgot'
+                ? 'Envoyer le lien'
+                : mode === 'login'
+                  ? 'Se connecter'
+                  : 'Créer mon compte'}
           </button>
         </form>
 
