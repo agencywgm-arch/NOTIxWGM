@@ -1,41 +1,3 @@
--- ############################################################################
---
---   NOTI CALLING — INSTALLATION COMPLÈTE DE LA BASE
---
---   Copiez-collez CE FICHIER ENTIER dans :
---       Supabase → SQL Editor → New query → Run
---
---   Il regroupe les migrations de base (0001-0005) plus les ajouts purs 0008
---   (aperçu code promo) et 0009 (profil obligatoire), dans le bon ordre.
---   Idempotent : vous pouvez le relancer sans casser une installation
---   existante.
---
---   Contenu :
---     1. Schéma        — tables, types, fonctions RPC, triggers
---     2. RLS           — Row Level Security
---     3. Realtime      — publication + vues de pilotage + reporting
---     4. Storage       — bucket « noti » (logos, visuels produits)
---     5. Carte         — fonction seed_noti_menu() (carte du Noti Club, rejouable)
---     6. Code promo    — fonction preview_promo() (aperçu au checkout)
---     7. Profil requis — upsert_me() exige prénom + nom + e-mail
---
---   Après exécution, il reste à faire dans l'interface Supabase :
---     · Authentication → Providers → Email : activer (staff)
---     · Authentication → Providers → Anonymous : activer (clients — aucun
---       SMS, aucun compte : le client saisit prénom, nom et e-mail)
---
---   NOTE — installation déjà existante (créée avant l'identification par
---   simple prénom) : exécutez en plus supabase/migrations/0006_simplify_identity.sql
---   une fois, pour retirer l'obligation de téléphone sur les commandes passées.
---   Idem pour supabase/migrations/0007_reload_menu_idempotent.sql si la carte
---   avait déjà été seedée avant ce fichier (pour pouvoir la recharger sans
---   dupliquer les articles).
---
--- ############################################################################
-
--- ============================================================================
---  0001_schema.sql
--- ============================================================================
 -- ============================================================================
 --  NOTI Calling — 0001_schema.sql
 --  Outil de commande par QR code pour soirée événementielle.
@@ -55,6 +17,7 @@ create extension if not exists "pgcrypto";
 do $$ begin
   create type public.order_status as enum (
     'RECEIVED',   -- reçue au bar
+    'IN_PREP',    -- en préparation au bar/cuisine
     'READY',      -- prête à retirer  → bloque toute nouvelle commande
     'PICKED_UP',  -- retirée par le client
     'PAID',       -- réglée au bar
@@ -682,10 +645,6 @@ drop trigger if exists trg_venue_staff on public.venues;
 create trigger trg_venue_staff
   after insert on public.venues
   for each row execute function public.venue_owner_is_staff();
-
--- ============================================================================
---  0002_rls.sql
--- ============================================================================
 -- ============================================================================
 --  NOTI Calling — 0002_rls.sql
 --
@@ -921,10 +880,6 @@ create policy push_delete on public.push_subscriptions
     customer_id = public.my_customer_id()
     or (venue_id is not null and public.is_staff(venue_id))
   );
-
--- ============================================================================
---  0003_realtime_reporting.sql
--- ============================================================================
 -- ============================================================================
 --  NOTI Calling — 0003_realtime_reporting.sql
 --  Temps réel (WebSocket, pas de polling — cf. feuille de route §14) + vues de
@@ -1079,7 +1034,7 @@ begin
   update public.orders
      set status = 'UNPAID'
    where event_id = p_event
-     and status in ('RECEIVED', 'READY', 'PICKED_UP');
+     and status in ('RECEIVED', 'IN_PREP', 'READY', 'PICKED_UP');
   get diagnostics n = row_count;
 
   update public.events set accept_orders = false, is_active = false where id = p_event;
@@ -1088,10 +1043,6 @@ end;
 $$;
 
 grant execute on function public.close_event(uuid) to authenticated;
-
--- ============================================================================
---  0004_storage.sql
--- ============================================================================
 -- ============================================================================
 --  NOTI Calling — 0004_storage.sql
 --  Bucket public « noti » : logos de lieu + visuels produits.
@@ -1137,10 +1088,6 @@ create policy noti_delete on storage.objects
     bucket_id = 'noti'
     and public.is_staff(nullif(split_part(name, '/', 1), '')::uuid)
   );
-
--- ============================================================================
---  0005_seed_noti_menu.sql
--- ============================================================================
 -- ============================================================================
 --  NOTI Calling — 0005_seed_noti_menu.sql
 --  Carte du NOTI CLUB, saisie depuis les cartes fournies (Drinks & Cocktails,
@@ -1330,10 +1277,6 @@ end;
 $$;
 
 grant execute on function public.seed_noti_menu(uuid) to authenticated;
-
--- ============================================================================
---  0008_promo_preview.sql
--- ============================================================================
 -- ============================================================================
 --  NOTI Calling — 0008_promo_preview.sql
 --
@@ -1388,53 +1331,3 @@ end;
 $$;
 
 grant execute on function public.preview_promo(uuid, text, numeric) to authenticated;
-
--- ============================================================================
---  0009_require_profile.sql
--- ============================================================================
--- ============================================================================
---  NOTI Calling — 0009_require_profile.sql
---
---  Prénom, nom et e-mail deviennent obligatoires à l'identification (au lieu
---  du prénom seul) : la commande ne peut plus être passée sans une fiche
---  client complète, exploitable côté CRM (relances, historique, profil).
---
---  À exécuter une seule fois, sur une base qui a déjà 0001-0008. Un nouvel
---  environnement qui repart de zéro n'en a pas besoin : 0001_schema.sql
---  contient déjà directement cette version.
--- ============================================================================
-
-drop function if exists public.upsert_me(text);
-
-create or replace function public.upsert_me(p_first_name text, p_last_name text, p_email text)
-returns public.customers
-language plpgsql volatile security definer set search_path = public
-as $$
-declare
-  v_row public.customers;
-begin
-  if auth.uid() is null then
-    raise exception 'not_authenticated';
-  end if;
-  if nullif(trim(p_first_name), '') is null or nullif(trim(p_last_name), '') is null then
-    raise exception 'missing_profile';
-  end if;
-  if p_email is null or trim(p_email) !~ '^[^@\s]+@[^@\s]+\.[^@\s]+$' then
-    raise exception 'invalid_email';
-  end if;
-
-  insert into public.customers (auth_user_id, first_name, last_name, email)
-  values (auth.uid(), trim(p_first_name), trim(p_last_name), lower(trim(p_email)))
-  on conflict (auth_user_id) do update
-    set first_name   = excluded.first_name,
-        last_name    = excluded.last_name,
-        email        = excluded.email,
-        last_seen_at = now()
-  returning * into v_row;
-
-  return v_row;
-end;
-$$;
-
-grant execute on function public.upsert_me(text, text, text) to authenticated;
-

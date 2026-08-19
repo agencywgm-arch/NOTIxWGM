@@ -89,10 +89,11 @@ const UNIVERSES = [
 
 const ORDER_STATUS = {
   RECEIVED: { label: 'Reçue', short: 'Reçue', color: C.indigo, step: 1 },
-  READY: { label: 'Prête à retirer', short: 'Prête', color: C.terracotta, step: 2 },
-  PICKED_UP: { label: 'Retirée', short: 'Retirée', color: C.ok, step: 3 },
-  PAID: { label: 'Réglée', short: 'Réglée', color: C.ok, step: 4 },
-  UNPAID: { label: 'Impayée', short: 'Impayée', color: C.danger, step: 4 },
+  IN_PREP: { label: 'En préparation', short: 'En prépa', color: C.warn, step: 2 },
+  READY: { label: 'Prête à retirer', short: 'Prête', color: C.terracotta, step: 3 },
+  PICKED_UP: { label: 'Retirée', short: 'Retirée', color: C.ok, step: 4 },
+  PAID: { label: 'Réglée', short: 'Réglée', color: C.ok, step: 5 },
+  UNPAID: { label: 'Impayée', short: 'Impayée', color: C.danger, step: 5 },
   CANCELLED: { label: 'Annulée', short: 'Annulée', color: C.faint, step: 0 },
 }
 
@@ -1229,7 +1230,7 @@ function OrderingApp({ event, venue, scanPoint, lang, setLang, customer, showToa
   // ---- Discipline de la file (§06) ---------------------------------------
   const readyOrder = orders.find((o) => o.status === 'READY')
   const blocked = Boolean(readyOrder)
-  const activeOrders = orders.filter((o) => ['RECEIVED', 'READY'].includes(o.status))
+  const activeOrders = orders.filter((o) => ['RECEIVED', 'IN_PREP', 'READY'].includes(o.status))
   const pendingPayment = orders.filter((o) => ['PICKED_UP', 'UNPAID'].includes(o.status))
 
   // ---- Catalogue ----------------------------------------------------------
@@ -2282,7 +2283,7 @@ function OrderCard({ order, event, venue, customer, lang, now, onReview }) {
   const mm = String(Math.floor(etaSec / 60)).padStart(2, '0')
   const ss = String(etaSec % 60).padStart(2, '0')
 
-  const steps = ['RECEIVED', 'READY', 'PICKED_UP', 'PAID']
+  const steps = ['RECEIVED', 'IN_PREP', 'READY', 'PICKED_UP', 'PAID']
   const idx = Math.max(0, steps.indexOf(order.status === 'UNPAID' ? 'PICKED_UP' : order.status))
 
   async function downloadRecap() {
@@ -2345,7 +2346,7 @@ function OrderCard({ order, event, venue, customer, lang, now, onReview }) {
           <div style={{ fontFamily: FONT.label, fontWeight: 600, letterSpacing: 1, color: st.color }}>
             {st.label.toUpperCase()}
           </div>
-          {order.status === 'RECEIVED' && etaSec > 0 && (
+          {(order.status === 'RECEIVED' || order.status === 'IN_PREP') && etaSec > 0 && (
             <div style={{ ...S.money, marginLeft: 'auto', fontSize: 20, fontWeight: 600 }}>
               {mm}:{ss}
             </div>
@@ -2355,7 +2356,7 @@ function OrderCard({ order, event, venue, customer, lang, now, onReview }) {
         {/* Progression */}
         {!['CANCELLED'].includes(order.status) && (
           <div style={{ display: 'flex', gap: 5, marginBottom: 16 }}>
-            {['Reçue', 'Prête', 'Retirée', 'Réglée'].map((label, i) => (
+            {['Reçue', 'En prépa', 'Prête', 'Retirée', 'Réglée'].map((label, i) => (
               <div key={label} style={{ flex: 1 }}>
                 <div
                   style={{
@@ -3386,6 +3387,7 @@ function BarTab({ event, venue, onEventChange, showToast }) {
   }, [event.id, load])
 
   const received = orders.filter((o) => o.status === 'RECEIVED')
+  const inPrep = orders.filter((o) => o.status === 'IN_PREP')
   const ready = orders.filter((o) => o.status === 'READY')
   const pickedUp = orders.filter((o) => o.status === 'PICKED_UP')
 
@@ -3513,7 +3515,8 @@ function BarTab({ event, venue, onEventChange, showToast }) {
 
       <div style={{ display: 'flex', gap: 12, overflowX: 'auto', paddingBottom: 8 }}>
         {[
-          { title: 'Reçues', list: received, color: C.indigo, action: 'Prête', next: 'READY' },
+          { title: 'Reçues', list: received, color: C.indigo, action: 'En préparation', next: 'IN_PREP' },
+          { title: 'En préparation', list: inPrep, color: C.warn, action: 'Prête', next: 'READY' },
           { title: 'Prêtes', list: ready, color: C.terracotta, action: 'Retirée', next: 'PICKED_UP' },
           { title: 'Retirées', list: pickedUp, color: C.ok, action: 'Réglée', next: 'PAID' },
         ].map((col) => (

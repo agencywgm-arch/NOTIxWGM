@@ -55,7 +55,7 @@ feuille de route *v2.0 — août 2026* (cas pilote **Noti Club · Noti Calling**
 
 ### Côté bar & cuisine
 
-- Écran de production temps réel : **Reçues → Prêtes → Retirées → Réglées**
+- Écran de production temps réel : **Reçues → En préparation → Prêtes → Retirées → Réglées**
 - **Alarme sonore** sur nouvelle commande, qui ne s'arrête que sur accusé de réception explicite
 - **Réglage du temps de préparation** selon le rush, répercuté sur le timer client
 - **Article « épuisé » en un clic** — il reste visible sur la carte, grisé et non commandable
@@ -124,6 +124,8 @@ supabase/
     0007_reload_menu_idempotent.sql  carte rechargeable sans doublons (patch, installs existantes)
     0008_promo_preview.sql       aperçu code promo au checkout (patch, installs existantes)
     0009_require_profile.sql     prénom + nom + e-mail obligatoires (patch, installs existantes)
+    0010_in_prep_status.sql      étape « En préparation » (patch, installs existantes)
+    0011_in_prep_close_event.sql clôture de soirée adaptée à « En préparation » (patch, installs existantes)
   functions/
     notify/                notification de statut / diffusion / message individuel
     reminders/             relances automatiques (cron)
@@ -173,6 +175,15 @@ feuille de route §10). Notez **Project URL** et **anon public key** (*Settings 
 > ajout pur (fonction `preview_promo`, aucune version antérieure à remplacer). Sans elle, le champ
 > code promo au checkout reste fonctionnel (validé côté serveur par `place_order()`), mais sans
 > aperçu ni message avant l'envoi de la commande.
+>
+> **Installation déjà faite avant l'étape « En préparation » ?** Exécutez, dans deux **Run**
+> séparés (obligatoire — PostgreSQL interdit d'utiliser une nouvelle valeur d'enum dans la
+> transaction qui vient de la créer) :
+> 1. `supabase/migrations/0010_in_prep_status.sql`
+> 2. `supabase/migrations/0011_in_prep_close_event.sql`
+>
+> Une base neuve n'en a pas besoin : `0001_schema.sql` et `0003_realtime_reporting.sql`
+> contiennent déjà directement cette version.
 
 ### 3. Activer l'authentification
 

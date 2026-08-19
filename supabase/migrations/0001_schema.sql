@@ -17,6 +17,7 @@ create extension if not exists "pgcrypto";
 do $$ begin
   create type public.order_status as enum (
     'RECEIVED',   -- reçue au bar
+    'IN_PREP',    -- en préparation au bar/cuisine
     'READY',      -- prête à retirer  → bloque toute nouvelle commande
     'PICKED_UP',  -- retirée par le client
     'PAID',       -- réglée au bar
