@@ -49,6 +49,12 @@ export function frError(err) {
     return 'Ce QR code ne pointe plus vers une soirée valide. Demandez au staff un QR à jour.'
   if (m.includes('missing_profile')) return 'Prénom et nom sont obligatoires.'
   if (m.includes('invalid_email')) return 'Adresse e-mail invalide.'
+  if (m.includes('invalid_pass_code'))
+    return 'Code forfait invalide, expiré ou déjà utilisé par tout le groupe.'
+  if (m.includes('conversion_closed'))
+    return 'La conversion du jeton food est fermée (disponible jusqu’à 22h).'
+  if (m.includes('no_food_token')) return 'Aucun jeton food disponible à convertir.'
+  if (m.includes('no_pass')) return 'Aucun forfait actif pour cette soirée.'
 
   // Auth
   if (m.includes('anonymous sign-ins are disabled'))

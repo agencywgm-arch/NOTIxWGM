@@ -1137,7 +1137,35 @@ function OrderingApp({ event, venue, scanPoint, lang, setLang, customer, showToa
   const [cart, setCart] = useState([])
   const [pushOn, setPushOn] = useState(false)
   const [reviewFor, setReviewFor] = useState(null)
+  const [pass, setPass] = useState(null)
   const lastReady = useRef(new Set())
+
+  const loadPass = useCallback(async () => {
+    if (!event?.id || !customer?.id) return
+    const { data } = await supabase
+      .from('event_passes')
+      .select('*')
+      .eq('event_id', event.id)
+      .eq('customer_id', customer.id)
+      .maybeSingle()
+    setPass(data || null)
+  }, [event?.id, customer?.id])
+
+  useEffect(() => {
+    loadPass()
+  }, [loadPass])
+
+  async function redeemPass(code) {
+    const { data, error } = await supabase.rpc('redeem_pass', { p_event: event.id, p_code: code })
+    if (error) throw error
+    setPass(data)
+  }
+
+  async function convertFoodToken() {
+    const { data, error } = await supabase.rpc('convert_food_token', { p_event: event.id })
+    if (error) throw error
+    setPass(data)
+  }
 
   // ---- Chargement ---------------------------------------------------------
   const loadOrders = useCallback(async () => {
@@ -1348,6 +1376,19 @@ function OrderingApp({ event, venue, scanPoint, lang, setLang, customer, showToa
     setView('orders')
     await loadOrders()
 
+    if (pass) {
+      const hadCredits = pass.credits_remaining > 0
+      const { data: fresh } = await supabase
+        .from('event_passes')
+        .select('*')
+        .eq('id', pass.id)
+        .maybeSingle()
+      setPass(fresh || pass)
+      if (hadCredits && fresh && fresh.credits_remaining === 0) {
+        showToast('Crédits épuisés — prochaine conso au prix carte, à régler lors du retrait de la commande.', 'error')
+      }
+    }
+
     // Notification de statut « commande reçue » (best-effort).
     notify({
       eventId: event?.id,
@@ -1445,6 +1486,11 @@ function OrderingApp({ event, venue, scanPoint, lang, setLang, customer, showToa
       </div>
 
       <div style={{ padding: 16 }}>
+        {/* Forfait Groupe (pass à crédits) */}
+        <div style={{ marginBottom: 14 }}>
+          <PassCard pass={pass} onRedeem={redeemPass} onConvert={convertFoodToken} showToast={showToast} />
+        </div>
+
         {/* Message de blocage de file */}
         {blocked && (
           <div style={{ marginBottom: 14 }}>
@@ -1700,6 +1746,8 @@ function OrderingApp({ event, venue, scanPoint, lang, setLang, customer, showToa
         open={checkoutOpen}
         lang={lang}
         event={event}
+        cart={cart}
+        pass={pass}
         subtotal={subtotal}
         prepMin={event.default_prep_min ?? 1}
         onClose={() => setCartCheckout(false)}
@@ -2008,6 +2056,143 @@ const stepBtn = {
   cursor: 'pointer',
 }
 
+// ------------------------------------------------------- Forfait (crédits)
+/**
+ * Simule côté client la même consommation de portefeuille que place_order()
+ * côté serveur (même ordre d'itération sur le panier) : sert d'aperçu avant
+ * envoi, la source de vérité reste le serveur.
+ */
+function estimateWalletDiscount(cart, pass) {
+  if (!pass) return { discount: 0, creditsRemaining: 0, foodAvailable: false }
+  let creditsRemaining = pass.credits_remaining
+  let richardUsed = pass.richard_used
+  let foodAvailable = pass.food_token_available
+  let discount = 0
+  for (const l of cart) {
+    const p = l.product
+    const unit = Number(l.basePrice) + (l.options || []).reduce((s, o) => s + Number(o.price || 0), 0)
+    if (p.credit_once && !richardUsed) {
+      const cost = p.credit_kind === 'alcohol' ? 2 : 1
+      if (creditsRemaining >= cost) {
+        creditsRemaining -= cost
+        richardUsed = true
+        discount += unit
+      }
+    } else if (p.credit_kind === 'alcohol' || p.credit_kind === 'soft') {
+      const cost = p.credit_kind === 'alcohol' ? 2 : 1
+      const units = Math.min(l.quantity, Math.floor(creditsRemaining / cost))
+      if (units > 0) {
+        creditsRemaining -= units * cost
+        discount += units * unit
+      }
+    } else if (p.universe === 'food' && foodAvailable) {
+      foodAvailable = false
+      discount += unit
+    }
+  }
+  return { discount, creditsRemaining, foodAvailable }
+}
+
+function PassCard({ pass, onRedeem, onConvert, showToast }) {
+  const [code, setCode] = useState('')
+  const [busy, setBusy] = useState(false)
+  const [open, setOpen] = useState(false)
+
+  if (!pass) {
+    return (
+      <div style={{ ...S.card, padding: 14 }}>
+        {open ? (
+          <>
+            <div style={{ ...S.label, marginBottom: 8 }}>Code forfait</div>
+            <div style={{ display: 'flex', gap: 8 }}>
+              <input
+                style={{ ...S.input, textTransform: 'uppercase', flex: 1 }}
+                value={code}
+                onChange={(e) => setCode(e.target.value)}
+                placeholder="Reçu avec votre réservation"
+              />
+              <button
+                disabled={!code.trim() || busy}
+                onClick={async () => {
+                  setBusy(true)
+                  try {
+                    await onRedeem(code.trim())
+                    showToast('Forfait activé !', 'ok')
+                  } catch (e) {
+                    showToast(frError(e), 'error')
+                  } finally {
+                    setBusy(false)
+                  }
+                }}
+                style={{
+                  ...S.btnGhost,
+                  width: 'auto',
+                  minHeight: 'auto',
+                  padding: '0 18px',
+                  opacity: !code.trim() || busy ? 0.5 : 1,
+                }}
+              >
+                {busy ? '…' : 'Activer'}
+              </button>
+            </div>
+          </>
+        ) : (
+          <button
+            onClick={() => setOpen(true)}
+            style={{ background: 'none', border: 'none', padding: 0, cursor: 'pointer', color: C.indigo, fontSize: 13, fontWeight: 600 }}
+          >
+            🎟️ Vous avez un forfait de groupe ? Activez-le ici
+          </button>
+        )}
+      </div>
+    )
+  }
+
+  const canConvert =
+    pass.food_token_available && new Date().toLocaleTimeString('fr-FR', { timeZone: 'Europe/Paris', hour12: false }) < '22:00:00'
+
+  return (
+    <div style={{ ...S.card, padding: 14, border: `1.5px solid ${C.terracotta}55` }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+        <div>
+          <div style={{ ...S.label, marginBottom: 2 }}>🎟️ Forfait actif</div>
+          <div style={{ ...S.money, fontSize: 20, fontWeight: 600, color: C.terracotta }}>
+            {pass.credits_remaining} crédit{pass.credits_remaining > 1 ? 's' : ''} restant{pass.credits_remaining > 1 ? 's' : ''}
+          </div>
+        </div>
+        {pass.food_token_total > 0 && (
+          <div style={{ textAlign: 'right', fontSize: 12, color: C.dim }}>
+            Jeton food
+            <br />
+            <strong style={{ color: pass.food_token_available ? C.ok : C.faint }}>
+              {pass.food_token_available ? 'disponible' : 'utilisé'}
+            </strong>
+          </div>
+        )}
+      </div>
+      {canConvert && (
+        <button
+          disabled={busy}
+          onClick={async () => {
+            setBusy(true)
+            try {
+              await onConvert()
+              showToast('Jeton food converti en 2 crédits.', 'ok')
+            } catch (e) {
+              showToast(frError(e), 'error')
+            } finally {
+              setBusy(false)
+            }
+          }}
+          style={{ ...S.btnGhost, marginTop: 10, minHeight: 40, fontSize: 12.5, opacity: busy ? 0.6 : 1 }}
+        >
+          {busy ? '…' : 'Convertir mon jeton food en 2 crédits (1 alcool ou 2 softs)'}
+        </button>
+      )}
+    </div>
+  )
+}
+
 // --------------------------------------------------------------------- Panier
 function CartSheet({ open, cart, lang, subtotal, onClose, onQty, onCheckout }) {
   const t = useT(lang)
@@ -2086,7 +2271,7 @@ function CartSheet({ open, cart, lang, subtotal, onClose, onQty, onCheckout }) {
 }
 
 // ----------------------------------------------------------------- Validation
-function CheckoutSheet({ open, lang, event, subtotal, prepMin, onClose, onSubmit }) {
+function CheckoutSheet({ open, lang, event, cart, pass, subtotal, prepMin, onClose, onSubmit }) {
   const t = useT(lang)
   const [note, setNote] = useState('')
   const [promo, setPromo] = useState('')
@@ -2097,6 +2282,8 @@ function CheckoutSheet({ open, lang, event, subtotal, prepMin, onClose, onSubmit
   useEffect(() => {
     setPromoResult(null)
   }, [promo, open])
+
+  const walletEst = useMemo(() => estimateWalletDiscount(cart || [], pass), [cart, pass])
 
   async function applyPromo() {
     if (!promo.trim()) return
@@ -2116,7 +2303,8 @@ function CheckoutSheet({ open, lang, event, subtotal, prepMin, onClose, onSubmit
     }
   }
 
-  const discount = promoResult?.valid ? Number(promoResult.discount) : 0
+  const promoDiscount = promoResult?.valid ? Number(promoResult.discount) : 0
+  const discount = promoDiscount + walletEst.discount
   const total = Math.max(0, subtotal - discount)
 
   return (
@@ -2163,6 +2351,15 @@ function CheckoutSheet({ open, lang, event, subtotal, prepMin, onClose, onSubmit
           </div>
         )}
       </Field>
+
+      {walletEst.discount > 0 && (
+        <div style={{ marginBottom: 14 }}>
+          <Banner tone="ok">
+            🎟️ Forfait : {eur(walletEst.discount)} couverts par votre portefeuille — il vous restera{' '}
+            {walletEst.creditsRemaining} crédit{walletEst.creditsRemaining > 1 ? 's' : ''} après cette commande.
+          </Banner>
+        </div>
+      )}
 
       <div
         style={{
@@ -4383,8 +4580,12 @@ function OrgaTab({ event, venue, showToast, onEventChange }) {
                 {p.code}
               </div>
               <div style={{ fontSize: 11.5, color: C.faint, marginTop: 2 }}>
-                {p.kind === 'percent' ? `-${p.value}%` : `-${eur(p.value)}`}
-                {p.min_total > 0 ? ` · dès ${eur(p.min_total)}` : ''}
+                {p.kind === 'credits'
+                  ? `🎟️ ${p.credits_per_person} crédits${p.food_tokens_per_person > 0 ? ` + ${p.food_tokens_per_person} food` : ''} /pers`
+                  : p.kind === 'percent'
+                    ? `-${p.value}%`
+                    : `-${eur(p.value)}`}
+                {p.kind !== 'credits' && p.min_total > 0 ? ` · dès ${eur(p.min_total)}` : ''}
                 {' · '}
                 {p.uses_count}
                 {p.max_uses ? `/${p.max_uses}` : ''} utilisé{p.uses_count > 1 ? 's' : ''}
@@ -4463,6 +4664,7 @@ const BROADCAST_TEMPLATES = [
   'Réassort effectué : les articles épuisés sont de nouveau disponibles.',
   'La soirée se termine dans 1 h, pensez à récupérer vos commandes.',
   'Happy hour : un extra offert sur toute commande passée dans les 30 minutes.',
+  'Forfaits : dernière ligne droite pour convertir votre jeton food en conso (crédits), fenêtre fermée à 22h — après quoi il reste un jeton food perdu s’il n’est pas utilisé.',
 ]
 
 function BroadcastSheet({ open, event, onClose, onSent, showToast }) {
@@ -4583,6 +4785,8 @@ const EMPTY_PROMO = {
   min_total: 0,
   max_uses: null,
   active: true,
+  credits_per_person: 6,
+  food_tokens_per_person: 1,
 }
 
 function PromoCodeSheet({ promo, event, onClose, onSaved, showToast }) {
@@ -4608,6 +4812,8 @@ function PromoCodeSheet({ promo, event, onClose, onSaved, showToast }) {
       min_total: Number(f.min_total) || 0,
       max_uses: f.max_uses === '' || f.max_uses == null ? null : Number(f.max_uses),
       active: !!f.active,
+      credits_per_person: Number(f.credits_per_person) || 0,
+      food_tokens_per_person: Number(f.food_tokens_per_person) || 0,
     }
     const { error } = f.id
       ? await supabase.from('promo_codes').update(payload).eq('id', f.id)
@@ -4645,8 +4851,8 @@ function PromoCodeSheet({ promo, event, onClose, onSaved, showToast }) {
         />
       </Field>
 
-      <Field label="Type de réduction">
-        <div style={{ display: 'flex', gap: 8 }}>
+      <Field label="Type de code">
+        <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
           <button
             onClick={() => set('kind', 'percent')}
             style={{
@@ -4671,34 +4877,88 @@ function PromoCodeSheet({ promo, event, onClose, onSaved, showToast }) {
           >
             Montant fixe €
           </button>
+          <button
+            onClick={() => set('kind', 'credits')}
+            style={{
+              ...S.chip,
+              flex: '1 0 100%',
+              minHeight: 44,
+              borderColor: f.kind === 'credits' ? C.terracotta : C.lineHi,
+              color: f.kind === 'credits' ? C.terracotta : C.dim,
+            }}
+          >
+            🎟️ Forfait (crédits)
+          </button>
         </div>
       </Field>
 
-      <Field label={f.kind === 'percent' ? 'Valeur (%)' : 'Valeur (€)'}>
-        <input
-          style={S.input}
-          type="number"
-          min="0"
-          step={f.kind === 'percent' ? 1 : 0.5}
-          value={f.value}
-          onChange={(e) => set('value', e.target.value)}
-        />
-      </Field>
+      {f.kind === 'credits' ? (
+        <>
+          <div style={{ marginBottom: 12 }}>
+            <Banner tone="info">
+              Chaque personne qui active ce code reçoit son propre portefeuille : 1 alcool éligible
+              = 2 crédits, 1 soft = 1 crédit. Le jeton food se convertit en 2 crédits (avant 22h, ou
+              automatiquement si arrivée après 22h30).
+            </Banner>
+          </div>
+          <Field label="Crédits par personne" hint="Forfait groupe classique : 6">
+            <input
+              style={S.input}
+              type="number"
+              min="0"
+              value={f.credits_per_person}
+              onChange={(e) => set('credits_per_person', e.target.value)}
+            />
+          </Field>
+          <Field label="Jetons food par personne" hint="0 = pas de jeton food (ex. entrée seule)">
+            <input
+              style={S.input}
+              type="number"
+              min="0"
+              value={f.food_tokens_per_person}
+              onChange={(e) => set('food_tokens_per_person', e.target.value)}
+            />
+          </Field>
+          <Field label="Nombre de personnes du groupe" hint="Chaque redemption consomme 1 place">
+            <input
+              style={S.input}
+              type="number"
+              min="1"
+              value={f.max_uses ?? ''}
+              onChange={(e) => set('max_uses', e.target.value)}
+              placeholder="ex. 10"
+            />
+          </Field>
+        </>
+      ) : (
+        <>
+          <Field label={f.kind === 'percent' ? 'Valeur (%)' : 'Valeur (€)'}>
+            <input
+              style={S.input}
+              type="number"
+              min="0"
+              step={f.kind === 'percent' ? 1 : 0.5}
+              value={f.value}
+              onChange={(e) => set('value', e.target.value)}
+            />
+          </Field>
 
-      <Field label="Panier minimum" hint="0 = aucun minimum requis">
-        <input style={S.input} type="number" min="0" step="0.5" value={f.min_total} onChange={(e) => set('min_total', e.target.value)} />
-      </Field>
+          <Field label="Panier minimum" hint="0 = aucun minimum requis">
+            <input style={S.input} type="number" min="0" step="0.5" value={f.min_total} onChange={(e) => set('min_total', e.target.value)} />
+          </Field>
 
-      <Field label="Nombre d'utilisations max" hint="Vide = illimité">
-        <input
-          style={S.input}
-          type="number"
-          min="1"
-          value={f.max_uses ?? ''}
-          onChange={(e) => set('max_uses', e.target.value)}
-          placeholder="Illimité"
-        />
-      </Field>
+          <Field label="Nombre d'utilisations max" hint="Vide = illimité">
+            <input
+              style={S.input}
+              type="number"
+              min="1"
+              value={f.max_uses ?? ''}
+              onChange={(e) => set('max_uses', e.target.value)}
+              placeholder="Illimité"
+            />
+          </Field>
+        </>
+      )}
 
       <button
         onClick={() => set('active', !f.active)}

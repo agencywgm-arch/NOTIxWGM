@@ -45,6 +45,10 @@ feuille de route *v2.0 — août 2026* (cas pilote **Noti Club · Noti Calling**
   d'incident (impayé passé)
 - **Espace commande en 3 univers** : Boissons au verre · Food · Bouteilles, avec sous-catégories
 - Formats multiples (12 cl / 75 cl / magnum) et options composables ; panier, note libre, code promo
+- **Forfaits Groupes (pass à crédits)** : un code (vendu hors app, lien de paiement en amont)
+  crédite chaque personne d'un portefeuille — 1 alcool éligible = 2 crédits, 1 soft = 1 crédit —
+  plus un jeton food (convertible en crédits avant 22h, auto-converti si arrivée après 22h30).
+  Consommé automatiquement à la commande, en plus d'un éventuel code promo classique
 - **Discipline de la file** : cumul autorisé tant que la commande est en préparation ;
   **blocage dès qu'une commande passe à « prête »**, jusqu'au retrait au bar
 - Confirmation avec **code de retrait**, temps estimé et compte à rebours
@@ -127,6 +131,7 @@ supabase/
     0010_in_prep_status.sql      étape « En préparation » (patch, installs existantes)
     0011_in_prep_close_event.sql clôture de soirée adaptée à « En préparation » (patch, installs existantes)
     0012_menu_rentree_2026.sql   nouveaux prix carte Noti Club (patch, installs existantes)
+    0013_forfaits_credits.sql    Forfaits Groupes Noti : pass à crédits (patch, installs existantes)
   functions/
     notify/                notification de statut / diffusion / message individuel
     reminders/             relances automatiques (cron)
@@ -191,6 +196,12 @@ feuille de route §10). Notez **Project URL** et **anon public key** (*Settings 
 > cliquez sur **🍸 Carte Noti Club** pour appliquer les nouveaux prix aux articles déjà en
 > base (le rechargement met à jour, il ne duplique pas). Une base neuve n'en a pas besoin :
 > `0005_seed_noti_menu.sql` contient déjà directement cette version.
+>
+> **Forfaits Groupes Noti (pass à crédits) ?** Exécutez
+> `supabase/migrations/0013_forfaits_credits.sql` — il étiquette automatiquement les
+> articles déjà en base et rétroactivement pour tous les venues existants, aucune action
+> supplémentaire nécessaire. Une base neuve n'en a pas besoin : `0005_seed_noti_menu.sql`
+> contient déjà l'appel d'étiquetage.
 
 ### 3. Activer l'authentification
 

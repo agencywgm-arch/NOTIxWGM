@@ -195,6 +195,9 @@ begin
        'IGP Méditerranée — Ponton 7 2024'
      );
 
+  -- Étiquetage des articles éligibles aux forfaits à crédits (cf. 0013).
+  perform public.tag_credit_menu(p_venue);
+
   return n;
 end;
 $$;
