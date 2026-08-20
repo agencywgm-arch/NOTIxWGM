@@ -119,13 +119,14 @@ supabase/
     0002_rls.sql           Row Level Security
     0003_realtime_reporting.sql  Realtime, vues de pilotage, event_report, close_event
     0004_storage.sql       bucket "noti"
-    0005_seed_noti_menu.sql      carte du Noti Club
+    0005_seed_noti_menu.sql      carte du Noti Club (rentrée 2026)
     0006_simplify_identity.sql   retrait de l'obligation de téléphone (patch, installs existantes)
     0007_reload_menu_idempotent.sql  carte rechargeable sans doublons (patch, installs existantes)
     0008_promo_preview.sql       aperçu code promo au checkout (patch, installs existantes)
     0009_require_profile.sql     prénom + nom + e-mail obligatoires (patch, installs existantes)
     0010_in_prep_status.sql      étape « En préparation » (patch, installs existantes)
     0011_in_prep_close_event.sql clôture de soirée adaptée à « En préparation » (patch, installs existantes)
+    0012_menu_rentree_2026.sql   nouveaux prix carte Noti Club (patch, installs existantes)
   functions/
     notify/                notification de statut / diffusion / message individuel
     reminders/             relances automatiques (cron)
@@ -184,6 +185,12 @@ feuille de route §10). Notez **Project URL** et **anon public key** (*Settings 
 >
 > Une base neuve n'en a pas besoin : `0001_schema.sql` et `0003_realtime_reporting.sql`
 > contiennent déjà directement cette version.
+>
+> **Nouveaux prix carte Noti Club (rentrée 2026) ?** Exécutez
+> `supabase/migrations/0012_menu_rentree_2026.sql`, puis dans l'onglet **Carte** côté app,
+> cliquez sur **🍸 Carte Noti Club** pour appliquer les nouveaux prix aux articles déjà en
+> base (le rechargement met à jour, il ne duplique pas). Une base neuve n'en a pas besoin :
+> `0005_seed_noti_menu.sql` contient déjà directement cette version.
 
 ### 3. Activer l'authentification
 

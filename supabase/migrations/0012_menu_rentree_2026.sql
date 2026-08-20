@@ -1,23 +1,21 @@
 -- ============================================================================
---  NOTI Calling — 0005_seed_noti_menu.sql
---  Carte du NOTI CLUB — RENTRÉE 2026.
+--  NOTI Calling — 0012_menu_rentree_2026.sql
+--  Mise à jour de la carte Noti Club — RENTRÉE 2026 (patch, installs existantes).
 --
---  Répartition dans les 3 univers de la feuille de route (§04) :
---   · drinks  = tout ce qui se sert au verre (spritz, cocktails, vins au verre,
---               bières, softs, spiritueux à la dose, digestifs, apéritifs)
---   · bottles = Commandes de bouteilles (service à table / entrée groupe) :
---               vins 75 cl (alignés 50 €), champagnes, bouteilles de spiritueux
---   · food    = non géré ici (saisi et maintenu à la main côté staff, carte
---               inchangée à la rentrée 2026 — aucune donnée à rejouer)
---
---  Logique de rentrée 2026 :
+--  Remplace seed_noti_menu() par la version « Rentrée 2026 » :
 --   · Au bar (au verre + bouteilles au bar) : +15 % arrondi à l'euro supérieur.
 --   · Tous les anciens items à 7 € → 10 € (Red Bull, détox, apéritifs).
 --   · Commandes de bouteilles : prix fixes, vins alignés à 50 €.
---   · Rosé Chardonnay/Ecoterra et rosé Ponton 7 retirés de la carte des vins
---     au verre (delistés ci-dessous, jamais supprimés — historique conservé).
+--   · Food : inchangé (non géré par cette fonction).
+--   · Rosé Chardonnay/Ecoterra et rosé Ponton 7 retirés de la carte (delistés,
+--     pas supprimés — l'historique des commandes déjà passées est préservé).
 --
---  Usage : select public.seed_noti_menu('<venue_id>');
+--  Un nouvel environnement qui repart de zéro n'en a pas besoin : le fichier
+--  0005_seed_noti_menu.sql à jour contient directement cette version.
+--
+--  Après avoir collé ce bloc : rouvrez l'onglet Carte côté app et cliquez sur
+--  « 🍸 Carte Noti Club » pour appliquer les nouveaux prix aux articles déjà
+--  en base (le rechargement met à jour, il ne duplique pas).
 -- ============================================================================
 
 -- Rejouable à volonté (bouton « Recharger la carte Noti Club » côté app) : les
