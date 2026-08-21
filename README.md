@@ -158,6 +158,7 @@ supabase/
     0015_profil_etendu.sql       téléphone/CP/naissance obligatoires, espace client, code unifié (patch, installs existantes)
     0016_profil_telephone_editable.sql  téléphone modifiable depuis l'espace client (patch, TOUTES installs)
     0017_illustrations_produits.sql     une illustration par article (patch, TOUTES installs)
+    0018_profil_cp_naissance_editable.sql  code postal / naissance modifiables (patch, TOUTES installs)
   functions/
     notify/                notification de statut / diffusion / message individuel
     reminders/             relances automatiques (cron)
@@ -252,6 +253,11 @@ feuille de route §10). Notez **Project URL** et **anon public key** (*Settings 
 > (~250 Ko) car chaque image est intégrée directement dans le SQL ; le collage peut prendre
 > quelques secondes de plus que les autres blocs. Rejoué automatiquement à chaque clic sur
 > **🍸 Carte Noti Club**, donc pas besoin de le recoller après un premier passage.
+>
+> **`0018_profil_cp_naissance_editable.sql` s'exécute dans tous les cas**, base neuve ou
+> existante : code postal et date de naissance deviennent eux aussi modifiables depuis l'espace
+> client (comme le téléphone, 0016) — indispensable pour les fiches créées avant l'ajout de ces
+> deux champs (0015), qui les ont vides sans lui.
 
 ### 3. Activer l'authentification
 

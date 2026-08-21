@@ -1276,7 +1276,8 @@ function OrderingApp({ event, venue, scanPoint, lang, setLang, customer, showToa
   const [pushOn, setPushOn] = useState(false)
   const [reviewFor, setReviewFor] = useState(null)
   const [profileOpen, setProfileOpen] = useState(false)
-  const profileIncomplete = !customer?.email || !customer?.instagram
+  const profileIncomplete =
+    !customer?.email || !customer?.instagram || !customer?.postal_code || !customer?.birthdate
   const [pass, setPass] = useState(null)
   // Code % / montant classique — saisi une seule fois (même emplacement que
   // le forfait), réappliqué automatiquement à chaque commande tant qu'il
@@ -1766,13 +1767,21 @@ function OrderingApp({ event, venue, scanPoint, lang, setLang, customer, showToa
       </div>
 
       <div style={{ padding: 16 }}>
-        {/* Rappel : profil optionnel incomplet (retour terrain) */}
+        {/* Rappel : profil incomplet (champs optionnels, ou champs devenus
+            obligatoires après coup sur une fiche créée avant leur ajout) */}
         {profileIncomplete && (
           <div style={{ marginBottom: 14 }}>
             <Banner tone="info">
-              <strong>Complétez votre profil</strong> ({!customer?.email && 'e-mail'}
-              {!customer?.email && !customer?.instagram && ' et '}
-              {!customer?.instagram && 'Instagram'}) —{' '}
+              <strong>Complétez votre profil</strong> (
+              {[
+                !customer?.postal_code && 'code postal',
+                !customer?.birthdate && 'date de naissance',
+                !customer?.email && 'e-mail',
+                !customer?.instagram && 'Instagram',
+              ]
+                .filter(Boolean)
+                .join(', ')}
+              ) —{' '}
               <button
                 onClick={() => setProfileOpen(true)}
                 style={{ background: 'none', border: 'none', padding: 0, color: C.indigo, fontWeight: 600, cursor: 'pointer', fontSize: 'inherit' }}
@@ -2618,6 +2627,8 @@ function PromoCodeCard({ pass, promoCode, onRedeemCode, onClearCode, onConvert, 
  */
 function ClientProfileSheet({ open, customer, onClose, onSaved, showToast }) {
   const [phone, setPhone] = useState('')
+  const [postalCode, setPostalCode] = useState('')
+  const [birthdate, setBirthdate] = useState('')
   const [email, setEmail] = useState('')
   const [instagram, setInstagram] = useState('')
   const [busy, setBusy] = useState(false)
@@ -2625,6 +2636,8 @@ function ClientProfileSheet({ open, customer, onClose, onSaved, showToast }) {
   useEffect(() => {
     if (open && customer) {
       setPhone(customer.phone || '')
+      setPostalCode(customer.postal_code || '')
+      setBirthdate(customer.birthdate || '')
       setEmail(customer.email || '')
       setInstagram(customer.instagram || '')
     }
@@ -2634,16 +2647,22 @@ function ClientProfileSheet({ open, customer, onClose, onSaved, showToast }) {
 
   async function save() {
     if (!phone.trim()) return showToast('Numéro de téléphone obligatoire.', 'error')
+    if (!postalCode.trim()) return showToast('Code postal obligatoire.', 'error')
+    if (!birthdate) return showToast('Date de naissance obligatoire.', 'error')
     if (email.trim() && !EMAIL_RE.test(email.trim())) return showToast('Adresse e-mail invalide.', 'error')
     setBusy(true)
     try {
       const { error } = await supabase.rpc('update_my_optional_profile', {
         p_phone: phone.trim(),
+        p_postal_code: postalCode.trim(),
+        p_birthdate: birthdate,
         p_email: email.trim() || '',
         p_instagram: instagram.trim() || '',
       })
       if (error) throw error
       LS.set('noti:phone', phone)
+      LS.set('noti:postalCode', postalCode)
+      LS.set('noti:birthdate', birthdate)
       LS.set('noti:email', email)
       LS.set('noti:instagram', instagram)
       onClose()
@@ -2659,14 +2678,8 @@ function ClientProfileSheet({ open, customer, onClose, onSaved, showToast }) {
     <Sheet open={open} onClose={onClose} title="Espace client">
       <div style={{ ...S.card, marginBottom: 16 }}>
         <div style={{ ...S.label, marginBottom: 10 }}>Vos informations</div>
-        <div style={{ display: 'grid', gap: 8, fontSize: 14 }}>
-          <div>
-            {customer.first_name} {customer.last_name}
-          </div>
-          <div style={{ color: C.dim }}>
-            {customer.postal_code}
-            {customer.birthdate ? ` · né(e) le ${new Date(customer.birthdate).toLocaleDateString('fr-FR')}` : ''}
-          </div>
+        <div style={{ fontSize: 14 }}>
+          {customer.first_name} {customer.last_name}
         </div>
       </div>
 
@@ -2680,6 +2693,33 @@ function ClientProfileSheet({ open, customer, onClose, onSaved, showToast }) {
           placeholder="06 12 34 56 78"
         />
       </Field>
+
+      <div style={{ display: 'flex', gap: 10 }}>
+        <div style={{ flex: 1 }}>
+          <Field label="Code postal">
+            <input
+              style={S.input}
+              inputMode="numeric"
+              value={postalCode}
+              onChange={(e) => setPostalCode(e.target.value)}
+              autoComplete="postal-code"
+              placeholder="75011"
+            />
+          </Field>
+        </div>
+        <div style={{ flex: 1 }}>
+          <Field label="Date de naissance">
+            <input
+              style={S.input}
+              type="date"
+              value={birthdate}
+              onChange={(e) => setBirthdate(e.target.value)}
+              autoComplete="bday"
+              max={new Date().toISOString().slice(0, 10)}
+            />
+          </Field>
+        </div>
+      </div>
 
       <Field label="E-mail" hint="Optionnel">
         <input
