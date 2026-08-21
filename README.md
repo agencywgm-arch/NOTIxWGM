@@ -52,6 +52,8 @@ feuille de route *v2.0 — août 2026* (cas pilote **Noti Club · Noti Calling**
   en cas d'incident (impayé passé)
 - **Espace commande en 3 univers** : Boissons au verre · Food · Bouteilles, avec sous-catégories
 - Formats multiples (12 cl / 75 cl / magnum) et options composables ; panier, note libre
+- **Illustration dessinée par article** (verre/bouteille aux couleurs Noti Calling, une image
+  distincte par ligne de carte) — encodée directement en base, jamais de lien externe cassé
 - **Un seul emplacement pour tout code** (réduction % / montant, ou forfait de groupe à crédits)
   — le client n'a pas à savoir de quel type il s'agit ; activé une fois, réappliqué automatiquement
   aux commandes suivantes
@@ -155,6 +157,7 @@ supabase/
     0014_realtime_products.sql   rupture de stock en direct côté client (patch, TOUTES installs)
     0015_profil_etendu.sql       téléphone/CP/naissance obligatoires, espace client, code unifié (patch, installs existantes)
     0016_profil_telephone_editable.sql  téléphone modifiable depuis l'espace client (patch, TOUTES installs)
+    0017_illustrations_produits.sql     une illustration par article (patch, TOUTES installs)
   functions/
     notify/                notification de statut / diffusion / message individuel
     reminders/             relances automatiques (cron)
@@ -242,6 +245,13 @@ feuille de route §10). Notez **Project URL** et **anon public key** (*Settings 
 > **`0016_profil_telephone_editable.sql` s'exécute dans tous les cas**, base neuve ou existante :
 > il rend le téléphone modifiable depuis l'espace client (en plus d'e-mail / Instagram), avec un
 > message clair si le numéro est déjà utilisé par une autre fiche.
+>
+> **`0017_illustrations_produits.sql` s'exécute dans tous les cas**, base neuve ou existante :
+> une illustration dessinée (verre/bouteille aux couleurs Noti Calling, encodée en data URI —
+> jamais de lien externe, jamais cassée) pour chaque article de la carte type. Fichier volumineux
+> (~250 Ko) car chaque image est intégrée directement dans le SQL ; le collage peut prendre
+> quelques secondes de plus que les autres blocs. Rejoué automatiquement à chaque clic sur
+> **🍸 Carte Noti Club**, donc pas besoin de le recoller après un premier passage.
 
 ### 3. Activer l'authentification
 

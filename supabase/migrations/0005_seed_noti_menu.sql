@@ -198,6 +198,9 @@ begin
   -- Étiquetage des articles éligibles aux forfaits à crédits (cf. 0013).
   perform public.tag_credit_menu(p_venue);
 
+  -- Illustration par article (cf. 0017).
+  perform public.tag_product_illustrations(p_venue);
+
   return n;
 end;
 $$;
