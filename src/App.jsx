@@ -1655,7 +1655,7 @@ function OrderingApp({ event, venue, scanPoint, lang, setLang, customer, showToa
               </select>
             )}
             <button
-              onClick={() => setView(view === 'menu' ? 'orders' : 'menu')}
+              onClick={() => setView(view === 'orders' ? 'menu' : 'orders')}
               style={{
                 ...S.chip,
                 position: 'relative',
@@ -1663,8 +1663,8 @@ function OrderingApp({ event, venue, scanPoint, lang, setLang, customer, showToa
                 color: view === 'orders' ? C.terracotta : C.dim,
               }}
             >
-              {view === 'menu' ? 'Mes commandes' : 'La carte'}
-              {activeOrders.length > 0 && view === 'menu' && (
+              {view === 'orders' ? 'La carte' : 'Mes commandes'}
+              {activeOrders.length > 0 && view !== 'orders' && (
                 <span
                   style={{
                     position: 'absolute',
@@ -1683,6 +1683,48 @@ function OrderingApp({ event, venue, scanPoint, lang, setLang, customer, showToa
                   }}
                 >
                   {activeOrders.length}
+                </span>
+              )}
+            </button>
+            <button
+              onClick={() => setView(view === 'messages' ? 'menu' : 'messages')}
+              title="Messages"
+              style={{
+                ...S.chip,
+                width: 40,
+                minHeight: 0,
+                height: 40,
+                padding: 0,
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                fontSize: 16,
+                position: 'relative',
+                borderColor: view === 'messages' ? C.terracotta : C.lineHi,
+                color: view === 'messages' ? C.terracotta : C.dim,
+              }}
+            >
+              💬
+              {unread.length > 0 && view !== 'messages' && (
+                <span
+                  style={{
+                    position: 'absolute',
+                    top: -3,
+                    right: -3,
+                    width: 16,
+                    height: 16,
+                    borderRadius: 8,
+                    background: C.terracotta,
+                    color: '#fff',
+                    fontSize: 9,
+                    fontWeight: 700,
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                    border: `2px solid ${C.cream}`,
+                  }}
+                >
+                  {unread.length}
                 </span>
               )}
             </button>
@@ -1765,60 +1807,44 @@ function OrderingApp({ event, venue, scanPoint, lang, setLang, customer, showToa
           </div>
         )}
 
-        {/* Messages de l'organisateur */}
-        {unread.length > 0 && (
-          <div style={{ display: 'grid', gap: 8, marginBottom: 14 }}>
-            {unread.slice(0, 3).map((m) => (
-              <div
-                key={m.id}
-                style={{
-                  background: m.kind === 'individual' ? 'rgba(106,95,214,.10)' : C.paper,
-                  border: `1.5px solid ${m.kind === 'individual' ? C.indigo : C.line}`,
-                  borderRadius: 14,
-                  padding: 14,
-                }}
-              >
-                <div
-                  style={{
-                    fontFamily: FONT.label,
-                    fontSize: 10.5,
-                    letterSpacing: 1.4,
-                    textTransform: 'uppercase',
-                    color: m.kind === 'individual' ? C.indigo : C.terracotta,
-                    marginBottom: 5,
-                  }}
-                >
-                  {m.kind === 'individual' ? 'Message pour vous' : 'Annonce de la soirée'} ·{' '}
-                  {timeFR(m.created_at)}
-                </div>
-                <div style={{ fontSize: 14, lineHeight: 1.55 }}>{m.body}</div>
-                {m.customer_id === customer?.id && (
-                  <button
-                    onClick={async () => {
-                      await supabase
-                        .from('messages')
-                        .update({ read_at: new Date().toISOString() })
-                        .eq('id', m.id)
-                      loadMessages()
-                    }}
-                    style={{
-                      background: 'none',
-                      border: 'none',
-                      color: C.dim,
-                      fontSize: 12,
-                      padding: '8px 0 0',
-                      cursor: 'pointer',
-                    }}
-                  >
-                    Marquer comme lu
-                  </button>
-                )}
-              </div>
-            ))}
+        {/* Messages de l'organisateur — pointeur vers le canal dédié (onglet 💬) */}
+        {unread.length > 0 && view !== 'messages' && (
+          <div style={{ marginBottom: 14 }}>
+            <button
+              onClick={() => setView('messages')}
+              style={{
+                ...S.card,
+                width: '100%',
+                padding: 12,
+                display: 'flex',
+                alignItems: 'center',
+                gap: 8,
+                border: `1.5px solid ${C.terracotta}55`,
+                cursor: 'pointer',
+                color: C.text,
+                textAlign: 'left',
+              }}
+            >
+              <span style={{ fontSize: 18 }}>💬</span>
+              <span style={{ fontSize: 13.5 }}>
+                {unread.length} nouveau{unread.length > 1 ? 'x' : ''} message{unread.length > 1 ? 's' : ''} de l’équipe
+              </span>
+              <span style={{ marginLeft: 'auto', color: C.terracotta, fontSize: 12, fontWeight: 600 }}>Voir</span>
+            </button>
           </div>
         )}
 
-        {view === 'orders' ? (
+        {view === 'messages' ? (
+          <MessagesView
+            messages={messages}
+            customer={customer}
+            onMarkRead={async (m) => {
+              await supabase.from('messages').update({ read_at: new Date().toISOString() }).eq('id', m.id)
+              loadMessages()
+            }}
+            onBackToMenu={() => setView('menu')}
+          />
+        ) : view === 'orders' ? (
           <MyOrders
             orders={orders}
             event={event}
@@ -2065,7 +2091,7 @@ function ProductCard({ product, lang, disabled, onAdd }) {
         <img
           src={product.image_url}
           alt=""
-          style={{ width: 58, height: 58, borderRadius: 12, objectFit: 'cover', flexShrink: 0 }}
+          style={{ width: 68, height: 68, borderRadius: 14, objectFit: 'cover', flexShrink: 0 }}
         />
       )}
 
@@ -2189,6 +2215,21 @@ function ProductSheet({ product, lang, onClose, onConfirm }) {
 
   return (
     <Sheet open={!!product} onClose={onClose} title={info.name}>
+      {product.image_url && (
+        <img
+          src={product.image_url}
+          alt=""
+          style={{
+            width: '100%',
+            height: 190,
+            objectFit: 'cover',
+            borderRadius: 16,
+            marginTop: -8,
+            marginBottom: 16,
+          }}
+        />
+      )}
+
       {info.description && (
         <div style={{ color: C.dim, fontSize: 13.5, marginTop: -8, marginBottom: 18, lineHeight: 1.55 }}>
           {info.description}
@@ -2576,12 +2617,14 @@ function PromoCodeCard({ pass, promoCode, onRedeemCode, onClearCode, onConvert, 
  * le souhaite : c'est le rappel affiché tant qu'ils manquent qui renvoie ici.
  */
 function ClientProfileSheet({ open, customer, onClose, onSaved, showToast }) {
+  const [phone, setPhone] = useState('')
   const [email, setEmail] = useState('')
   const [instagram, setInstagram] = useState('')
   const [busy, setBusy] = useState(false)
 
   useEffect(() => {
     if (open && customer) {
+      setPhone(customer.phone || '')
       setEmail(customer.email || '')
       setInstagram(customer.instagram || '')
     }
@@ -2590,14 +2633,17 @@ function ClientProfileSheet({ open, customer, onClose, onSaved, showToast }) {
   if (!customer) return null
 
   async function save() {
+    if (!phone.trim()) return showToast('Numéro de téléphone obligatoire.', 'error')
     if (email.trim() && !EMAIL_RE.test(email.trim())) return showToast('Adresse e-mail invalide.', 'error')
     setBusy(true)
     try {
       const { error } = await supabase.rpc('update_my_optional_profile', {
+        p_phone: phone.trim(),
         p_email: email.trim() || '',
         p_instagram: instagram.trim() || '',
       })
       if (error) throw error
+      LS.set('noti:phone', phone)
       LS.set('noti:email', email)
       LS.set('noti:instagram', instagram)
       onClose()
@@ -2617,13 +2663,23 @@ function ClientProfileSheet({ open, customer, onClose, onSaved, showToast }) {
           <div>
             {customer.first_name} {customer.last_name}
           </div>
-          <div style={{ color: C.dim }}>{phoneFR(customer.phone)}</div>
           <div style={{ color: C.dim }}>
             {customer.postal_code}
             {customer.birthdate ? ` · né(e) le ${new Date(customer.birthdate).toLocaleDateString('fr-FR')}` : ''}
           </div>
         </div>
       </div>
+
+      <Field label="Téléphone">
+        <input
+          style={S.input}
+          type="tel"
+          value={phone}
+          onChange={(e) => setPhone(e.target.value)}
+          autoComplete="tel"
+          placeholder="06 12 34 56 78"
+        />
+      </Field>
 
       <Field label="E-mail" hint="Optionnel">
         <input
@@ -2844,6 +2900,73 @@ function CheckoutSheet({ open, lang, event, cart, pass, promoCode, subtotal, pre
 }
 
 // ------------------------------------------------------- Suivi des commandes
+// -------------------------------------------------- Canal de discussion
+/**
+ * Historique complet des messages (diffusions + messages individuels),
+ * contrairement au bandeau qui ne montrait que les 3 derniers non lus.
+ */
+function MessagesView({ messages, customer, onMarkRead, onBackToMenu }) {
+  if (!messages.length)
+    return (
+      <>
+        <Empty
+          emoji="💬"
+          title="Aucun message pour l’instant"
+          sub="Les annonces de la soirée et les messages qui vous sont adressés apparaîtront ici."
+        />
+        <button onClick={onBackToMenu} style={S.btnGhost}>
+          Voir la carte
+        </button>
+      </>
+    )
+
+  return (
+    <div style={{ display: 'grid', gap: 8 }}>
+      {messages
+        .filter((m) => m.kind !== 'status')
+        .map((m) => (
+          <div
+            key={m.id}
+            style={{
+              background: m.kind === 'individual' ? 'rgba(106,95,214,.10)' : C.paper,
+              border: `1.5px solid ${m.kind === 'individual' ? C.indigo : C.line}`,
+              borderRadius: 14,
+              padding: 14,
+            }}
+          >
+            <div
+              style={{
+                display: 'flex',
+                alignItems: 'center',
+                gap: 6,
+                fontFamily: FONT.label,
+                fontSize: 10.5,
+                letterSpacing: 1.4,
+                textTransform: 'uppercase',
+                color: m.kind === 'individual' ? C.indigo : C.terracotta,
+                marginBottom: 5,
+              }}
+            >
+              {m.kind === 'individual' ? 'Message pour vous' : 'Annonce de la soirée'} · {timeFR(m.created_at)}
+              {m.customer_id === customer?.id && !m.read_at && (
+                <span style={{ width: 7, height: 7, borderRadius: 4, background: C.terracotta }} />
+              )}
+            </div>
+            <div style={{ fontSize: 14, lineHeight: 1.55 }}>{m.body}</div>
+            {m.customer_id === customer?.id && !m.read_at && (
+              <button
+                onClick={() => onMarkRead(m)}
+                style={{ background: 'none', border: 'none', color: C.dim, fontSize: 12, padding: '8px 0 0', cursor: 'pointer' }}
+              >
+                Marquer comme lu
+              </button>
+            )}
+          </div>
+        ))}
+    </div>
+  )
+}
+
 function MyOrders({ orders, event, venue, customer, lang, pushOn, onEnablePush, onReview, onBackToMenu }) {
   const t = useT(lang)
   const [now, setNow] = useState(Date.now())
@@ -4756,6 +4879,7 @@ function OrgaTab({ event, venue, showToast, onEventChange }) {
   const [editingPromo, setEditingPromo] = useState(null)
   const [waiting, setWaiting] = useState([])
   const [now, setNow] = useState(Date.now())
+  const [ficheFor, setFicheFor] = useState(null)
 
   useEffect(() => {
     const id = setInterval(() => setNow(Date.now()), 15000)
@@ -5084,7 +5208,11 @@ function OrgaTab({ event, venue, showToast, onEventChange }) {
       {board.length === 0 && <Empty emoji="🏆" title="Pas encore de commande" />}
       <div style={{ display: 'grid', gap: 8, marginBottom: 18 }}>
         {board.map((r, i) => (
-          <div key={r.customer_id} style={{ ...S.card, padding: 12, display: 'flex', gap: 12, alignItems: 'center' }}>
+          <button
+            key={r.customer_id}
+            onClick={() => setFicheFor(r.customer_id)}
+            style={{ ...S.card, padding: 12, display: 'flex', gap: 12, alignItems: 'center', border: 'none', textAlign: 'left', cursor: 'pointer', color: C.text }}
+          >
             <div
               style={{
                 width: 30,
@@ -5115,12 +5243,21 @@ function OrgaTab({ event, venue, showToast, onEventChange }) {
               </div>
             </div>
             <div style={{ ...S.money, fontWeight: 600, color: C.terracotta }}>{eur(r.total_spent)}</div>
-            <button onClick={() => setDmFor(r)} title="Message individuel" style={{ ...stepBtn, width: 38, height: 38, fontSize: 14 }}>
+            <span
+              onClick={(e) => {
+                e.stopPropagation()
+                setDmFor(r)
+              }}
+              title="Message individuel"
+              style={{ ...stepBtn, width: 38, height: 38, fontSize: 14, display: 'flex', alignItems: 'center', justifyContent: 'center' }}
+            >
               ✉
-            </button>
-          </div>
+            </span>
+          </button>
         ))}
       </div>
+
+      <ClientFicheSheet customerId={ficheFor} onClose={() => setFicheFor(null)} showToast={showToast} />
 
       {/* Reporting */}
       <div style={{ ...S.h2, marginBottom: 10 }}>Reporting</div>
@@ -5348,6 +5485,118 @@ function BroadcastSheet({ open, event, onClose, onSent, showToast }) {
       >
         {busy ? 'Envoi…' : 'Diffuser'}
       </button>
+    </Sheet>
+  )
+}
+
+/** Fiche client complète (staff) — tous les champs collectés, tous événements confondus. */
+function ClientFicheSheet({ customerId, onClose, showToast }) {
+  const [cust, setCust] = useState(null)
+  const [promoCodesUsed, setPromoCodesUsed] = useState([])
+  const [loading, setLoading] = useState(false)
+
+  useEffect(() => {
+    if (!customerId) {
+      setCust(null)
+      return
+    }
+    let dead = false
+    setLoading(true)
+    ;(async () => {
+      const [{ data: c, error }, { data: ords }, { data: passes }] = await Promise.all([
+        supabase.from('customers').select('*').eq('id', customerId).maybeSingle(),
+        supabase.from('orders').select('promo_code').eq('customer_id', customerId).not('promo_code', 'is', null),
+        supabase.from('event_passes').select('promo_codes ( code )').eq('customer_id', customerId),
+      ])
+      if (dead) return
+      if (error) showToast?.(frError(error), 'error')
+      setCust(c || null)
+      const codes = new Set([
+        ...(ords || []).map((o) => o.promo_code).filter(Boolean),
+        ...(passes || []).map((p) => p.promo_codes?.code).filter(Boolean),
+      ])
+      setPromoCodesUsed([...codes])
+      setLoading(false)
+    })()
+    return () => {
+      dead = true
+    }
+  }, [customerId, showToast])
+
+  return (
+    <Sheet open={!!customerId} onClose={onClose} title="Fiche client">
+      {loading || !cust ? (
+        <Spinner />
+      ) : (
+        <div style={{ display: 'grid', gap: 14 }}>
+          <div>
+            <div style={{ ...S.h1, fontSize: 20 }}>
+              {cust.first_name} {cust.last_name}
+            </div>
+            {(cust.tags || []).length > 0 && (
+              <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginTop: 6 }}>
+                {cust.tags.map((tg) => (
+                  <span
+                    key={tg}
+                    style={{
+                      ...S.chip,
+                      padding: '3px 10px',
+                      fontSize: 11,
+                      color: tg === 'incident' ? C.danger : C.indigo,
+                      borderColor: tg === 'incident' ? C.danger : C.indigo,
+                    }}
+                  >
+                    {TAG_LABEL[tg] || tg}
+                  </span>
+                ))}
+              </div>
+            )}
+          </div>
+
+          <div style={{ ...S.card, padding: 14, display: 'grid', gap: 8, fontSize: 14 }}>
+            <div>📞 {phoneFR(cust.phone) || '—'}</div>
+            <div>✉️ {cust.email || '—'}</div>
+            <div>📷 {cust.instagram || '—'}</div>
+            <div>📮 {cust.postal_code || '—'}</div>
+            <div>🎂 {cust.birthdate ? new Date(cust.birthdate).toLocaleDateString('fr-FR') : '—'}</div>
+          </div>
+
+          <div style={{ display: 'flex', gap: 8 }}>
+            <div style={{ ...S.card, flex: 1, padding: 12, textAlign: 'center' }}>
+              <div style={{ ...S.money, fontSize: 19, fontWeight: 600 }}>{cust.events_count}</div>
+              <div style={{ ...S.label, marginBottom: 0, marginTop: 2, fontSize: 9.5 }}>Soirées</div>
+            </div>
+            <div style={{ ...S.card, flex: 1, padding: 12, textAlign: 'center' }}>
+              <div style={{ ...S.money, fontSize: 19, fontWeight: 600 }}>{cust.orders_count}</div>
+              <div style={{ ...S.label, marginBottom: 0, marginTop: 2, fontSize: 9.5 }}>Commandes</div>
+            </div>
+            <div style={{ ...S.card, flex: 1, padding: 12, textAlign: 'center' }}>
+              <div style={{ ...S.money, fontSize: 19, fontWeight: 600, color: C.terracotta }}>{eur(cust.total_spent)}</div>
+              <div style={{ ...S.label, marginBottom: 0, marginTop: 2, fontSize: 9.5 }}>Dépensé</div>
+            </div>
+          </div>
+
+          {promoCodesUsed.length > 0 && (
+            <div>
+              <div style={{ ...S.label, marginBottom: 6 }}>Codes promo utilisés</div>
+              <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+                {promoCodesUsed.map((c) => (
+                  <span key={c} style={{ ...S.chip, fontSize: 11.5, padding: '4px 10px' }}>
+                    {c}
+                  </span>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {cust.staff_note && (
+            <div>
+              <div style={{ ...S.label, marginBottom: 6 }}>Note</div>
+              <div style={{ fontSize: 13.5, color: C.dim }}>{cust.staff_note}</div>
+            </div>
+          )}
+        </div>
+      )}
     </Sheet>
   )
 }

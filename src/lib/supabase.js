@@ -49,6 +49,8 @@ export function frError(err) {
     return 'Ce QR code ne pointe plus vers une soirée valide. Demandez au staff un QR à jour.'
   if (m.includes('missing_profile')) return 'Prénom et nom sont obligatoires.'
   if (m.includes('missing_phone')) return 'Numéro de téléphone obligatoire.'
+  if (m.includes('phone_already_used'))
+    return 'Ce numéro est déjà utilisé par une autre fiche client.'
   if (m.includes('missing_postal_code')) return 'Code postal obligatoire.'
   if (m.includes('invalid_birthdate')) return 'Date de naissance invalide.'
   if (m.includes('invalid_email')) return 'Adresse e-mail invalide.'

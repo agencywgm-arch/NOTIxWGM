@@ -45,8 +45,9 @@ feuille de route *v2.0 — août 2026* (cas pilote **Noti Club · Noti Calling**
   reprend la fiche existante au lieu d'en créer une seconde. Une session anonyme Supabase
   (`signInAnonymously`) porte le JWT et **persiste** : aux venues suivantes, le scan du QR ouvre
   directement la carte, sans repasser par le formulaire. La présence est enregistrée au passage
-- **Espace client** : le client y retrouve ses informations et peut compléter e-mail / Instagram
-  quand il le souhaite — un rappel s'affiche dans l'app tant qu'ils manquent
+- **Espace client** : le client y retrouve ses informations (nom, code postal, date de naissance)
+  et peut modifier son téléphone ou compléter e-mail / Instagram quand il le souhaite — un
+  rappel s'affiche dans l'app tant que les champs optionnels manquent
 - **Reconnaissance client au premier scan** : « Bon retour parmi nous », badge VIP, message dédié
   en cas d'incident (impayé passé)
 - **Espace commande en 3 univers** : Boissons au verre · Food · Bouteilles, avec sous-catégories
@@ -86,7 +87,10 @@ feuille de route *v2.0 — août 2026* (cas pilote **Noti Club · Noti Calling**
 - **Pilotage temps réel** : présents, commandes en cours, file d'attente, encaissé, impayés
 - **Leaderboard temps réel** (qui commande le plus, panier cumulé)
 - **Diffusion à toute la soirée** (avec modèles prêts à l'emploi) et **messagerie individuelle**
-  organisateur → client
+  organisateur → client — reçus côté client dans un **canal de messages dédié** (onglet 💬,
+  historique complet, pas seulement les non-lus)
+- **Fiche client complète** : en un tap sur le leaderboard, tous les champs collectés (téléphone,
+  e-mail, Instagram, code postal, date de naissance), tags, stats et codes promo utilisés
 - **Base client** : historique, nombre de soirées, taille du groupe, **tags & segmentation**
   (VIP / habitué / gros panier / incident) — tags automatiques inclus. Le suivi cross-soirée
   repose désormais sur le **téléphone** (ancre d'identité) : il tient même si le client change
@@ -150,6 +154,7 @@ supabase/
     0013_forfaits_credits.sql    Forfaits Groupes Noti : pass à crédits (patch, installs existantes)
     0014_realtime_products.sql   rupture de stock en direct côté client (patch, TOUTES installs)
     0015_profil_etendu.sql       téléphone/CP/naissance obligatoires, espace client, code unifié (patch, installs existantes)
+    0016_profil_telephone_editable.sql  téléphone modifiable depuis l'espace client (patch, TOUTES installs)
   functions/
     notify/                notification de statut / diffusion / message individuel
     reminders/             relances automatiques (cron)
@@ -233,6 +238,10 @@ feuille de route §10). Notez **Project URL** et **anon public key** (*Settings 
 > `validate_promo_code()` (saisie de code unifiée). `0001_schema.sql` contient encore l'ancienne
 > version 3 arguments : sans `0015`, l'identification échouera dès que l'app enverra le
 > téléphone/CP/naissance qu'elle collecte désormais.
+>
+> **`0016_profil_telephone_editable.sql` s'exécute dans tous les cas**, base neuve ou existante :
+> il rend le téléphone modifiable depuis l'espace client (en plus d'e-mail / Instagram), avec un
+> message clair si le numéro est déjà utilisé par une autre fiche.
 
 ### 3. Activer l'authentification
 
