@@ -37,12 +37,14 @@ feuille de route *v2.0 — août 2026* (cas pilote **Noti Club · Noti Calling**
 ### Côté client — `/s/{scan_point_id}`
 
 - Écran d'accueil aux couleurs Noti Calling (logo, contexte, point de scan)
-- **Identification obligatoire** : prénom, nom et e-mail (aucun numéro ni SMS) — la commande ne
-  peut pas être envoyée sans cette fiche, exploitable ensuite côté CRM (relances, historique,
-  profil). Une session anonyme Supabase (`signInAnonymously`) porte le JWT ; elle persiste sur
-  l'appareil tant que le stockage local n'est pas effacé
-- **Reconnaissance client au scan** : « Bon retour parmi nous », badge VIP, message dédié en cas
-  d'incident (impayé passé)
+- **Identification obligatoire, une seule fois par appareil** : prénom, nom et e-mail (aucun
+  numéro ni SMS) — la commande ne peut pas être envoyée sans cette fiche, exploitable ensuite
+  côté CRM (relances, historique, profil). Une session anonyme Supabase (`signInAnonymously`)
+  porte le JWT et **persiste** : aux venues suivantes, le scan du QR ouvre directement la carte,
+  sans repasser par le formulaire (re-saisir ses coordonnées à chaque soirée faisait lâcher les
+  clients, donc perdre la donnée). La présence est enregistrée au passage
+- **Reconnaissance client au premier scan** : « Bon retour parmi nous », badge VIP, message dédié
+  en cas d'incident (impayé passé)
 - **Espace commande en 3 univers** : Boissons au verre · Food · Bouteilles, avec sous-catégories
 - Formats multiples (12 cl / 75 cl / magnum) et options composables ; panier, note libre, code promo
 - **Forfaits Groupes (pass à crédits)** : un code (vendu hors app, lien de paiement en amont)
@@ -62,7 +64,12 @@ feuille de route *v2.0 — août 2026* (cas pilote **Noti Club · Noti Calling**
 - Écran de production temps réel : **Reçues → En préparation → Prêtes → Retirées → Réglées**
 - **Alarme sonore** sur nouvelle commande, qui ne s'arrête que sur accusé de réception explicite
 - **Réglage du temps de préparation** selon le rush, répercuté sur le timer client
-- **Article « épuisé » en un clic** — il reste visible sur la carte, grisé et non commandable
+- **Article « épuisé » en un clic** — il reste visible sur la carte, grisé et non commandable,
+  et le basculement se propage **en direct** sur tous les téléphones connectés (Realtime, sans
+  rechargement)
+- **Retraits en retard** : une commande prête non retirée passe en alerte à **15 min** (bar +
+  organisation), puis à **20 min** l'organisateur prend le relais et contacte le client. La
+  relance automatique au client, elle, part dès **5 min** (Edge Function `reminders`)
 - **Impression de ticket** 80 mm — disponible, non obligatoire, non bloquante
 - Vue **Caisse** : suivi d'encaissement par client, sélection multiple, marquage « réglé »
   (espèces / CB / autre), suivi des impayés
@@ -132,6 +139,7 @@ supabase/
     0011_in_prep_close_event.sql clôture de soirée adaptée à « En préparation » (patch, installs existantes)
     0012_menu_rentree_2026.sql   nouveaux prix carte Noti Club (patch, installs existantes)
     0013_forfaits_credits.sql    Forfaits Groupes Noti : pass à crédits (patch, installs existantes)
+    0014_realtime_products.sql   rupture de stock en direct côté client (patch, TOUTES installs)
   functions/
     notify/                notification de statut / diffusion / message individuel
     reminders/             relances automatiques (cron)
@@ -202,6 +210,11 @@ feuille de route §10). Notez **Project URL** et **anon public key** (*Settings 
 > articles déjà en base et rétroactivement pour tous les venues existants, aucune action
 > supplémentaire nécessaire. Une base neuve n'en a pas besoin : `0005_seed_noti_menu.sql`
 > contient déjà l'appel d'étiquetage.
+>
+> **`0014_realtime_products.sql` s'exécute dans tous les cas**, base neuve ou existante : il
+> publie la table `products` en Realtime. Sans lui, marquer un article « épuisé » depuis la
+> tablette ne se voit côté client qu'au rechargement de la page — un client peut donc commander
+> un article épuisé pendant plusieurs minutes et se faire refuser sa commande à l'envoi.
 
 ### 3. Activer l'authentification
 

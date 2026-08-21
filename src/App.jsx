@@ -104,6 +104,22 @@ const TAG_LABEL = {
   incident: 'Incident',
 }
 
+// Retraits en retard — seuils communs au bar et à l'organisation, pour que
+// les deux écrans racontent la même chose au même moment.
+//  · 15 min : la commande est prête mais non retirée → alerte barman + admin.
+//  · 20 min : l'organisateur prend le relais et contacte le client.
+// (La relance automatique au client, elle, part dès 5 min : Edge Function
+//  « reminders ».)
+const RELANCE_MIN = 15
+const ESCALADE_MIN = 20
+
+/** Minutes écoulées depuis que la commande est prête à être retirée. */
+function waitingMin(order, now = Date.now()) {
+  const from = order.ready_at || order.created_at
+  if (!from) return 0
+  return Math.max(0, Math.floor((now - new Date(from).getTime()) / 60000))
+}
+
 // Multilingue FR / EN / ES (feuille de route §04 — pas de RTL)
 const T = {
   fr: {
@@ -688,18 +704,50 @@ function ClientApp({ scanPointId, session }) {
     loadCustomer()
   }, [loadCustomer])
 
+  // ---- Entrée dans la carte : enregistre la présence puis ouvre l'app ------
+  const enterApp = useCallback(async () => {
+    try {
+      await supabase.rpc('register_scan', { p_scan_point: scanPointId, p_group_size: 1 })
+    } catch (e) {
+      // Session valide mais fiche client absente côté serveur (rare : stockage
+      // local restauré sans la ligne customers correspondante) — on la recrée
+      // puis on retente une fois avant d'abandonner.
+      if (String(e?.message || '').includes('not_a_customer')) {
+        await supabase.rpc('upsert_me', {
+          p_first_name: LS.get('noti:firstName', ''),
+          p_last_name: LS.get('noti:lastName', ''),
+          p_email: LS.get('noti:email', ''),
+        })
+        await loadCustomer()
+        await supabase.rpc('register_scan', { p_scan_point: scanPointId, p_group_size: 1 })
+      } else {
+        throw e
+      }
+    }
+    setStep('app')
+  }, [scanPointId, loadCustomer])
+
   // ---- Aiguillage du parcours ---------------------------------------------
-  // Filet de sécurité uniquement : si la session/fiche client disparaît en
-  // cours de route, on ramène à l'accueil. On ne saute JAMAIS automatiquement
-  // vers « hello »/« app » au seul motif qu'une session persiste sur
-  // l'appareil — chaque scan doit repasser par l'identification explicite
-  // (voir WelcomeScreen.onStart).
+  // Session persistante (retour terrain) : un appareil déjà identifié ne
+  // repasse JAMAIS par le formulaire — il entre directement dans la carte, la
+  // présence étant enregistrée au passage. Re-saisir ses coordonnées à chaque
+  // venue faisait lâcher les clients, donc perdre la donnée.
+  const autoEntered = useRef(false)
   useEffect(() => {
     if (loading || fatal) return
     if (!session?.user || !customer) {
+      autoEntered.current = false
       setStep((s) => (s === 'welcome' || s === 'identify' ? s : 'welcome'))
+      return
     }
-  }, [loading, fatal, session, customer])
+    if (step === 'welcome' && !autoEntered.current) {
+      autoEntered.current = true
+      enterApp().catch((e) => {
+        autoEntered.current = false
+        showToast(frError(e), 'error')
+      })
+    }
+  }, [loading, fatal, session, customer, step, enterApp, showToast])
 
   if (loading)
     return (
@@ -718,8 +766,17 @@ function ClientApp({ scanPointId, session }) {
 
   const shared = { event, venue, scanPoint, lang, setLang, showToast }
 
-  if (step === 'welcome')
+  if (step === 'welcome') {
+    // Appareil déjà identifié : l'effet d'aiguillage nous emmène directement
+    // dans la carte — on évite de faire clignoter l'accueil au passage.
+    if (session?.user && customer)
+      return (
+        <div style={S.page}>
+          <Spinner label="Bon retour parmi nous…" />
+        </div>
+      )
     return <WelcomeScreen {...shared} onStart={() => setStep('identify')} />
+  }
 
   if (step === 'identify')
     return (
@@ -732,36 +789,12 @@ function ClientApp({ scanPointId, session }) {
       />
     )
 
+  // Écran de reconnaissance : uniquement au tout premier passage sur
+  // l'appareil (juste après l'identification). Les venues suivantes entrent
+  // directement dans la carte.
   if (step === 'hello')
-    return (
-      <RecognitionScreen
-        {...shared}
-        customer={customer}
-        onEnter={async () => {
-          // La présence est enregistrée après la reconnaissance, pour que le
-          // message « déjà venu » se base sur les soirées PRÉCÉDENTES.
-          try {
-            await supabase.rpc('register_scan', { p_scan_point: scanPointId, p_group_size: 1 })
-          } catch (e) {
-            // Session valide mais fiche client absente côté serveur (rare :
-            // stockage local restauré sans la ligne customers correspondante)
-            // — on la recrée puis on retente une fois avant d'abandonner.
-            if (String(e?.message || '').includes('not_a_customer')) {
-              await supabase.rpc('upsert_me', {
-                p_first_name: LS.get('noti:firstName', ''),
-                p_last_name: LS.get('noti:lastName', ''),
-                p_email: LS.get('noti:email', ''),
-              })
-              await loadCustomer()
-              await supabase.rpc('register_scan', { p_scan_point: scanPointId, p_group_size: 1 })
-            } else {
-              throw e
-            }
-          }
-          setStep('app')
-        }}
-      />
-    )
+    return <RecognitionScreen {...shared} customer={customer} onEnter={enterApp} />
+
 
   return (
     <>
@@ -842,12 +875,23 @@ function WelcomeScreen({ event, venue, scanPoint, lang, setLang, onStart }) {
         </Banner>
       ) : (
         <>
+          {/* Levée d'ambiguïté (retour terrain) : plusieurs personnes ont cru
+              qu'on ne pouvait plus commander du tout, ou seulement des
+              bouteilles à table — et faisaient malgré tout la queue au bar. */}
+          <div style={{ marginBottom: 16 }}>
+            <Banner tone="info">
+              <strong>Toute la carte se commande ici, depuis votre téléphone.</strong> Plus besoin de
+              faire la queue : vous ne passez au bar que pour <strong>récupérer</strong> votre
+              commande, et pour les <strong>bouteilles</strong> (servies immédiatement).
+            </Banner>
+          </div>
+
           <div style={{ ...S.card, marginBottom: 16 }}>
             <div style={{ display: 'grid', gap: 14 }}>
               {[
-                { n: '1', t: 'Vous commandez ici', s: 'Sans payer en ligne' },
-                { n: '2', t: 'Le bar prépare', s: 'Vous suivez en direct' },
-                { n: '3', t: 'Vous retirez au bar', s: 'Avec votre code de retrait' },
+                { n: '1', t: 'Vous commandez ici', s: 'Toute la carte, sans faire la queue' },
+                { n: '2', t: 'Le bar prépare', s: 'Vous suivez en direct, vous restez où vous êtes' },
+                { n: '3', t: 'Vous retirez au bar', s: 'Avec votre code, sans attendre' },
                 { n: '4', t: 'Vous réglez sur place', s: 'Au comptoir, comme d’habitude' },
               ].map((s) => (
                 <div key={s.n} style={{ display: 'flex', gap: 14, alignItems: 'center' }}>
@@ -1188,19 +1232,24 @@ function OrderingApp({ event, venue, scanPoint, lang, setLang, customer, showToa
     setMessages(data || [])
   }, [event?.id])
 
+  const loadProducts = useCallback(async () => {
+    if (!venue?.id) return
+    const { data } = await supabase
+      .from('products')
+      .select('*')
+      .eq('venue_id', venue.id)
+      .eq('is_listed', true)
+      .order('universe')
+      .order('sort_order')
+    setProducts(data || [])
+  }, [venue?.id])
+
   useEffect(() => {
     if (!venue?.id) return
     let dead = false
     ;(async () => {
-      const { data } = await supabase
-        .from('products')
-        .select('*')
-        .eq('venue_id', venue.id)
-        .eq('is_listed', true)
-        .order('universe')
-        .order('sort_order')
+      await loadProducts()
       if (dead) return
-      setProducts(data || [])
       await loadOrders()
       await loadMessages()
       setLoading(false)
@@ -1208,7 +1257,7 @@ function OrderingApp({ event, venue, scanPoint, lang, setLang, customer, showToa
     return () => {
       dead = true
     }
-  }, [venue?.id, loadOrders, loadMessages])
+  }, [venue?.id, loadProducts, loadOrders, loadMessages])
 
   // ---- Temps réel (WebSocket) + repli en polling doux ---------------------
   useEffect(() => {
@@ -1225,11 +1274,20 @@ function OrderingApp({ event, venue, scanPoint, lang, setLang, customer, showToa
         { event: 'INSERT', schema: 'public', table: 'messages', filter: `event_id=eq.${event.id}` },
         () => loadMessages()
       )
+      // Rupture de stock : dès que le bar bascule un article en « épuisé », la
+      // carte du client se met à jour sans rechargement (l'article reste
+      // visible mais devient non commandable).
+      .on(
+        'postgres_changes',
+        { event: 'UPDATE', schema: 'public', table: 'products', filter: `venue_id=eq.${venue?.id}` },
+        () => loadProducts()
+      )
       .subscribe()
 
     const poll = setInterval(() => {
       loadOrders()
       loadMessages()
+      loadProducts()
     }, 20000)
 
     const onSw = (e) => {
@@ -1242,7 +1300,7 @@ function OrderingApp({ event, venue, scanPoint, lang, setLang, customer, showToa
       clearInterval(poll)
       navigator.serviceWorker?.removeEventListener('message', onSw)
     }
-  }, [customer?.id, event?.id, loadOrders, loadMessages])
+  }, [customer?.id, event?.id, venue?.id, loadOrders, loadMessages, loadProducts])
 
   // ---- Sonnerie douce quand une commande passe à « prête » ----------------
   useEffect(() => {
@@ -1285,11 +1343,18 @@ function OrderingApp({ event, venue, scanPoint, lang, setLang, customer, showToa
   // ---- Défilement continu : chaque catégorie s'enchaîne, la puce active se
   // repère automatiquement selon la section visible (pas besoin de cliquer). --
   const sectionRefs = useRef({})
+  const chipRefs = useRef({})
+  // Pendant le défilement déclenché par un tap, l'observateur est neutralisé :
+  // sinon les sections traversées en chemin réécrivaient la puce active et
+  // celle-ci restait bloquée sur la catégorie précédente.
+  const scrollLock = useRef(0)
+
   useEffect(() => {
     const els = subcats.map((c) => sectionRefs.current[c]).filter(Boolean)
     if (!els.length) return
     const io = new IntersectionObserver(
       (entries) => {
+        if (Date.now() < scrollLock.current) return
         const hit = entries.filter((e) => e.isIntersecting)
         if (hit.length) {
           const top = hit.reduce((a, b) => (a.boundingClientRect.top < b.boundingClientRect.top ? a : b))
@@ -1301,6 +1366,21 @@ function OrderingApp({ event, venue, scanPoint, lang, setLang, customer, showToa
     els.forEach((el) => io.observe(el))
     return () => io.disconnect()
   }, [subcats])
+
+  // La puce active est ramenée dans la zone visible de la barre horizontale.
+  useEffect(() => {
+    if (!subcat) return
+    chipRefs.current[subcat]?.scrollIntoView({ behavior: 'smooth', block: 'nearest', inline: 'center' })
+  }, [subcat])
+
+  function goToSubcat(c) {
+    // On marque la puce tout de suite : le retour visuel ne dépend plus de
+    // l'arrivée effective de la section dans la fenêtre d'observation (une
+    // section courte en fin de carte pouvait ne jamais l'atteindre).
+    scrollLock.current = Date.now() + 900
+    setSubcat(c)
+    sectionRefs.current[c]?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+  }
 
   const subtotal = cart.reduce((s, l) => s + lineTotal(l), 0)
   const cartCount = cart.reduce((s, l) => s + l.quantity, 0)
@@ -1608,33 +1688,24 @@ function OrderingApp({ event, venue, scanPoint, lang, setLang, customer, showToa
             </div>
 
             {/* Sous-catégories — ancres : un tap fait défiler jusqu'à la section,
-                la puce active suit ensuite le défilement toute seule. */}
-            <div
-              style={{
-                display: 'flex',
-                gap: 8,
-                overflowX: 'auto',
-                paddingBottom: 4,
-                marginBottom: 14,
-                position: 'sticky',
-                top: 60,
-                zIndex: 40,
-                background: `${C.cream}f2`,
-                backdropFilter: 'blur(10px)',
-                marginLeft: -16,
-                marginRight: -16,
-                paddingLeft: 16,
-                paddingRight: 16,
-              }}
+                la puce active suit ensuite le défilement toute seule. Le voile
+                dégradé + la flèche à droite signalent qu'il y en a d'autres :
+                en test, plusieurs personnes ne voyaient pas la suite. */}
+            <ScrollHint
+              sticky
+              top={60}
+              style={{ marginBottom: 14, marginLeft: -16, marginRight: -16, paddingLeft: 16, paddingRight: 16 }}
             >
               {subcats.map((c) => (
                 <button
                   key={c}
-                  onClick={() =>
-                    sectionRefs.current[c]?.scrollIntoView({ behavior: 'smooth', block: 'start' })
-                  }
+                  ref={(el) => {
+                    chipRefs.current[c] = el
+                  }}
+                  onClick={() => goToSubcat(c)}
                   style={{
                     ...S.chip,
+                    flexShrink: 0,
                     borderColor: subcat === c ? C.indigo : C.lineHi,
                     color: subcat === c ? C.indigo : C.dim,
                     background: subcat === c ? 'rgba(106,95,214,.08)' : 'transparent',
@@ -1643,7 +1714,7 @@ function OrderingApp({ event, venue, scanPoint, lang, setLang, customer, showToa
                   {c}
                 </button>
               ))}
-            </div>
+            </ScrollHint>
 
             {subcats.map((c) => (
               <div
@@ -2054,6 +2125,87 @@ const stepBtn = {
   color: C.text,
   fontSize: 20,
   cursor: 'pointer',
+}
+
+/**
+ * Barre défilante horizontalement avec indice visuel de contenu caché.
+ * Un voile dégradé + une flèche apparaissent du côté où il reste à défiler,
+ * et disparaissent en fin de course.
+ */
+function ScrollHint({ children, sticky = false, top = 0, style }) {
+  const ref = useRef(null)
+  const [edges, setEdges] = useState({ left: false, right: false })
+
+  const measure = useCallback(() => {
+    const el = ref.current
+    if (!el) return
+    const max = el.scrollWidth - el.clientWidth
+    setEdges({ left: el.scrollLeft > 4, right: max > 4 && el.scrollLeft < max - 4 })
+  }, [])
+
+  useEffect(() => {
+    measure()
+    const el = ref.current
+    if (!el) return
+    el.addEventListener('scroll', measure, { passive: true })
+    window.addEventListener('resize', measure)
+    const ro = typeof ResizeObserver !== 'undefined' ? new ResizeObserver(measure) : null
+    ro?.observe(el)
+    return () => {
+      el.removeEventListener('scroll', measure)
+      window.removeEventListener('resize', measure)
+      ro?.disconnect()
+    }
+  }, [measure, children])
+
+  const veil = (side) => ({
+    position: 'absolute',
+    top: 0,
+    bottom: 0,
+    [side]: 0,
+    width: 46,
+    pointerEvents: 'none',
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: side === 'right' ? 'flex-end' : 'flex-start',
+    paddingLeft: side === 'left' ? 2 : 0,
+    paddingRight: side === 'right' ? 2 : 0,
+    color: C.terracotta,
+    fontSize: 17,
+    fontWeight: 700,
+    background: `linear-gradient(to ${side}, ${C.cream}00, ${C.cream}f2 62%)`,
+    transition: 'opacity .18s',
+  })
+
+  return (
+    <div
+      style={{
+        position: sticky ? 'sticky' : 'relative',
+        top: sticky ? top : undefined,
+        zIndex: sticky ? 40 : undefined,
+        background: sticky ? `${C.cream}f2` : undefined,
+        backdropFilter: sticky ? 'blur(10px)' : undefined,
+        ...style,
+      }}
+    >
+      <div style={{ position: 'relative' }}>
+        <div
+          ref={ref}
+          style={{
+            display: 'flex',
+            gap: 8,
+            overflowX: 'auto',
+            paddingBottom: 4,
+            scrollbarWidth: 'none',
+          }}
+        >
+          {children}
+        </div>
+        <div style={{ ...veil('left'), opacity: edges.left ? 1 : 0 }}>‹</div>
+        <div style={{ ...veil('right'), opacity: edges.right ? 1 : 0 }}>›</div>
+      </div>
+    </div>
+  )
 }
 
 // ------------------------------------------------------- Forfait (crédits)
@@ -3588,6 +3740,18 @@ function BarTab({ event, venue, onEventChange, showToast }) {
   const ready = orders.filter((o) => o.status === 'READY')
   const pickedUp = orders.filter((o) => o.status === 'PICKED_UP')
 
+  // Retraits en retard : deux paliers, alignés sur l'affichage admin.
+  //  · RELANCE_MIN  → la commande passe en alerte ici et côté organisation.
+  //  · ESCALADE_MIN → l'organisateur prend le relais (contact du client).
+  const [now, setNow] = useState(Date.now())
+  useEffect(() => {
+    const id = setInterval(() => setNow(Date.now()), 15000)
+    return () => clearInterval(id)
+  }, [])
+  const overdue = ready
+    .map((o) => ({ o, min: waitingMin(o, now) }))
+    .filter((x) => x.min >= RELANCE_MIN)
+
   // Alarme : sonne tant qu'une commande reçue n'a pas été explicitement vue.
   const unseen = received.filter((o) => !ack.has(o.id))
   useEffect(() => {
@@ -3663,6 +3827,49 @@ function BarTab({ event, venue, onEventChange, showToast }) {
             <button onClick={() => acknowledge(unseen.map((o) => o.id))} style={{ ...S.btn, minHeight: 48 }}>
               J’ai vu — couper l’alarme
             </button>
+          </div>
+        </div>
+      )}
+
+      {/* Retraits en retard — palier 15 min (relance) puis 20 min (escalade) */}
+      {overdue.length > 0 && (
+        <div style={{ marginBottom: 14 }}>
+          <div
+            style={{
+              background: 'rgba(192,57,43,.09)',
+              border: `2px solid ${C.danger}`,
+              borderRadius: 16,
+              padding: 16,
+            }}
+          >
+            <div style={{ ...S.h1, fontSize: 18, color: C.danger, marginBottom: 8 }}>
+              {overdue.length} commande{overdue.length > 1 ? 's' : ''} prête
+              {overdue.length > 1 ? 's' : ''} non retirée{overdue.length > 1 ? 's' : ''}
+            </div>
+            <div style={{ display: 'grid', gap: 6 }}>
+              {overdue.map(({ o, min }) => (
+                <div key={o.id} style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 13 }}>
+                  <strong style={{ fontFamily: FONT.label, letterSpacing: 1.5 }}>{o.pickup_code}</strong>
+                  <span style={{ color: C.dim }}>
+                    {o.customers?.first_name} {o.customers?.last_name}
+                  </span>
+                  <span
+                    style={{
+                      marginLeft: 'auto',
+                      fontWeight: 700,
+                      color: min >= ESCALADE_MIN ? C.danger : C.warn,
+                    }}
+                  >
+                    {min} min
+                    {min >= ESCALADE_MIN ? ' · à escalader' : ''}
+                  </span>
+                </div>
+              ))}
+            </div>
+            <div style={{ fontSize: 11.5, color: C.dim, marginTop: 10, lineHeight: 1.5 }}>
+              Appelez le code au micro. Au-delà de {ESCALADE_MIN} min, l’organisateur prend le relais
+              depuis l’onglet Organisation.
+            </div>
           </div>
         </div>
       )}
@@ -4268,9 +4475,16 @@ function OrgaTab({ event, venue, showToast, onEventChange }) {
   const [busy, setBusy] = useState(false)
   const [promoCodes, setPromoCodes] = useState([])
   const [editingPromo, setEditingPromo] = useState(null)
+  const [waiting, setWaiting] = useState([])
+  const [now, setNow] = useState(Date.now())
+
+  useEffect(() => {
+    const id = setInterval(() => setNow(Date.now()), 15000)
+    return () => clearInterval(id)
+  }, [])
 
   const load = useCallback(async () => {
-    const [l, b, m, pc] = await Promise.all([
+    const [l, b, m, pc, w] = await Promise.all([
       supabase.from('v_event_live').select('*').eq('event_id', event.id).maybeSingle(),
       supabase
         .from('v_event_leaderboard')
@@ -4290,12 +4504,25 @@ function OrgaTab({ event, venue, showToast, onEventChange }) {
         .select('*')
         .eq('event_id', event.id)
         .order('created_at', { ascending: false }),
+      // Commandes prêtes mais toujours pas retirées : source des paliers
+      // 15 min (relance) et 20 min (escalade organisateur).
+      supabase
+        .from('orders')
+        .select('id, pickup_code, ready_at, created_at, total, customer_id, customers ( first_name, last_name, email, phone )')
+        .eq('event_id', event.id)
+        .eq('status', 'READY')
+        .order('ready_at', { ascending: true }),
     ])
     setLive(l.data || null)
     setBoard(b.data || [])
     setMessages(m.data || [])
     setPromoCodes(pc.data || [])
+    setWaiting(w.data || [])
   }, [event.id])
+
+  const overdue = waiting
+    .map((o) => ({ o, min: waitingMin(o, now) }))
+    .filter((x) => x.min >= RELANCE_MIN)
 
   useEffect(() => {
     load()
@@ -4432,6 +4659,100 @@ function OrgaTab({ event, venue, showToast, onEventChange }) {
             <strong>{live.unpaid_count} commande(s) impayée(s)</strong> — tracées et rattachées à
             l’identité vérifiée du client (preuve horodatée).
           </Banner>
+        </div>
+      )}
+
+      {/* Retraits en retard — mêmes seuils que l'écran Bar */}
+      {overdue.length > 0 && (
+        <div style={{ marginBottom: 16 }}>
+          <div style={{ ...S.h2, marginBottom: 8 }}>Retraits en retard</div>
+          <div style={{ display: 'grid', gap: 8 }}>
+            {overdue.map(({ o, min }) => {
+              const escalate = min >= ESCALADE_MIN
+              const who = `${o.customers?.first_name ?? ''} ${o.customers?.last_name ?? ''}`.trim()
+              return (
+                <div
+                  key={o.id}
+                  style={{
+                    ...S.card,
+                    padding: 12,
+                    border: `1.5px solid ${escalate ? C.danger : C.warn}`,
+                    background: escalate ? 'rgba(192,57,43,.06)' : 'rgba(201,130,31,.06)',
+                  }}
+                >
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                    <div style={{ fontFamily: FONT.label, fontWeight: 600, letterSpacing: 1.6, fontSize: 16 }}>
+                      {o.pickup_code}
+                    </div>
+                    <div style={{ fontSize: 13, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                      {who || 'Client'}
+                    </div>
+                    <div
+                      style={{
+                        marginLeft: 'auto',
+                        fontFamily: FONT.label,
+                        fontWeight: 700,
+                        color: escalate ? C.danger : C.warn,
+                      }}
+                    >
+                      {min} min
+                    </div>
+                  </div>
+                  <div style={{ fontSize: 11.5, color: C.dim, marginTop: 4 }}>
+                    {escalate
+                      ? `Au-delà de ${ESCALADE_MIN} min : contactez le client directement.`
+                      : `Prête depuis ${min} min — le bar relance au micro.`}
+                  </div>
+                  <div style={{ display: 'flex', gap: 6, marginTop: 10 }}>
+                    <button
+                      onClick={() => setDmFor({ customer_id: o.customer_id, first_name: who || 'Client' })}
+                      style={{ ...S.btnGhost, minHeight: 40, fontSize: 12 }}
+                    >
+                      Message dans l’app
+                    </button>
+                    {escalate && o.customers?.phone && (
+                      <a
+                        href={`tel:${o.customers.phone}`}
+                        style={{
+                          ...S.btnGhost,
+                          minHeight: 40,
+                          fontSize: 12,
+                          display: 'flex',
+                          alignItems: 'center',
+                          justifyContent: 'center',
+                          textDecoration: 'none',
+                          borderColor: C.danger,
+                          color: C.danger,
+                        }}
+                      >
+                        Appeler
+                      </a>
+                    )}
+                    {escalate && !o.customers?.phone && o.customers?.email && (
+                      <a
+                        href={`mailto:${o.customers.email}?subject=${encodeURIComponent(
+                          `Votre commande ${o.pickup_code} vous attend`
+                        )}`}
+                        style={{
+                          ...S.btnGhost,
+                          minHeight: 40,
+                          fontSize: 12,
+                          display: 'flex',
+                          alignItems: 'center',
+                          justifyContent: 'center',
+                          textDecoration: 'none',
+                          borderColor: C.danger,
+                          color: C.danger,
+                        }}
+                      >
+                        E-mail
+                      </a>
+                    )}
+                  </div>
+                </div>
+              )
+            })}
+          </div>
         </div>
       )}
 
@@ -5242,12 +5563,16 @@ function ClientMenuPreview({ products, open, onClose }) {
 
   // Défilement continu, comme côté client : la puce active suit le scroll.
   const sectionRefs = useRef({})
+  const chipRefs = useRef({})
+  const scrollLock = useRef(0)
+
   useEffect(() => {
     if (!open) return
     const els = subcats.map((c) => sectionRefs.current[c]).filter(Boolean)
     if (!els.length) return
     const io = new IntersectionObserver(
       (entries) => {
+        if (Date.now() < scrollLock.current) return
         const hit = entries.filter((e) => e.isIntersecting)
         if (hit.length) {
           const top = hit.reduce((a, b) => (a.boundingClientRect.top < b.boundingClientRect.top ? a : b))
@@ -5259,6 +5584,17 @@ function ClientMenuPreview({ products, open, onClose }) {
     els.forEach((el) => io.observe(el))
     return () => io.disconnect()
   }, [subcats, open])
+
+  useEffect(() => {
+    if (!open || !subcat) return
+    chipRefs.current[subcat]?.scrollIntoView({ behavior: 'smooth', block: 'nearest', inline: 'center' })
+  }, [subcat, open])
+
+  function goToSubcat(c) {
+    scrollLock.current = Date.now() + 900
+    setSubcat(c)
+    sectionRefs.current[c]?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+  }
 
   return (
     <Sheet open={open} onClose={onClose} title="Aperçu — vue client" maxHeight="92vh">
@@ -5308,27 +5644,17 @@ function ClientMenuPreview({ products, open, onClose }) {
             ))}
           </div>
 
-          <div
-            style={{
-              display: 'flex',
-              gap: 8,
-              overflowX: 'auto',
-              paddingBottom: 4,
-              marginBottom: 14,
-              position: 'sticky',
-              top: 0,
-              zIndex: 40,
-              background: C.creamSoft,
-            }}
-          >
+          <ScrollHint sticky top={0} style={{ marginBottom: 14, background: C.creamSoft }}>
             {subcats.map((c) => (
               <button
                 key={c}
-                onClick={() =>
-                  sectionRefs.current[c]?.scrollIntoView({ behavior: 'smooth', block: 'start' })
-                }
+                ref={(el) => {
+                  chipRefs.current[c] = el
+                }}
+                onClick={() => goToSubcat(c)}
                 style={{
                   ...S.chip,
+                  flexShrink: 0,
                   borderColor: subcat === c ? C.indigo : C.lineHi,
                   color: subcat === c ? C.indigo : C.dim,
                   background: subcat === c ? 'rgba(106,95,214,.08)' : 'transparent',
@@ -5337,7 +5663,7 @@ function ClientMenuPreview({ products, open, onClose }) {
                 {c}
               </button>
             ))}
-          </div>
+          </ScrollHint>
 
           {subcats.map((c) => (
             <div
