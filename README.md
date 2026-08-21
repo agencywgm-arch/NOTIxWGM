@@ -37,16 +37,23 @@ feuille de route *v2.0 — août 2026* (cas pilote **Noti Club · Noti Calling**
 ### Côté client — `/s/{scan_point_id}`
 
 - Écran d'accueil aux couleurs Noti Calling (logo, contexte, point de scan)
-- **Identification obligatoire, une seule fois par appareil** : prénom, nom et e-mail (aucun
-  numéro ni SMS) — la commande ne peut pas être envoyée sans cette fiche, exploitable ensuite
-  côté CRM (relances, historique, profil). Une session anonyme Supabase (`signInAnonymously`)
-  porte le JWT et **persiste** : aux venues suivantes, le scan du QR ouvre directement la carte,
-  sans repasser par le formulaire (re-saisir ses coordonnées à chaque soirée faisait lâcher les
-  clients, donc perdre la donnée). La présence est enregistrée au passage
+- **Identification obligatoire, une seule fois par appareil** : prénom, nom, **téléphone, code
+  postal, date de naissance** (obligatoires) + e-mail et Instagram (**optionnels**, complétables
+  plus tard) — la commande ne peut pas être envoyée sans les champs obligatoires, exploitables
+  ensuite côté CRM (relances, historique, segmentation géographique/âge). Le téléphone sert
+  d'**ancre d'identité** : un même numéro sur un nouvel appareil (réinstallation, stockage vidé)
+  reprend la fiche existante au lieu d'en créer une seconde. Une session anonyme Supabase
+  (`signInAnonymously`) porte le JWT et **persiste** : aux venues suivantes, le scan du QR ouvre
+  directement la carte, sans repasser par le formulaire. La présence est enregistrée au passage
+- **Espace client** : le client y retrouve ses informations et peut compléter e-mail / Instagram
+  quand il le souhaite — un rappel s'affiche dans l'app tant qu'ils manquent
 - **Reconnaissance client au premier scan** : « Bon retour parmi nous », badge VIP, message dédié
   en cas d'incident (impayé passé)
 - **Espace commande en 3 univers** : Boissons au verre · Food · Bouteilles, avec sous-catégories
-- Formats multiples (12 cl / 75 cl / magnum) et options composables ; panier, note libre, code promo
+- Formats multiples (12 cl / 75 cl / magnum) et options composables ; panier, note libre
+- **Un seul emplacement pour tout code** (réduction % / montant, ou forfait de groupe à crédits)
+  — le client n'a pas à savoir de quel type il s'agit ; activé une fois, réappliqué automatiquement
+  aux commandes suivantes
 - **Forfaits Groupes (pass à crédits)** : un code (vendu hors app, lien de paiement en amont)
   crédite chaque personne d'un portefeuille — 1 alcool éligible = 2 crédits, 1 soft = 1 crédit —
   plus un jeton food (convertible en crédits avant 22h, auto-converti si arrivée après 22h30).
@@ -82,8 +89,10 @@ feuille de route *v2.0 — août 2026* (cas pilote **Noti Club · Noti Calling**
   organisateur → client
 - **Base client** : historique, nombre de soirées, taille du groupe, **tags & segmentation**
   (VIP / habitué / gros panier / incident) — tags automatiques inclus. Le suivi cross-soirée
-  repose sur la session anonyme de l'appareil (pas de numéro) : il tient tant que le client garde
-  le même téléphone et ne vide pas son stockage local
+  repose désormais sur le **téléphone** (ancre d'identité) : il tient même si le client change
+  d'appareil ou vide son stockage local
+- **Historique des codes promo utilisés** par client dans l'export CSV (codes % / montant
+  réellement appliqués sur ses commandes + code forfait éventuellement activé)
 - **Reporting post-événement** : panier moyen, top produits, pic horaire, nouveaux vs récurrents,
   note moyenne — export **PDF** et **CSV**
 - **Clôture de soirée** : les commandes non réglées passent en « impayé », rattachées à
@@ -140,6 +149,7 @@ supabase/
     0012_menu_rentree_2026.sql   nouveaux prix carte Noti Club (patch, installs existantes)
     0013_forfaits_credits.sql    Forfaits Groupes Noti : pass à crédits (patch, installs existantes)
     0014_realtime_products.sql   rupture de stock en direct côté client (patch, TOUTES installs)
+    0015_profil_etendu.sql       téléphone/CP/naissance obligatoires, espace client, code unifié (patch, installs existantes)
   functions/
     notify/                notification de statut / diffusion / message individuel
     reminders/             relances automatiques (cron)
@@ -215,6 +225,14 @@ feuille de route §10). Notez **Project URL** et **anon public key** (*Settings 
 > publie la table `products` en Realtime. Sans lui, marquer un article « épuisé » depuis la
 > tablette ne se voit côté client qu'au rechargement de la page — un client peut donc commander
 > un article épuisé pendant plusieurs minutes et se faire refuser sa commande à l'envoi.
+>
+> **`0015_profil_etendu.sql` s'exécute dans tous les cas**, base neuve ou existante : il change
+> la signature de `upsert_me()` pour rendre téléphone / code postal / date de naissance
+> obligatoires (e-mail et Instagram devenant optionnels), ajoute les colonnes correspondantes sur
+> `customers`, et ajoute `update_my_optional_profile()` (espace client) /
+> `validate_promo_code()` (saisie de code unifiée). `0001_schema.sql` contient encore l'ancienne
+> version 3 arguments : sans `0015`, l'identification échouera dès que l'app enverra le
+> téléphone/CP/naissance qu'elle collecte désormais.
 
 ### 3. Activer l'authentification
 

@@ -81,6 +81,19 @@ const LS = {
 
 const uid = () => Math.random().toString(36).slice(2, 10)
 
+/** Réappelle upsert_me() depuis le profil mis en cache sur l'appareil (auto-guérison). */
+function upsertMeFromCache() {
+  return supabase.rpc('upsert_me', {
+    p_first_name: LS.get('noti:firstName', ''),
+    p_last_name: LS.get('noti:lastName', ''),
+    p_phone: LS.get('noti:phone', ''),
+    p_postal_code: LS.get('noti:postalCode', ''),
+    p_birthdate: LS.get('noti:birthdate', ''),
+    p_email: LS.get('noti:email', '') || null,
+    p_instagram: LS.get('noti:instagram', '') || null,
+  })
+}
+
 const UNIVERSES = [
   { k: 'drinks', t: 'Boissons', en: 'Drinks', es: 'Bebidas', e: '🥂' },
   { k: 'food', t: 'Food', en: 'Food', es: 'Comida', e: '🍽️' },
@@ -713,11 +726,7 @@ function ClientApp({ scanPointId, session }) {
       // local restauré sans la ligne customers correspondante) — on la recrée
       // puis on retente une fois avant d'abandonner.
       if (String(e?.message || '').includes('not_a_customer')) {
-        await supabase.rpc('upsert_me', {
-          p_first_name: LS.get('noti:firstName', ''),
-          p_last_name: LS.get('noti:lastName', ''),
-          p_email: LS.get('noti:email', ''),
-        })
+        await upsertMeFromCache()
         await loadCustomer()
         await supabase.rpc('register_scan', { p_scan_point: scanPointId, p_group_size: 1 })
       } else {
@@ -961,22 +970,32 @@ function WelcomeScreen({ event, venue, scanPoint, lang, setLang, onStart }) {
 
 // ------------------------------------------------------------ Identification
 // Une session anonyme Supabase (aucun SMS, aucun compte) porte la fiche client.
-// Prénom, nom et e-mail sont obligatoires : c'est ce qui alimente le CRM
-// (relance, historique, profil) une fois la commande transmise en cuisine.
+// Obligatoire : prénom, nom, téléphone, code postal, date de naissance — le
+// fichier client attendu par l'établissement. E-mail et Instagram restent
+// optionnels : le client peut les compléter plus tard depuis son espace
+// client (voir ClientProfileSheet), avec un rappel s'ils manquent.
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/
 
 function IdentifyScreen({ lang, onVerified }) {
   const t = useT(lang)
   const [firstName, setFirstName] = useState(LS.get('noti:firstName', ''))
   const [lastName, setLastName] = useState(LS.get('noti:lastName', ''))
+  const [phone, setPhone] = useState(LS.get('noti:phone', ''))
+  const [postalCode, setPostalCode] = useState(LS.get('noti:postalCode', ''))
+  const [birthdate, setBirthdate] = useState(LS.get('noti:birthdate', ''))
   const [email, setEmail] = useState(LS.get('noti:email', ''))
+  const [instagram, setInstagram] = useState(LS.get('noti:instagram', ''))
+  const [showOptional, setShowOptional] = useState(false)
   const [busy, setBusy] = useState(false)
   const [err, setErr] = useState('')
 
   async function submit() {
     setErr('')
     if (!firstName.trim() || !lastName.trim()) return setErr('Prénom et nom sont obligatoires.')
-    if (!EMAIL_RE.test(email.trim())) return setErr('Adresse e-mail invalide.')
+    if (!phone.trim()) return setErr('Numéro de téléphone obligatoire.')
+    if (!postalCode.trim()) return setErr('Code postal obligatoire.')
+    if (!birthdate) return setErr('Date de naissance obligatoire.')
+    if (email.trim() && !EMAIL_RE.test(email.trim())) return setErr('Adresse e-mail invalide.')
     setBusy(true)
     try {
       const { data } = await supabase.auth.getSession()
@@ -987,12 +1006,20 @@ function IdentifyScreen({ lang, onVerified }) {
       const { error: e2 } = await supabase.rpc('upsert_me', {
         p_first_name: firstName.trim(),
         p_last_name: lastName.trim(),
-        p_email: email.trim(),
+        p_phone: phone.trim(),
+        p_postal_code: postalCode.trim(),
+        p_birthdate: birthdate,
+        p_email: email.trim() || null,
+        p_instagram: instagram.trim() || null,
       })
       if (e2) throw e2
       LS.set('noti:firstName', firstName)
       LS.set('noti:lastName', lastName)
+      LS.set('noti:phone', phone)
+      LS.set('noti:postalCode', postalCode)
+      LS.set('noti:birthdate', birthdate)
       LS.set('noti:email', email)
+      LS.set('noti:instagram', instagram)
       await onVerified()
     } catch (e) {
       setErr(frError(e))
@@ -1039,17 +1066,84 @@ function IdentifyScreen({ lang, onVerified }) {
           </div>
         </div>
 
-        <Field label="E-mail">
+        <Field label="Téléphone">
           <input
             style={S.input}
-            type="email"
-            value={email}
-            onChange={(e) => setEmail(e.target.value)}
-            onKeyDown={(e) => e.key === 'Enter' && submit()}
-            autoComplete="email"
-            placeholder="alex@exemple.fr"
+            type="tel"
+            value={phone}
+            onChange={(e) => setPhone(e.target.value)}
+            autoComplete="tel"
+            placeholder="06 12 34 56 78"
           />
         </Field>
+
+        <div style={{ display: 'flex', gap: 10 }}>
+          <div style={{ flex: 1 }}>
+            <Field label="Code postal">
+              <input
+                style={S.input}
+                inputMode="numeric"
+                value={postalCode}
+                onChange={(e) => setPostalCode(e.target.value)}
+                autoComplete="postal-code"
+                placeholder="75011"
+              />
+            </Field>
+          </div>
+          <div style={{ flex: 1 }}>
+            <Field label="Date de naissance">
+              <input
+                style={S.input}
+                type="date"
+                value={birthdate}
+                onChange={(e) => setBirthdate(e.target.value)}
+                autoComplete="bday"
+                max={new Date().toISOString().slice(0, 10)}
+              />
+            </Field>
+          </div>
+        </div>
+
+        {showOptional ? (
+          <>
+            <Field label="E-mail" hint="Optionnel">
+              <input
+                style={S.input}
+                type="email"
+                value={email}
+                onChange={(e) => setEmail(e.target.value)}
+                onKeyDown={(e) => e.key === 'Enter' && submit()}
+                autoComplete="email"
+                placeholder="alex@exemple.fr"
+              />
+            </Field>
+            <Field label="Instagram" hint="Optionnel">
+              <input
+                style={S.input}
+                value={instagram}
+                onChange={(e) => setInstagram(e.target.value)}
+                onKeyDown={(e) => e.key === 'Enter' && submit()}
+                placeholder="@alex"
+              />
+            </Field>
+          </>
+        ) : (
+          <button
+            onClick={() => setShowOptional(true)}
+            style={{
+              background: 'none',
+              border: 'none',
+              padding: 0,
+              marginBottom: 16,
+              cursor: 'pointer',
+              color: C.indigo,
+              fontSize: 13,
+              fontWeight: 600,
+            }}
+          >
+            + E-mail / Instagram (optionnel — complétable plus tard)
+          </button>
+        )}
 
         {err && (
           <div style={{ marginBottom: 12 }}>
@@ -1181,8 +1275,18 @@ function OrderingApp({ event, venue, scanPoint, lang, setLang, customer, showToa
   const [cart, setCart] = useState([])
   const [pushOn, setPushOn] = useState(false)
   const [reviewFor, setReviewFor] = useState(null)
+  const [profileOpen, setProfileOpen] = useState(false)
+  const profileIncomplete = !customer?.email || !customer?.instagram
   const [pass, setPass] = useState(null)
+  // Code % / montant classique — saisi une seule fois (même emplacement que
+  // le forfait), réappliqué automatiquement à chaque commande tant qu'il
+  // n'est pas retiré. Persisté par soirée : survit à un rechargement de page.
+  const [promoCode, setPromoCode] = useState(() => LS.get(`noti:promo:${event?.id}`, '') || '')
   const lastReady = useRef(new Set())
+
+  useEffect(() => {
+    if (event?.id) LS.set(`noti:promo:${event.id}`, promoCode)
+  }, [event?.id, promoCode])
 
   const loadPass = useCallback(async () => {
     if (!event?.id || !customer?.id) return
@@ -1199,16 +1303,39 @@ function OrderingApp({ event, venue, scanPoint, lang, setLang, customer, showToa
     loadPass()
   }, [loadPass])
 
-  async function redeemPass(code) {
-    const { data, error } = await supabase.rpc('redeem_pass', { p_event: event.id, p_code: code })
-    if (error) throw error
-    setPass(data)
-  }
-
   async function convertFoodToken() {
     const { data, error } = await supabase.rpc('convert_food_token', { p_event: event.id })
     if (error) throw error
     setPass(data)
+  }
+
+  /**
+   * Saisie unifiée : un seul champ pour un code forfait (crédits) ou un code
+   * promo classique (% / montant). On tente d'abord le forfait (redeem_pass) ;
+   * s'il ne s'agit pas de ce type de code, on bascule sur la validation
+   * classique et on retient le code pour les prochaines commandes.
+   */
+  async function redeemCode(code) {
+    const { data, error } = await supabase.rpc('redeem_pass', { p_event: event.id, p_code: code })
+    if (!error) {
+      setPass(data)
+      return { kind: 'credits' }
+    }
+    if (!String(error.message || '').includes('invalid_pass_code')) throw error
+
+    const { data: check, error: checkErr } = await supabase.rpc('validate_promo_code', {
+      p_event: event.id,
+      p_code: code,
+    })
+    if (checkErr) throw checkErr
+    if (!check?.valid) throw new Error('invalid_pass_code')
+
+    setPromoCode(code.trim().toUpperCase())
+    return { kind: 'promo', info: check }
+  }
+
+  function clearCode() {
+    setPromoCode('')
   }
 
   // ---- Chargement ---------------------------------------------------------
@@ -1413,7 +1540,7 @@ function OrderingApp({ event, venue, scanPoint, lang, setLang, customer, showToa
       prev.map((l) => (l.key === key ? { ...l, quantity: l.quantity + delta } : l)).filter((l) => l.quantity > 0)
     )
 
-  async function submitOrder({ note, promo }) {
+  async function submitOrder({ note }) {
     const items = cart.map((l) => ({
       product_id: l.product.id,
       quantity: l.quantity,
@@ -1427,18 +1554,14 @@ function OrderingApp({ event, venue, scanPoint, lang, setLang, customer, showToa
         p_scan_point: scanPoint.id,
         p_items: items,
         p_note: note || null,
-        p_promo: promo || null,
+        p_promo: promoCode || null,
       })
 
     let { data, error } = await place()
     if (error && String(error.message || '').includes('not_a_customer')) {
       // Session valide mais fiche client absente côté serveur — on la
-      // recrée (même prénom que la dernière identification) puis on retente.
-      await supabase.rpc('upsert_me', {
-        p_first_name: LS.get('noti:firstName', ''),
-        p_last_name: LS.get('noti:lastName', ''),
-        p_email: LS.get('noti:email', ''),
-      })
+      // recrée (même profil que la dernière identification) puis on retente.
+      await upsertMeFromCache()
       await onReloadCustomer?.()
       ;({ data, error } = await place())
     }
@@ -1446,8 +1569,10 @@ function OrderingApp({ event, venue, scanPoint, lang, setLang, customer, showToa
 
     // Le serveur ignore silencieusement un code invalide plutôt que de bloquer
     // la commande (canal dégradé) — on prévient quand même le client ici.
-    if (promo && promo.trim() && !(Number(data?.discount) > 0)) {
-      showToast('Commande envoyée, mais le code promo n’a pas été appliqué (invalide, expiré ou conditions non remplies).', 'error')
+    // data.promo_code n'est renseigné par place_order() QUE si le code % /
+    // montant a réellement été reconnu et appliqué (indépendant du forfait).
+    if (promoCode && !data?.promo_code) {
+      showToast('Commande envoyée, mais le code n’a pas été appliqué (invalide, expiré ou conditions non remplies).', 'error')
     }
 
     setCart([])
@@ -1561,14 +1686,72 @@ function OrderingApp({ event, venue, scanPoint, lang, setLang, customer, showToa
                 </span>
               )}
             </button>
+            <button
+              onClick={() => setProfileOpen(true)}
+              title="Mon espace client"
+              style={{
+                ...S.chip,
+                width: 40,
+                minHeight: 0,
+                height: 40,
+                padding: 0,
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                fontSize: 16,
+                position: 'relative',
+                borderColor: profileIncomplete ? C.terracotta : C.lineHi,
+              }}
+            >
+              👤
+              {profileIncomplete && (
+                <span
+                  style={{
+                    position: 'absolute',
+                    top: -3,
+                    right: -3,
+                    width: 11,
+                    height: 11,
+                    borderRadius: 6,
+                    background: C.terracotta,
+                    border: `2px solid ${C.cream}`,
+                  }}
+                />
+              )}
+            </button>
           </div>
         </div>
       </div>
 
       <div style={{ padding: 16 }}>
+        {/* Rappel : profil optionnel incomplet (retour terrain) */}
+        {profileIncomplete && (
+          <div style={{ marginBottom: 14 }}>
+            <Banner tone="info">
+              <strong>Complétez votre profil</strong> ({!customer?.email && 'e-mail'}
+              {!customer?.email && !customer?.instagram && ' et '}
+              {!customer?.instagram && 'Instagram'}) —{' '}
+              <button
+                onClick={() => setProfileOpen(true)}
+                style={{ background: 'none', border: 'none', padding: 0, color: C.indigo, fontWeight: 600, cursor: 'pointer', fontSize: 'inherit' }}
+              >
+                à faire dans votre espace client
+              </button>
+              .
+            </Banner>
+          </div>
+        )}
+
         {/* Forfait Groupe (pass à crédits) */}
         <div style={{ marginBottom: 14 }}>
-          <PassCard pass={pass} onRedeem={redeemPass} onConvert={convertFoodToken} showToast={showToast} />
+          <PromoCodeCard
+            pass={pass}
+            promoCode={promoCode}
+            onRedeemCode={redeemCode}
+            onClearCode={clearCode}
+            onConvert={convertFoodToken}
+            showToast={showToast}
+          />
         </div>
 
         {/* Message de blocage de file */}
@@ -1819,6 +2002,7 @@ function OrderingApp({ event, venue, scanPoint, lang, setLang, customer, showToa
         event={event}
         cart={cart}
         pass={pass}
+        promoCode={promoCode}
         subtotal={subtotal}
         prepMin={event.default_prep_min ?? 1}
         onClose={() => setCartCheckout(false)}
@@ -1829,6 +2013,17 @@ function OrderingApp({ event, venue, scanPoint, lang, setLang, customer, showToa
             showToast(frError(e), 'error')
           }
         }}
+      />
+
+      <ClientProfileSheet
+        open={profileOpen}
+        customer={customer}
+        onClose={() => setProfileOpen(false)}
+        onSaved={async () => {
+          await onReloadCustomer?.()
+          showToast('Profil mis à jour.', 'ok')
+        }}
+        showToast={showToast}
       />
 
       <ReviewSheet
@@ -2245,31 +2440,43 @@ function estimateWalletDiscount(cart, pass) {
   return { discount, creditsRemaining, foodAvailable }
 }
 
-function PassCard({ pass, onRedeem, onConvert, showToast }) {
+/**
+ * Saisie unique pour TOUT code (réduction % / montant, ou forfait à
+ * crédits) — le client n'a plus à savoir de quel type il s'agit, ni à
+ * chercher deux emplacements différents.
+ */
+function PromoCodeCard({ pass, promoCode, onRedeemCode, onClearCode, onConvert, showToast }) {
   const [code, setCode] = useState('')
   const [busy, setBusy] = useState(false)
   const [open, setOpen] = useState(false)
 
-  if (!pass) {
+  const hasPass = Boolean(pass)
+  const hasPromo = Boolean(promoCode) && !hasPass
+
+  if (!hasPass && !hasPromo) {
     return (
       <div style={{ ...S.card, padding: 14 }}>
         {open ? (
           <>
-            <div style={{ ...S.label, marginBottom: 8 }}>Code forfait</div>
+            <div style={{ ...S.label, marginBottom: 8 }}>Code promo</div>
             <div style={{ display: 'flex', gap: 8 }}>
               <input
                 style={{ ...S.input, textTransform: 'uppercase', flex: 1 }}
                 value={code}
                 onChange={(e) => setCode(e.target.value)}
-                placeholder="Reçu avec votre réservation"
+                onKeyDown={(e) => e.key === 'Enter' && code.trim() && document.activeElement.blur()}
+                placeholder="Réduction ou forfait de groupe"
+                autoFocus
               />
               <button
                 disabled={!code.trim() || busy}
                 onClick={async () => {
                   setBusy(true)
                   try {
-                    await onRedeem(code.trim())
-                    showToast('Forfait activé !', 'ok')
+                    const res = await onRedeemCode(code.trim())
+                    setCode('')
+                    setOpen(false)
+                    showToast(res.kind === 'credits' ? 'Forfait activé !' : 'Code activé !', 'ok')
                   } catch (e) {
                     showToast(frError(e), 'error')
                   } finally {
@@ -2293,9 +2500,26 @@ function PassCard({ pass, onRedeem, onConvert, showToast }) {
             onClick={() => setOpen(true)}
             style={{ background: 'none', border: 'none', padding: 0, cursor: 'pointer', color: C.indigo, fontSize: 13, fontWeight: 600 }}
           >
-            🎟️ Vous avez un forfait de groupe ? Activez-le ici
+            🎟️ Un code promo ou un forfait de groupe ? Activez-le ici
           </button>
         )}
+      </div>
+    )
+  }
+
+  if (hasPromo) {
+    return (
+      <div style={{ ...S.card, padding: 14, display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+        <div>
+          <div style={{ ...S.label, marginBottom: 2 }}>Code actif</div>
+          <div style={{ fontFamily: FONT.label, fontWeight: 600, letterSpacing: 1, fontSize: 15 }}>{promoCode}</div>
+        </div>
+        <button
+          onClick={onClearCode}
+          style={{ ...S.btnGhost, width: 'auto', minHeight: 'auto', padding: '8px 14px', fontSize: 12 }}
+        >
+          Retirer
+        </button>
       </div>
     )
   }
@@ -2342,6 +2566,84 @@ function PassCard({ pass, onRedeem, onConvert, showToast }) {
         </button>
       )}
     </div>
+  )
+}
+
+// -------------------------------------------------------------- Espace client
+/**
+ * Le client y retrouve ses informations obligatoires (lecture seule — saisies
+ * une fois à l'identification) et peut compléter e-mail / Instagram quand il
+ * le souhaite : c'est le rappel affiché tant qu'ils manquent qui renvoie ici.
+ */
+function ClientProfileSheet({ open, customer, onClose, onSaved, showToast }) {
+  const [email, setEmail] = useState('')
+  const [instagram, setInstagram] = useState('')
+  const [busy, setBusy] = useState(false)
+
+  useEffect(() => {
+    if (open && customer) {
+      setEmail(customer.email || '')
+      setInstagram(customer.instagram || '')
+    }
+  }, [open, customer])
+
+  if (!customer) return null
+
+  async function save() {
+    if (email.trim() && !EMAIL_RE.test(email.trim())) return showToast('Adresse e-mail invalide.', 'error')
+    setBusy(true)
+    try {
+      const { error } = await supabase.rpc('update_my_optional_profile', {
+        p_email: email.trim() || '',
+        p_instagram: instagram.trim() || '',
+      })
+      if (error) throw error
+      LS.set('noti:email', email)
+      LS.set('noti:instagram', instagram)
+      onClose()
+      await onSaved?.()
+    } catch (e) {
+      showToast(frError(e), 'error')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <Sheet open={open} onClose={onClose} title="Espace client">
+      <div style={{ ...S.card, marginBottom: 16 }}>
+        <div style={{ ...S.label, marginBottom: 10 }}>Vos informations</div>
+        <div style={{ display: 'grid', gap: 8, fontSize: 14 }}>
+          <div>
+            {customer.first_name} {customer.last_name}
+          </div>
+          <div style={{ color: C.dim }}>{phoneFR(customer.phone)}</div>
+          <div style={{ color: C.dim }}>
+            {customer.postal_code}
+            {customer.birthdate ? ` · né(e) le ${new Date(customer.birthdate).toLocaleDateString('fr-FR')}` : ''}
+          </div>
+        </div>
+      </div>
+
+      <Field label="E-mail" hint="Optionnel">
+        <input
+          style={S.input}
+          type="email"
+          value={email}
+          onChange={(e) => setEmail(e.target.value)}
+          autoComplete="email"
+          placeholder="alex@exemple.fr"
+        />
+      </Field>
+
+      <Field label="Instagram" hint="Optionnel">
+        <input style={S.input} value={instagram} onChange={(e) => setInstagram(e.target.value)} placeholder="@alex" />
+      </Field>
+
+      <button disabled={busy} onClick={save} style={{ ...S.btn, opacity: busy ? 0.6 : 1 }}>
+        {busy ? '…' : 'Enregistrer'}
+      </button>
+    </Sheet>
   )
 }
 
@@ -2423,37 +2725,32 @@ function CartSheet({ open, cart, lang, subtotal, onClose, onQty, onCheckout }) {
 }
 
 // ----------------------------------------------------------------- Validation
-function CheckoutSheet({ open, lang, event, cart, pass, subtotal, prepMin, onClose, onSubmit }) {
+function CheckoutSheet({ open, lang, event, cart, pass, promoCode, subtotal, prepMin, onClose, onSubmit }) {
   const t = useT(lang)
   const [note, setNote] = useState('')
-  const [promo, setPromo] = useState('')
-  const [promoResult, setPromoResult] = useState(null) // null tant que non vérifié
-  const [checkingPromo, setCheckingPromo] = useState(false)
+  const [promoResult, setPromoResult] = useState(null)
   const [busy, setBusy] = useState(false)
-
-  useEffect(() => {
-    setPromoResult(null)
-  }, [promo, open])
 
   const walletEst = useMemo(() => estimateWalletDiscount(cart || [], pass), [cart, pass])
 
-  async function applyPromo() {
-    if (!promo.trim()) return
-    setCheckingPromo(true)
-    try {
-      const { data, error } = await supabase.rpc('preview_promo', {
-        p_event: event.id,
-        p_code: promo.trim(),
-        p_subtotal: subtotal,
-      })
-      if (error) throw error
-      setPromoResult(data)
-    } catch (e) {
-      setPromoResult({ valid: false })
-    } finally {
-      setCheckingPromo(false)
+  // Le code (s'il y en a un) est saisi une seule fois, au niveau de la carte
+  // (voir PromoCodeCard) — ici on ne fait qu'en afficher l'effet, recalculé
+  // automatiquement à chaque ouverture / changement de panier.
+  useEffect(() => {
+    if (!open || !promoCode) {
+      setPromoResult(null)
+      return
     }
-  }
+    let dead = false
+    supabase
+      .rpc('preview_promo', { p_event: event.id, p_code: promoCode, p_subtotal: subtotal })
+      .then(({ data, error }) => {
+        if (!dead) setPromoResult(error ? { valid: false } : data)
+      })
+    return () => {
+      dead = true
+    }
+  }, [open, promoCode, event.id, subtotal])
 
   const promoDiscount = promoResult?.valid ? Number(promoResult.discount) : 0
   const discount = promoDiscount + walletEst.discount
@@ -2470,39 +2767,21 @@ function CheckoutSheet({ open, lang, event, cart, pass, subtotal, prepMin, onClo
         />
       </Field>
 
-      <Field label={t.promo}>
-        <div style={{ display: 'flex', gap: 8 }}>
-          <input
-            style={{ ...S.input, textTransform: 'uppercase', flex: 1 }}
-            value={promo}
-            onChange={(e) => setPromo(e.target.value)}
-            onKeyDown={(e) => e.key === 'Enter' && applyPromo()}
-            placeholder="Optionnel"
-          />
-          <button
-            disabled={!promo.trim() || checkingPromo}
-            onClick={applyPromo}
-            style={{
-              ...S.btnGhost,
-              width: 'auto',
-              minHeight: 'auto',
-              padding: '0 18px',
-              opacity: !promo.trim() || checkingPromo ? 0.5 : 1,
-            }}
-          >
-            {checkingPromo ? '…' : 'Vérifier'}
-          </button>
+      {promoCode && (
+        <div style={{ marginBottom: 14 }}>
+          {promoResult == null ? (
+            <Banner tone="info">Vérification du code {promoCode}…</Banner>
+          ) : promoResult.valid ? (
+            <Banner tone="ok">
+              Code {promoCode} — réduction de {eur(promoDiscount)} appliquée ci-dessous.
+            </Banner>
+          ) : (
+            <Banner tone="danger">
+              Code {promoCode} invalide, expiré, épuisé ou panier insuffisant pour ce code.
+            </Banner>
+          )}
         </div>
-        {promoResult && (
-          <div style={{ marginTop: 8 }}>
-            {promoResult.valid ? (
-              <Banner tone="ok">Code valide — réduction de {eur(discount)} appliquée ci-dessous.</Banner>
-            ) : (
-              <Banner tone="danger">Code invalide, expiré, épuisé ou panier insuffisant.</Banner>
-            )}
-          </div>
-        )}
-      </Field>
+      )}
 
       {walletEst.discount > 0 && (
         <div style={{ marginBottom: 14 }}>
@@ -2553,7 +2832,7 @@ function CheckoutSheet({ open, lang, event, cart, pass, subtotal, prepMin, onClo
         disabled={busy}
         onClick={async () => {
           setBusy(true)
-          await onSubmit({ note, promo })
+          await onSubmit({ note })
           setBusy(false)
         }}
         style={{ ...S.btn, opacity: busy ? 0.6 : 1, minHeight: 58 }}
@@ -4552,7 +4831,7 @@ function OrgaTab({ event, venue, showToast, onEventChange }) {
     try {
       const ids = board.map((r) => r.customer_id)
 
-      const [{ data: custs }, { data: att }, { data: ords }] = await Promise.all([
+      const [{ data: custs }, { data: att }, { data: ords }, { data: passes }] = await Promise.all([
         supabase.from('customers').select('id, email').in('id', ids),
         supabase
           .from('attendances')
@@ -4560,9 +4839,13 @@ function OrgaTab({ event, venue, showToast, onEventChange }) {
           .eq('event_id', event.id),
         supabase
           .from('orders')
-          .select('customer_id, order_items ( name_snapshot, quantity, variant_label )')
+          .select('customer_id, promo_code, order_items ( name_snapshot, quantity, variant_label )')
           .eq('event_id', event.id)
           .neq('status', 'CANCELLED'),
+        supabase
+          .from('event_passes')
+          .select('customer_id, promo_codes ( code )')
+          .eq('event_id', event.id),
       ])
 
       const emailById = Object.fromEntries((custs || []).map((c) => [c.id, c.email || '']))
@@ -4591,6 +4874,21 @@ function OrgaTab({ event, venue, showToast, onEventChange }) {
           .join(', ')
       }
 
+      // Historique des codes promo utilisés : codes % / montant réellement
+      // appliqués sur les commandes + le code forfait éventuellement activé.
+      const promoCodesById = {}
+      for (const o of ords || []) {
+        if (!o.promo_code) continue
+        const set = promoCodesById[o.customer_id] || (promoCodesById[o.customer_id] = new Set())
+        set.add(o.promo_code)
+      }
+      for (const p of passes || []) {
+        if (!p.promo_codes?.code) continue
+        const set = promoCodesById[p.customer_id] || (promoCodesById[p.customer_id] = new Set())
+        set.add(p.promo_codes.code)
+      }
+      const promoCodesSummary = (customerId) => [...(promoCodesById[customerId] || [])].join(', ')
+
       const head = [
         'Prénom',
         'Nom',
@@ -4599,6 +4897,7 @@ function OrgaTab({ event, venue, showToast, onEventChange }) {
         'Heure d’entrée',
         'Commande',
         'Tags',
+        'Codes promo utilisés',
         'Commandes',
         'Total EUR',
         'Dernière commande',
@@ -4611,6 +4910,7 @@ function OrgaTab({ event, venue, showToast, onEventChange }) {
         scanById[r.customer_id]?.at ?? '',
         itemsSummary(r.customer_id),
         (r.tags || []).join('|'),
+        promoCodesSummary(r.customer_id),
         r.orders_count,
         Number(r.total_spent).toFixed(2),
         r.last_order_at ? dateFR(r.last_order_at) : '',
@@ -5154,7 +5454,7 @@ function PromoCodeSheet({ promo, event, onClose, onSaved, showToast }) {
 
   return (
     <Sheet open={!!promo} onClose={onClose} title={f.id ? 'Modifier le code' : 'Nouveau code promo'}>
-      <Field label="Code" hint="Ce que le client saisit au checkout">
+      <Field label="Code" hint="Ce que le client saisit dans son espace de commande">
         <input
           style={{ ...S.input, textTransform: 'uppercase', letterSpacing: 1.5, fontFamily: FONT.label }}
           value={f.code}
