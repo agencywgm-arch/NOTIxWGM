@@ -2552,29 +2552,32 @@ function PromoCodeCard({ pass, gifts, promoCode, onRedeemCode, onClearCode, onCo
   const hasPass = Boolean(pass)
   const hasPromo = Boolean(promoCode) && !hasPass
 
-  // Ce que le client a d'offert, dans ses mots : « 1 boisson alcoolisée offerte ».
+  // Du point de vue du client, il possède des CRÉDITS. Chaque crédit donne un
+  // article sur la carte (ce que le staff a paramétré) — on l'exprime donc en
+  // « N crédit(s) », pas en « article offert ».
+  const giftTotal = giftList.reduce((s, g) => s + (Number(g.remaining) || 0), 0)
   const giftCard = hasGift && (
     <div style={{ ...S.card, padding: 14, border: `1.5px solid ${C.terracotta}`, marginBottom: 10 }}>
-      <div style={{ ...S.label, marginBottom: 6 }}>🎁 Offert pour vous</div>
+      <div style={{ ...S.label, marginBottom: 6 }}>
+        💳 Mes crédits — {giftTotal} disponible{giftTotal > 1 ? 's' : ''}
+      </div>
       <div style={{ display: 'grid', gap: 5 }}>
         {giftList.map((g, i) => (
           <div key={i} style={{ fontSize: 14.5, fontWeight: 500, color: C.terracotta }}>
-            {giftCatEmoji(g.category)}{' '}
-            {g.mode === 'product'
-              ? `${g.remaining} × ${g.product_name || 'article offert'}`
-              : `${g.remaining} ${giftCatLabel(g.category).toLowerCase()}${g.remaining > 1 ? 's' : ''} au choix`}
-            {g.max_value ? (
-              <span style={{ color: C.dim, fontWeight: 400, fontSize: 12 }}>
-                {' '}
-                — jusqu’à {eur(g.max_value)}
-              </span>
-            ) : null}
+            {giftCatEmoji(g.category)} {g.remaining} crédit{g.remaining > 1 ? 's' : ''}
+            <span style={{ color: C.dim, fontWeight: 400, fontSize: 12 }}>
+              {' — '}
+              {g.mode === 'product'
+                ? g.product_name || 'article de la carte'
+                : `${giftCatLabel(g.category).toLowerCase()} au choix`}
+              {g.max_value ? ` jusqu’à ${eur(g.max_value)}` : ''}
+            </span>
           </div>
         ))}
       </div>
       <div style={{ fontSize: 11.5, color: C.dim, marginTop: 6, lineHeight: 1.5 }}>
-        Déduit automatiquement quand vous l’ajoutez au panier. Au-delà du plafond, vous réglez la
-        différence au bar.
+        Un crédit est utilisé automatiquement quand vous ajoutez l’article au panier. Au-delà du
+        plafond, vous réglez la différence au bar.
       </div>
     </div>
   )
@@ -2591,7 +2594,7 @@ function PromoCodeCard({ pass, gifts, promoCode, onRedeemCode, onClearCode, onCo
                 value={code}
                 onChange={(e) => setCode(e.target.value)}
                 onKeyDown={(e) => e.key === 'Enter' && code.trim() && document.activeElement.blur()}
-                placeholder="Réduction, cadeau ou forfait"
+                placeholder="Réduction, crédit ou forfait"
                 autoFocus
               />
               <button
@@ -2604,7 +2607,7 @@ function PromoCodeCard({ pass, gifts, promoCode, onRedeemCode, onClearCode, onCo
                     setOpen(false)
                     showToast(
                       res.kind === 'gift'
-                        ? 'Cadeau activé — retrouvez-le en haut de la carte !'
+                        ? 'Crédits ajoutés — retrouvez-les en haut de la carte !'
                         : res.kind === 'credits'
                           ? 'Forfait activé !'
                           : 'Code activé !',
@@ -4508,7 +4511,7 @@ function GiftBanner({ orderId }) {
       }}
     >
       <div style={{ ...S.h1, fontSize: 16, color: C.goldDark, marginBottom: 8 }}>
-        🎁 {rows.length} article{rows.length > 1 ? 's' : ''} offert{rows.length > 1 ? 's' : ''}
+        🎁 {rows.length} crédit{rows.length > 1 ? 's' : ''} — {rows.length > 1 ? 'articles' : 'article'} à offrir
       </div>
       <div style={{ display: 'grid', gap: 5 }}>
         {rows.map((r, i) => (
@@ -4838,7 +4841,7 @@ function BarTab({ event, venue, onEventChange, showToast }) {
                             border: `1px solid ${C.gold}66`,
                           }}
                         >
-                          🎁 {o.gift_count} OFFERT{o.gift_count > 1 ? 'S' : ''} · {eur(o.gift_total)}
+                          🎁 {o.gift_count} CRÉDIT{o.gift_count > 1 ? 'S' : ''} · {eur(o.gift_total)} offert{o.gift_count > 1 ? 's' : ''}
                         </div>
                       )}
                     </div>
@@ -6467,11 +6470,11 @@ function ClientFicheSheet({ customerId, event, onClose, onMessage, showToast }) 
             </div>
           )}
 
-          {/* Cadeaux consommés — l'article exact, l'heure exacte, le code */}
+          {/* Crédits consommés — l'article exact, l'heure exacte, le code */}
           {giftsUsed.length > 0 && (
             <div>
               <div style={{ ...S.label, marginBottom: 6 }}>
-                🎁 Cadeaux utilisés ({giftsUsed.length}) ·{' '}
+                💳 Crédits utilisés ({giftsUsed.length}) ·{' '}
                 {eur(giftsUsed.reduce((s, g) => s + Number(g.covered || 0), 0))} offerts
               </div>
               <div style={{ display: 'grid', gap: 8 }}>
@@ -6841,17 +6844,18 @@ function GiftFields({ f, set, venueId, showToast }) {
     <>
       <div style={{ marginBottom: 12 }}>
         <Banner tone="info">
-          Chaque personne qui saisit ce code reçoit ce qui est listé ci-dessous. À la commande,
-          l’article est automatiquement offert — et l’équipe voit apparaître, dans la fiche du
-          client, <strong>l’heure exacte et l’article précis</strong> qu’il a pris.
+          Chaque personne qui saisit ce code reçoit des <strong>crédits</strong> — un crédit par
+          ligne ci-dessous, chacun donnant droit à un article de votre carte. À la commande, le
+          crédit est utilisé automatiquement, et l’équipe voit apparaître dans la fiche du client
+          <strong> l’heure exacte et l’article précis</strong> qu’il a pris.
         </Banner>
       </div>
 
-      <div style={{ ...S.label, marginBottom: 8 }}>Ce que le code offre</div>
+      <div style={{ ...S.label, marginBottom: 8 }}>À quoi donne droit chaque crédit</div>
 
       {items.length === 0 && (
         <div style={{ fontSize: 12.5, color: C.faint, marginBottom: 10 }}>
-          Aucune ligne pour l’instant — ajoutez ce que vous offrez ci-dessous.
+          Aucun crédit pour l’instant — ajoutez ce à quoi ils donnent droit ci-dessous.
         </div>
       )}
 
@@ -7010,9 +7014,9 @@ function PromoCodeSheet({ promo, event, venue, onClose, onSaved, showToast }) {
 
     const gifts = Array.isArray(f.gift_items) ? f.gift_items : []
     if (f.kind === 'gift') {
-      if (gifts.length === 0) return showToast('Ajoutez au moins un article offert.', 'error')
+      if (gifts.length === 0) return showToast('Ajoutez au moins un crédit.', 'error')
       if (gifts.some((g) => g.mode === 'product' && !g.product_id))
-        return showToast('Choisissez l’article offert pour chaque ligne « article précis ».', 'error')
+        return showToast('Choisissez l’article pour chaque crédit « article précis ».', 'error')
     }
 
     setBusy(true)
@@ -7113,7 +7117,7 @@ function PromoCodeSheet({ promo, event, venue, onClose, onSaved, showToast }) {
               color: f.kind === 'gift' ? C.terracotta : C.dim,
             }}
           >
-            🎁 Article offert
+            🎁 Crédit offert
           </button>
         </div>
       </Field>
