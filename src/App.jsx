@@ -5906,6 +5906,7 @@ function OrgaTab({ event, venue, showToast, onEventChange }) {
         customerId={ficheFor}
         event={event}
         onClose={() => setFicheFor(null)}
+        onChanged={load}
         onMessage={(target) => {
           setFicheFor(null)
           setDmFor(target)
@@ -6243,7 +6244,7 @@ function BroadcastSheet({ open, event, onClose, onSent, onChanged, showToast }) 
 }
 
 /** Fiche client complète (staff) — tous les champs collectés, tous événements confondus. */
-function ClientFicheSheet({ customerId, event, onClose, onMessage, showToast }) {
+function ClientFicheSheet({ customerId, event, onClose, onMessage, onChanged, showToast }) {
   const [cust, setCust] = useState(null)
   const [promoCodesUsed, setPromoCodesUsed] = useState([])
   const [orders, setOrders] = useState([])
@@ -6336,6 +6337,16 @@ function ClientFicheSheet({ customerId, event, onClose, onMessage, showToast }) 
   // « Actif en live » : un scan ou une commande dans la dernière demi-heure.
   const lastSeen = attendance?.last_scan_at
   const liveNow = lastSeen && Date.now() - new Date(lastSeen).getTime() < 30 * 60 * 1000
+
+  async function toggleTag(tag) {
+    if (!cust) return
+    const tags = cust.tags || []
+    const next = tags.includes(tag) ? tags.filter((t) => t !== tag) : [...tags, tag]
+    const { error } = await supabase.from('customers').update({ tags: next }).eq('id', cust.id)
+    if (error) return showToast?.(frError(error), 'error')
+    setCust({ ...cust, tags: next })
+    onChanged?.()
+  }
 
   return (
     <Sheet open={!!customerId} onClose={onClose} title="Fiche client">
@@ -6447,6 +6458,47 @@ function ClientFicheSheet({ customerId, event, onClose, onMessage, showToast }) 
             <div style={{ ...S.card, flex: 1, padding: 12, textAlign: 'center' }}>
               <div style={{ ...S.money, fontSize: 19, fontWeight: 600, color: C.terracotta }}>{eur(cust.total_spent)}</div>
               <div style={{ ...S.label, marginBottom: 0, marginTop: 2, fontSize: 9.5 }}>Dépensé</div>
+            </div>
+          </div>
+
+          <div style={{ display: 'flex', gap: 8 }}>
+            <div style={{ ...S.card, flex: 1, padding: 12, textAlign: 'center' }}>
+              <div style={{ ...S.money, fontSize: 19, fontWeight: 600, color: (cust.unpaid_count || 0) > 0 ? C.danger : C.text }}>
+                {cust.unpaid_count || 0}
+              </div>
+              <div style={{ ...S.label, marginBottom: 0, marginTop: 2, fontSize: 9.5 }}>Impayés</div>
+            </div>
+            <div style={{ ...S.card, flex: 1, padding: 12, textAlign: 'center' }}>
+              <div style={{ ...S.money, fontSize: 13.5, fontWeight: 600 }}>
+                {cust.first_seen_at ? dateFR(cust.first_seen_at) : '—'}
+              </div>
+              <div style={{ ...S.label, marginBottom: 0, marginTop: 2, fontSize: 9.5 }}>Première venue</div>
+            </div>
+          </div>
+
+          {/* Segmentation — modifiable directement depuis la fiche */}
+          <div>
+            <div style={{ ...S.label, marginBottom: 6 }}>Segmentation</div>
+            <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+              {ALL_TAGS.map((t) => {
+                const on = (cust.tags || []).includes(t)
+                return (
+                  <button
+                    key={t}
+                    onClick={() => toggleTag(t)}
+                    style={{
+                      ...S.chip,
+                      minHeight: 40,
+                      borderColor: on ? C.terracotta : C.lineHi,
+                      color: on ? C.terracotta : C.dim,
+                      background: on ? 'rgba(185,106,76,.08)' : 'transparent',
+                    }}
+                  >
+                    {on ? '✓ ' : ''}
+                    {TAG_LABEL[t]}
+                  </button>
+                )
+              })}
             </div>
           </div>
 
@@ -7801,7 +7853,6 @@ function ClientsTab({ event, showToast }) {
   const [loading, setLoading] = useState(true)
   const [q, setQ] = useState('')
   const [filter, setFilter] = useState(null)
-  const [detail, setDetail] = useState(null)
   const [ficheFor, setFicheFor] = useState(null)
   const [dmFor, setDmFor] = useState(null)
 
@@ -7822,15 +7873,6 @@ function ClientsTab({ event, showToast }) {
   useEffect(() => {
     load()
   }, [load])
-
-  async function toggleTag(customer, tag) {
-    const tags = customer.tags || []
-    const next = tags.includes(tag) ? tags.filter((t) => t !== tag) : [...tags, tag]
-    const { error } = await supabase.from('customers').update({ tags: next }).eq('id', customer.id)
-    if (error) return showToast(frError(error), 'error')
-    setDetail((d) => (d ? { ...d, tags: next } : d))
-    load()
-  }
 
   if (loading) return <Spinner />
 
@@ -7891,7 +7933,7 @@ function ClientsTab({ event, showToast }) {
         {filtered.map((r) => (
           <button
             key={r.id}
-            onClick={() => setDetail(r)}
+            onClick={() => setFicheFor(r.id)}
             style={{ ...S.card, padding: 12, display: 'flex', gap: 12, alignItems: 'center', cursor: 'pointer', textAlign: 'left', color: C.text }}
           >
             <div
@@ -7947,81 +7989,11 @@ function ClientsTab({ event, showToast }) {
         ))}
       </div>
 
-      <Sheet
-        open={!!detail}
-        onClose={() => setDetail(null)}
-        title={detail ? `${detail.first_name || ''} ${detail.last_name || ''}` : ''}
-      >
-        {detail && (
-          <>
-            <div style={{ ...S.card, padding: 14, marginBottom: 14 }}>
-              {[
-                ['Soirées', detail.events_count || 1],
-                ['Commandes réglées', detail.orders_count || 0],
-                ['Total dépensé', eur(detail.total_spent)],
-                ['Impayés', detail.unpaid_count || 0],
-                ['Première venue', detail.first_seen_at ? dateFR(detail.first_seen_at) : '—'],
-              ].map(([k, v]) => (
-                <div key={k} style={{ display: 'flex', justifyContent: 'space-between', padding: '4px 0', fontSize: 13.5 }}>
-                  <span style={{ color: C.dim }}>{k}</span>
-                  <span style={{ ...S.money, fontWeight: 500 }}>{v}</span>
-                </div>
-              ))}
-            </div>
-
-            <div style={S.label}>Segmentation</div>
-            <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginBottom: 16 }}>
-              {ALL_TAGS.map((t) => {
-                const on = (detail.tags || []).includes(t)
-                return (
-                  <button
-                    key={t}
-                    onClick={() => toggleTag(detail, t)}
-                    style={{
-                      ...S.chip,
-                      minHeight: 42,
-                      borderColor: on ? C.terracotta : C.lineHi,
-                      color: on ? C.terracotta : C.dim,
-                      background: on ? 'rgba(185,106,76,.08)' : 'transparent',
-                    }}
-                  >
-                    {on ? '✓ ' : ''}
-                    {TAG_LABEL[t]}
-                  </button>
-                )
-              })}
-            </div>
-
-            <div style={{ display: 'grid', gap: 8 }}>
-              <button
-                onClick={() => {
-                  const d = detail
-                  setDetail(null)
-                  setDmFor({ customer_id: d.id, first_name: d.first_name, last_name: d.last_name })
-                }}
-                style={S.btn}
-              >
-                ✉️ Envoyer un message à {detail.first_name || 'ce client'}
-              </button>
-              <button
-                onClick={() => {
-                  const d = detail
-                  setDetail(null)
-                  setFicheFor(d.id)
-                }}
-                style={S.btnGhost}
-              >
-                Voir la fiche complète
-              </button>
-            </div>
-          </>
-        )}
-      </Sheet>
-
       <ClientFicheSheet
         customerId={ficheFor}
         event={event}
         onClose={() => setFicheFor(null)}
+        onChanged={load}
         onMessage={(target) => {
           setFicheFor(null)
           setDmFor(target)
