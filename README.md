@@ -55,14 +55,15 @@ feuille de route *v2.0 — août 2026* (cas pilote **Noti Club · Noti Calling**
 - **Illustration dessinée par article** (verre, bouteille ou assiette aux couleurs Noti Calling,
   une image distincte par ligne de carte — boissons, bouteilles **et plats**) — encodée
   directement en base, jamais de lien externe cassé
-- **Un seul emplacement pour tout code** (réduction % / montant, ou cagnotte) — le client n'a pas
-  à savoir de quel type il s'agit ; activé une fois, réappliqué automatiquement aux commandes
-  suivantes, et deux codes différents se cumulent
-- **Cagnotte en euros** : un code (vendu hors app, lien de paiement en amont) crédite chaque
-  personne d'un montant en euros, **dépensé euro pour euro sur n'importe quel article** — aucune
-  règle d'éligibilité, aucun jeton, aucune fenêtre horaire. Au-delà, le client règle la
-  différence au bar. Le code est **limitable en nombre d'activations** (= la taille du groupe) et
-  ne peut être activé qu'une fois par personne. Une commande annulée rend la cagnotte
+- **Un seul emplacement pour tout code** (réduction % / montant, ou forfait de groupe) — le
+  client n'a pas à savoir de quel type il s'agit ; activé une fois, réappliqué automatiquement
+  aux commandes suivantes
+- **Forfaits Groupes (pass à crédits)** : un code (vendu hors app, lien de paiement en amont)
+  crédite chaque personne d'un portefeuille — **1 alcool éligible = 2 crédits, 1 soft = 1 crédit**
+  — plus un jeton food (convertible en crédits avant 22h, auto-converti si arrivée après 22h30).
+  Consommé automatiquement à la commande, en plus d'un éventuel code promo classique.
+  Côté staff, la configuration se fait en **personnes et en consos**, jamais en crédits : le
+  barème reste interne. Une commande annulée rend les crédits et le jeton
 - **Discipline de la file** : cumul autorisé tant que la commande est en préparation ;
   **blocage dès qu'une commande passe à « prête »**, jusqu'au retrait au bar
 - Confirmation avec **code de retrait**, temps estimé et compte à rebours
@@ -100,7 +101,7 @@ feuille de route *v2.0 — août 2026* (cas pilote **Noti Club · Noti Calling**
   repose désormais sur le **téléphone** (ancre d'identité) : il tient même si le client change
   d'appareil ou vide son stockage local
 - **Historique des codes utilisés** par client dans l'export CSV (codes % / montant réellement
-  appliqués sur ses commandes + codes à cagnotte activés, avec le montant reçu)
+  appliqués sur ses commandes + forfaits activés, avec les crédits reçus)
 - **Équipe & rôles** : invitation par e-mail, rattachement automatique à la première connexion,
   et trois niveaux d'accès — propriétaire, manager, et un **accès réduit** pour l'équipe de bar
   (Bar, Caisse, Clients seulement)
@@ -108,7 +109,8 @@ feuille de route *v2.0 — août 2026* (cas pilote **Noti Club · Noti Calling**
   commercial, incident) — interne à l'équipe, jamais visible du client ; un incident remonte
   automatiquement dans les tags de la fiche client
 - **Fiche client** : historique complet des commandes, heure d'arrivée, taille du groupe,
-  présence live, cagnotte restante, signalements de l'équipe — et envoi d'un message en un tap
+  présence live, crédits de forfait restants, signalements de l'équipe — et envoi d'un message
+  en un tap
 - **Jauge d'affluence** alimentée par les scans : remplissage par rapport à la capacité de la
   salle, arrivées sur les 15 / 60 dernières minutes et courbe par tranche de 15 min
 - **Reporting post-événement** : panier moyen, top produits, pic horaire, nouveaux vs récurrents,
@@ -172,7 +174,7 @@ supabase/
     0017_illustrations_produits.sql     une illustration par article (patch, TOUTES installs)
     0018_profil_cp_naissance_editable.sql  code postal / naissance modifiables (patch, TOUTES installs)
     0019_illustrations_food.sql  carte food (8 plats) + leurs illustrations (patch, TOUTES installs)
-    0020_equipe_cagnotte_suivi.sql  cagnotte €, équipe & rôles, suivi de commande, affluence (patch, TOUTES installs)
+    0020_equipe_suivi_affluence.sql  équipe & rôles, suivi de commande, affluence (patch, TOUTES installs)
   functions/
     notify/                notification de statut / diffusion / message individuel
     reminders/             relances automatiques (cron)
@@ -238,9 +240,11 @@ feuille de route §10). Notez **Project URL** et **anon public key** (*Settings 
 > base (le rechargement met à jour, il ne duplique pas). Une base neuve n'en a pas besoin :
 > `0005_seed_noti_menu.sql` contient déjà directement cette version.
 >
-> **`0013_forfaits_credits.sql`** créait l'ancien système de crédits. Il reste dans la liste car
-> il crée la table des portefeuilles, mais **son modèle de crédits est remplacé** par la cagnotte
-> en euros de `0020` — inutile de s'y attarder, exécutez simplement les deux dans l'ordre.
+> **Forfaits Groupes Noti (pass à crédits) ?** Exécutez
+> `supabase/migrations/0013_forfaits_credits.sql` — il étiquette automatiquement les
+> articles déjà en base et rétroactivement pour tous les venues existants, aucune action
+> supplémentaire nécessaire. Une base neuve n'en a pas besoin : `0005_seed_noti_menu.sql`
+> contient déjà l'appel d'étiquetage.
 >
 > **`0014_realtime_products.sql` s'exécute dans tous les cas**, base neuve ou existante : il
 > publie la table `products` en Realtime. Sans lui, marquer un article « épuisé » depuis la
@@ -281,32 +285,35 @@ feuille de route §10). Notez **Project URL** et **anon public key** (*Settings 
 > prix se mettent à jour sans jamais créer de doublon, et un plat déjà saisi sous un libellé
 > proche récupère quand même son illustration.
 >
-> **`0020_equipe_cagnotte_suivi.sql` s'exécute dans tous les cas**, base neuve ou existante.
-> Il apporte quatre choses :
+> **`0020_equipe_suivi_affluence.sql` s'exécute dans tous les cas**, base neuve ou existante.
+> Il apporte trois choses, **sans toucher au barème des forfaits** (1 alcool éligible vaut
+> toujours 2 crédits, 1 soft 1 crédit, et le jeton food reste convertible) :
 >
-> 1. **La cagnotte en euros remplace les crédits.** Plus de « 1 alcool = 2 crédits, 1 soft =
->    1 crédit », plus de jeton food ni de fenêtres à 22h/22h30 : un code promo de type
->    **cagnotte** verse un montant en euros, dépensé euro pour euro sur n'importe quel article,
->    et le client règle au bar la différence s'il dépasse. Le nombre d'activations du code est
->    limitable (= le nombre de personnes du groupe), et un même code ne peut être activé qu'une
->    fois par personne.
->    ⚠️ **Les soldes existants sont convertis à 5,00 € le crédit.** Si votre forfait valait autre
->    chose, changez `v_credit_eur` en haut du patch **avant** de l'exécuter — la conversion n'a
->    lieu qu'une fois.
-> 2. **Équipe et rôles.** Invitation par e-mail depuis *Réglages → Équipe* (propriétaire
+> 1. **Équipe et rôles.** Invitation par e-mail depuis *Réglages → Équipe* (propriétaire
 >    uniquement) : la personne crée son compte avec cette adresse et rejoint le lieu à sa
 >    première connexion, sans e-mail à envoyer ni code à transmettre. Trois niveaux —
 >    *propriétaire* (tout + équipe), *manager* (tout sauf l'équipe), *équipe* (version réduite :
 >    Bar, Caisse, Clients).
-> 3. **Suivi des commandes.** Un clic sur une commande, à n'importe quel stade, pour la commenter
+> 2. **Suivi des commandes.** Un clic sur une commande, à n'importe quel stade, pour la commenter
 >    ou la signaler (note, à surveiller, geste commercial, incident). Un incident taggue aussi la
 >    fiche du client. Ces commentaires sont internes : jamais visibles côté client.
-> 4. **Affluence.** Capacité de la salle (Réglages) + jauge de remplissage, rythme d'arrivée et
+> 3. **Affluence.** Capacité de la salle (Réglages) + jauge de remplissage, rythme d'arrivée et
 >    courbe des arrivées par tranche de 15 min dans l'onglet Orga, alimentés par les scans.
 >
-> Il corrige au passage deux défauts : le compteur « En prépa » du tableau de bord ignorait les
-> commandes au stade *En préparation*, et une commande annulée ne rendait pas au client la part
-> qu'il avait réglée avec sa cagnotte.
+> Ce que ce patch change sur les forfaits est volontairement limité : un code complet renvoie
+> désormais une erreur explicite (« forfait complet ») au lieu d'un « code invalide » ambigu, et
+> l'incrément du compteur sert de garde atomique — deux personnes ne peuvent plus prendre la même
+> dernière place. Les activations sont tracées dans `promo_redemptions`, ce qui donne enfin un
+> historique fiable par client.
+>
+> Il corrige au passage trois défauts : le compteur « En prépa » du tableau de bord ignorait les
+> commandes au stade *En préparation* ; une commande annulée ne rendait pas au client les crédits
+> ni le jeton food qu'elle avait consommés ; et l'aperçu de code promo acceptait un code de
+> forfait en affichant une remise de 0,00 €.
+>
+> *(Une première version de ce patch, nommée `0020_equipe_cagnotte_suivi.sql`, remplaçait les
+> crédits par une cagnotte en euros. Elle est abandonnée. Si vous l'avez déjà exécutée, le
+> nouveau patch remet tout en place sans perte de données — il suffit de le coller par-dessus.)*
 
 ### 3. Activer l'authentification
 

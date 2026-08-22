@@ -2930,25 +2930,25 @@ $$;
 
 grant execute on function public.seed_noti_menu(uuid) to authenticated;
 -- ============================================================================
---  NOTI Calling — 0020_equipe_cagnotte_suivi.sql
+--  NOTI Calling — 0020_equipe_suivi_affluence.sql
 --
---  Quatre chantiers en un seul patch (à coller d'un bloc) :
+--  Trois chantiers en un seul patch (à coller d'un bloc) :
 --
---   1. CAGNOTTE EN EUROS — remplace le système de crédits (1 alcool = 2
---      crédits, 1 soft = 1 crédit, jeton food convertible avant 22h…) par une
---      cagnotte en euros, dépensée euro pour euro sur n'importe quel article.
---      Un code promo de type « crédit » verse un montant à chaque personne qui
---      l'active, dans la limite du nombre d'utilisations défini.
---
---   2. ÉQUIPE — invitations par e-mail, rattachement automatique à la première
+--   1. ÉQUIPE — invitations par e-mail, rattachement automatique à la première
 --      connexion, et trois rôles (owner / manager / staff) dont un accès
 --      réduit pour l'équipe de bar.
 --
---   3. SUIVI DES COMMANDES — commentaires et signalements horodatés sur chaque
+--   2. SUIVI DES COMMANDES — commentaires et signalements horodatés sur chaque
 --      commande, à tout stade, qui alimentent la fiche client (incidents).
 --
---   4. AFFLUENCE — capacité de la soirée + vue des arrivées par tranche de
+--   3. AFFLUENCE — capacité de la soirée + vue des arrivées par tranche de
 --      15 min, pour la jauge de remplissage côté staff.
+--
+--  Le modèle de crédits des forfaits ne change PAS : 1 alcool éligible vaut
+--  toujours 2 crédits, 1 soft 1 crédit, et le jeton food reste convertible.
+--  Ce qui change est uniquement la façon dont le staff CONFIGURE un forfait
+--  (côté application) : il saisit un nombre de personnes et un nombre de
+--  consos par personne, l'app faisant la conversion en crédits à sa place.
 --
 --  Patch cumulatif : s'exécute aussi bien sur une installation neuve que sur
 --  une base déjà en service (tout est `if not exists` / `or replace`).
@@ -2956,396 +2956,29 @@ grant execute on function public.seed_noti_menu(uuid) to authenticated;
 
 
 -- ============================================================================
---  1. CAGNOTTE EN EUROS
--- ============================================================================
-
--- Le code promo « crédit » verse ce montant à chaque activation.
-alter table public.promo_codes
-  add column if not exists credit_amount numeric(10, 2) not null default 0;
-
--- La cagnotte du client pour une soirée, en euros.
-alter table public.event_passes
-  add column if not exists credit_total     numeric(10, 2) not null default 0,
-  add column if not exists credit_remaining numeric(10, 2) not null default 0;
-
--- Part du panier réglée par la cagnotte (transparence sur le ticket/la fiche).
-alter table public.orders
-  add column if not exists credit_used numeric(10, 2) not null default 0;
-
--- ---------------------------------------------------------------------------
---  Une activation par personne et par code : c'est ce qui empêche de recharger
---  sa cagnotte en ressaisissant le même code, tout en autorisant deux codes
---  différents à se cumuler. Sert aussi d'historique propre « codes utilisés »
---  par client, à la place de l'ancienne reconstitution approximative.
--- ---------------------------------------------------------------------------
-create table if not exists public.promo_redemptions (
-  id             uuid primary key default gen_random_uuid(),
-  promo_code_id  uuid not null references public.promo_codes (id) on delete cascade,
-  customer_id    uuid not null references public.customers (id)   on delete cascade,
-  event_id       uuid not null references public.events (id)      on delete cascade,
-  credit_granted numeric(10, 2) not null default 0,
-  created_at     timestamptz not null default now(),
-  unique (promo_code_id, customer_id)
-);
-
-create index if not exists promo_redemptions_customer_idx
-  on public.promo_redemptions (customer_id, created_at desc);
-
-alter table public.promo_redemptions enable row level security;
-
-drop policy if exists promo_redemptions_read on public.promo_redemptions;
-create policy promo_redemptions_read on public.promo_redemptions
-  for select to authenticated
-  using (customer_id = public.my_customer_id() or public.is_event_staff(event_id));
-
--- ---------------------------------------------------------------------------
---  Reprise des données existantes.
+--  0. REPRISE D'UNE VERSION ANTÉRIEURE DE CE PATCH
 --
---  VALEUR_CREDIT ci-dessous est la conversion appliquée UNE FOIS aux anciens
---  soldes en crédits. 5,00 € correspond au ticket moyen d'un soft de la carte ;
---  ajustez-la AVANT d'exécuter ce patch si votre forfait valait autre chose.
---  Le jeton food valait 2 crédits, il est converti au même taux.
--- ---------------------------------------------------------------------------
+--  Une première version de 0020 remplaçait les crédits par une cagnotte en
+--  euros. Elle est abandonnée. Ce bloc remet les codes concernés sur le modèle
+--  à crédits ; il ne fait rien si cette version n'a jamais été exécutée.
+--  Aucune donnée n'est perdue : les colonnes en crédits n'avaient pas été
+--  touchées, seules des colonnes en euros avaient été ajoutées à côté.
+-- ============================================================================
 do $$
-declare
-  v_credit_eur constant numeric(10, 2) := 5.00;
 begin
-  -- Portefeuilles déjà distribués → cagnotte en euros.
-  update public.event_passes
-     set credit_total = (credits_total + case when food_token_available then 2 else 0 end) * v_credit_eur,
-         credit_remaining = (credits_remaining + case when food_token_available then 2 else 0 end) * v_credit_eur
-   where credit_total = 0
-     and credit_remaining = 0
-     and (credits_total > 0 or credits_remaining > 0 or food_token_available);
-
-  -- Codes « forfait » existants → codes « crédit » en euros.
-  update public.promo_codes
-     set credit_amount = (credits_per_person + food_tokens_per_person * 2) * v_credit_eur,
-         kind = 'credit'
-   where kind = 'credits'
-     and credit_amount = 0;
+  if exists (select 1 from information_schema.columns
+              where table_schema = 'public' and table_name = 'promo_codes'
+                and column_name = 'credit_amount') then
+    update public.promo_codes
+       set kind = 'credits'
+     where kind = 'credit'
+       and coalesce(credits_per_person, 0) > 0;
+  end if;
 end $$;
 
--- ---------------------------------------------------------------------------
---  Activation d'un code à crédit. Idempotente par personne : réutiliser le
---  même code renvoie la cagnotte inchangée, sans consommer d'utilisation.
---  L'incrément de `uses_count` sert de garde atomique sur `max_uses` : deux
---  clients qui activent la dernière place en même temps ne peuvent pas passer
---  tous les deux.
--- ---------------------------------------------------------------------------
-create or replace function public.redeem_credit_code(p_event uuid, p_code text)
-returns public.event_passes
-language plpgsql volatile security definer set search_path = public
-as $$
-declare
-  v_cust  uuid := public.my_customer_id();
-  v_promo public.promo_codes;
-  v_pass  public.event_passes;
-begin
-  if v_cust is null then raise exception 'not_a_customer'; end if;
-
-  select * into v_promo from public.promo_codes
-    where event_id = p_event
-      and upper(code) = upper(trim(p_code))
-      and active
-      and kind = 'credit'
-      and (starts_at is null or starts_at <= now())
-      and (ends_at   is null or ends_at   >= now());
-  if v_promo.id is null then raise exception 'invalid_pass_code'; end if;
-
-  -- Déjà activé par cette personne : on renvoie la cagnotte telle quelle.
-  if exists (select 1 from public.promo_redemptions
-              where promo_code_id = v_promo.id and customer_id = v_cust) then
-    select * into v_pass from public.event_passes
-      where event_id = p_event and customer_id = v_cust;
-    return v_pass;
-  end if;
-
-  update public.promo_codes
-     set uses_count = uses_count + 1
-   where id = v_promo.id
-     and (max_uses is null or uses_count < max_uses);
-  if not found then raise exception 'code_exhausted'; end if;
-
-  insert into public.event_passes
-    (event_id, customer_id, promo_code_id, credit_total, credit_remaining)
-  values (p_event, v_cust, v_promo.id, v_promo.credit_amount, v_promo.credit_amount)
-  on conflict (event_id, customer_id) do update
-    set credit_total     = public.event_passes.credit_total     + v_promo.credit_amount,
-        credit_remaining = public.event_passes.credit_remaining + v_promo.credit_amount,
-        promo_code_id    = coalesce(public.event_passes.promo_code_id, v_promo.id)
-  returning * into v_pass;
-
-  insert into public.promo_redemptions (promo_code_id, customer_id, event_id, credit_granted)
-  values (v_promo.id, v_cust, p_event, v_promo.credit_amount);
-
-  return v_pass;
-end;
-$$;
-
--- Ancien nom conservé : une intégration qui l'appelle encore continue de
--- fonctionner, sur le nouveau modèle.
-create or replace function public.redeem_pass(p_event uuid, p_code text)
-returns public.event_passes
-language sql volatile security definer set search_path = public
-as $$
-  select public.redeem_credit_code(p_event, p_code);
-$$;
-
--- Le jeton food n'existe plus : la fonction reste déclarée pour ne rien casser,
--- mais refuse explicitement.
-create or replace function public.convert_food_token(p_event uuid)
-returns public.event_passes
-language plpgsql volatile security definer set search_path = public
-as $$
-begin
-  raise exception 'no_food_token';
-end;
-$$;
-
--- ---------------------------------------------------------------------------
---  place_order() — reprise de la version 0013, dont toute la mécanique
---  d'éligibilité aux crédits (credit_kind / credit_once / jeton food) est
---  remplacée par une simple absorption de la cagnotte : la remise promo
---  s'applique d'abord, la cagnotte couvre ensuite ce qu'il reste à payer.
--- ---------------------------------------------------------------------------
-create or replace function public.place_order(
-  p_event      uuid,
-  p_scan_point uuid,
-  p_items      jsonb,
-  p_note       text default null,
-  p_promo      text default null
-)
-returns public.orders
-language plpgsql volatile security definer set search_path = public
-as $$
-declare
-  v_cust     uuid := public.my_customer_id();
-  v_order    public.orders;
-  v_item     jsonb;
-  v_prod     public.products;
-  v_qty      int;
-  v_unit     numeric(10,2);
-  v_variant  jsonb;
-  v_vlabel   text;
-  v_opt      jsonb;
-  v_subtotal numeric(10,2) := 0;
-  v_discount numeric(10,2) := 0;
-  v_wallet   numeric(10,2) := 0;
-  v_promo    public.promo_codes;
-  v_prep     int;
-  v_code     text;
-  v_tries    int := 0;
-  v_pass     public.event_passes;
-begin
-  if v_cust is null then raise exception 'not_a_customer'; end if;
-
-  if not exists (select 1 from public.events e
-                 where e.id = p_event and e.is_active and e.accept_orders) then
-    raise exception 'orders_closed';
-  end if;
-
-  if not public.can_order(p_event) then
-    raise exception 'pickup_pending';
-  end if;
-
-  if p_items is null or jsonb_array_length(p_items) = 0 then
-    raise exception 'empty_cart';
-  end if;
-
-  select default_prep_min into v_prep from public.events where id = p_event;
-  select * into v_pass from public.event_passes
-    where event_id = p_event and customer_id = v_cust;
-
-  -- Code de retrait unique sur l'événement
-  loop
-    v_code := public.gen_pickup_code();
-    exit when not exists (
-      select 1 from public.orders where event_id = p_event and pickup_code = v_code
-    );
-    v_tries := v_tries + 1;
-    if v_tries > 40 then
-      v_code := v_code || floor(random() * 10)::text;
-      exit;
-    end if;
-  end loop;
-
-  insert into public.orders (event_id, customer_id, scan_point_id, pickup_code, status,
-                             note, estimated_ready_at)
-  values (p_event, v_cust, p_scan_point, v_code, 'RECEIVED',
-          nullif(trim(p_note), ''), now() + make_interval(mins => coalesce(v_prep, 1)))
-  returning * into v_order;
-
-  for v_item in select * from jsonb_array_elements(p_items) loop
-    select * into v_prod from public.products
-      where id = (v_item ->> 'product_id')::uuid and is_listed and not sold_out;
-    if v_prod.id is null then raise exception 'product_unavailable'; end if;
-
-    v_qty := greatest(1, least(50, coalesce((v_item ->> 'quantity')::int, 1)));
-
-    -- Format (12cl / 75cl / 150cl…) : prix pris dans le variant si fourni
-    v_unit := v_prod.price;
-    v_vlabel := null;
-    if jsonb_array_length(coalesce(v_prod.variants, '[]'::jsonb)) > 0 then
-      select value into v_variant
-        from jsonb_array_elements(v_prod.variants)
-        where value ->> 'id' = coalesce(v_item ->> 'variant_id', '')
-        limit 1;
-      if v_variant is null then raise exception 'variant_required'; end if;
-      v_unit := (v_variant ->> 'price')::numeric;
-      v_vlabel := v_variant ->> 'label';
-    end if;
-
-    -- Options : le prix est relu dans option_groups, jamais pris du client
-    if v_item ? 'options' then
-      for v_opt in select * from jsonb_array_elements(v_item -> 'options') loop
-        v_unit := v_unit + coalesce((
-          select (o ->> 'price')::numeric
-          from jsonb_array_elements(v_prod.option_groups) g,
-               jsonb_array_elements(g -> 'options') o
-          where o ->> 'id' = v_opt ->> 'id'
-          limit 1
-        ), 0);
-      end loop;
-    end if;
-
-    insert into public.order_items (order_id, product_id, name_snapshot, variant_label,
-                                    unit_price, vat_rate, quantity, detail)
-    values (v_order.id, v_prod.id, v_prod.name, v_vlabel, v_unit, v_prod.vat_rate, v_qty,
-            jsonb_build_object('options', coalesce(v_item -> 'options', '[]'::jsonb)));
-
-    v_subtotal := v_subtotal + v_unit * v_qty;
-  end loop;
-
-  -- Code promo classique (pourcentage / montant)
-  if p_promo is not null and length(trim(p_promo)) > 0 then
-    select * into v_promo from public.promo_codes
-      where event_id = p_event and upper(code) = upper(trim(p_promo)) and active
-        and kind in ('percent', 'amount')
-        and (starts_at is null or starts_at <= now())
-        and (ends_at is null or ends_at >= now())
-        and (max_uses is null or uses_count < max_uses)
-        and min_total <= v_subtotal;
-    if v_promo.id is not null then
-      v_discount := least(
-        case when v_promo.kind = 'amount' then v_promo.value
-             else round(v_subtotal * v_promo.value / 100, 2) end,
-        v_subtotal);
-      update public.promo_codes set uses_count = uses_count + 1 where id = v_promo.id;
-    end if;
-  end if;
-
-  -- Cagnotte : couvre ce qu'il reste à payer, euro pour euro.
-  if v_pass.id is not null and v_pass.credit_remaining > 0 then
-    v_wallet := least(v_pass.credit_remaining, v_subtotal - v_discount);
-    if v_wallet > 0 then
-      update public.event_passes
-         set credit_remaining = credit_remaining - v_wallet
-       where id = v_pass.id;
-    end if;
-  end if;
-
-  update public.orders
-     set subtotal    = v_subtotal,
-         discount    = v_discount + v_wallet,
-         credit_used = v_wallet,
-         total       = greatest(0, v_subtotal - v_discount - v_wallet),
-         promo_code  = case when v_promo.id is not null then upper(trim(p_promo)) else null end
-   where id = v_order.id
-   returning * into v_order;
-
-  update public.customers set last_seen_at = now() where id = v_cust;
-
-  return v_order;
-end;
-$$;
-
--- ---------------------------------------------------------------------------
---  preview_promo() — reprise de 0008 avec le filtre de type qui manquait.
---  Sans lui, un code de type « cagnotte » était accepté par l'aperçu et
---  affiché au client comme une remise de 0,00 €, alors qu'il ne s'applique
---  pas de cette façon. Seuls les codes % / montant ont un aperçu de remise.
--- ---------------------------------------------------------------------------
-create or replace function public.preview_promo(p_event uuid, p_code text, p_subtotal numeric)
-returns jsonb
-language plpgsql stable security definer set search_path = public
-as $$
-declare
-  v_promo    public.promo_codes;
-  v_discount numeric(10,2) := 0;
-begin
-  if p_code is null or length(trim(p_code)) = 0 then
-    return jsonb_build_object('valid', false);
-  end if;
-
-  select * into v_promo from public.promo_codes
-    where event_id = p_event and upper(code) = upper(trim(p_code)) and active
-      and kind in ('percent', 'amount')
-      and (starts_at is null or starts_at <= now())
-      and (ends_at is null or ends_at >= now())
-      and (max_uses is null or uses_count < max_uses)
-      and min_total <= coalesce(p_subtotal, 0);
-
-  if v_promo.id is null then
-    return jsonb_build_object('valid', false);
-  end if;
-
-  v_discount := least(
-    case when v_promo.kind = 'amount' then v_promo.value
-         else round(coalesce(p_subtotal, 0) * v_promo.value / 100, 2) end,
-    coalesce(p_subtotal, 0));
-
-  return jsonb_build_object(
-    'valid', true,
-    'kind', v_promo.kind,
-    'value', v_promo.value,
-    'label', v_promo.label,
-    'discount', v_discount
-  );
-end;
-$$;
-
-grant execute on function public.preview_promo(uuid, text, numeric) to authenticated;
-
--- ---------------------------------------------------------------------------
---  Annulation d'une commande : la part réglée par la cagnotte est rendue.
---  Sans cela, annuler une commande au bar faisait perdre au client des euros
---  qu'il n'a jamais consommés.
--- ---------------------------------------------------------------------------
-create or replace function public.refund_credit_on_cancel()
-returns trigger
-language plpgsql security definer set search_path = public
-as $$
-begin
-  if new.status = 'CANCELLED'
-     and old.status is distinct from 'CANCELLED'
-     and coalesce(old.credit_used, 0) > 0 then
-
-    update public.event_passes
-       set credit_remaining = least(credit_total, credit_remaining + old.credit_used)
-     where event_id = new.event_id and customer_id = new.customer_id;
-
-    new.discount    := greatest(0, coalesce(new.discount, 0) - old.credit_used);
-    new.credit_used := 0;
-    new.total       := greatest(0, coalesce(new.subtotal, 0) - new.discount);
-  end if;
-  return new;
-end;
-$$;
-
-drop trigger if exists trg_orders_credit_refund on public.orders;
-create trigger trg_orders_credit_refund
-  before update on public.orders
-  for each row execute function public.refund_credit_on_cancel();
-
-grant execute on function public.redeem_credit_code(uuid, text) to authenticated;
-grant execute on function public.redeem_pass(uuid, text)        to authenticated;
-grant execute on function public.convert_food_token(uuid)       to authenticated;
-grant execute on function public.place_order(uuid, uuid, jsonb, text, text) to authenticated;
-
 
 -- ============================================================================
---  2. ÉQUIPE : INVITATIONS PAR E-MAIL ET RÔLES
+--  1. ÉQUIPE : INVITATIONS PAR E-MAIL ET RÔLES
 -- ============================================================================
 
 -- owner   : le créateur du lieu — accès complet + gestion de l'équipe
@@ -3424,15 +3057,12 @@ begin
 end;
 $$;
 
-grant execute on function public.my_venue_role(uuid)         to authenticated;
-grant execute on function public.accept_my_staff_invites()   to authenticated;
-
--- Le staff doit pouvoir lire les comptes de son équipe (nom affiché dans les
--- réglages) : la policy 0002 le permet déjà via is_staff(venue_id).
+grant execute on function public.my_venue_role(uuid)       to authenticated;
+grant execute on function public.accept_my_staff_invites() to authenticated;
 
 
 -- ============================================================================
---  3. SUIVI DES COMMANDES : COMMENTAIRES ET SIGNALEMENTS
+--  2. SUIVI DES COMMANDES : COMMENTAIRES ET SIGNALEMENTS
 -- ============================================================================
 
 -- Interne au staff : jamais lisible par le client.
@@ -3541,7 +3171,7 @@ grant execute on function public.add_order_note(uuid, text, text) to authenticat
 
 
 -- ============================================================================
---  4. AFFLUENCE
+--  3. AFFLUENCE
 -- ============================================================================
 
 -- Dénominateur de la jauge de remplissage (null = pas de jauge, juste le compte).
@@ -3614,3 +3244,387 @@ select
 from public.events e;
 
 grant select on public.v_event_pulse to authenticated;
+
+
+-- ============================================================================
+--  4. CORRECTIONS SUR LES FORFAITS À CRÉDITS (modèle inchangé)
+-- ============================================================================
+
+-- ---------------------------------------------------------------------------
+--  Historique fiable des codes activés par client. Jusqu'ici il fallait le
+--  reconstituer depuis event_passes, qui ne garde qu'un seul code par soirée.
+--  Sert la fiche client et l'export CSV.
+-- ---------------------------------------------------------------------------
+create table if not exists public.promo_redemptions (
+  id             uuid primary key default gen_random_uuid(),
+  promo_code_id  uuid not null references public.promo_codes (id) on delete cascade,
+  customer_id    uuid not null references public.customers (id)   on delete cascade,
+  event_id       uuid not null references public.events (id)      on delete cascade,
+  credits_granted int not null default 0,
+  created_at     timestamptz not null default now(),
+  unique (promo_code_id, customer_id)
+);
+
+-- La première version de ce patch créait la même table avec un montant en
+-- euros. `create table if not exists` ne l'aurait alors pas mise à jour :
+-- on ajoute la colonne en crédits explicitement.
+alter table public.promo_redemptions
+  add column if not exists credits_granted int not null default 0;
+
+create index if not exists promo_redemptions_customer_idx
+  on public.promo_redemptions (customer_id, created_at desc);
+
+alter table public.promo_redemptions enable row level security;
+
+drop policy if exists promo_redemptions_read on public.promo_redemptions;
+create policy promo_redemptions_read on public.promo_redemptions
+  for select to authenticated
+  using (customer_id = public.my_customer_id() or public.is_event_staff(event_id));
+
+-- ---------------------------------------------------------------------------
+--  redeem_pass() — reprise de 0013, à deux corrections près :
+--
+--   · un code déjà épuisé renvoyait « invalid_pass_code », impossible à
+--     distinguer d'une faute de frappe. Il renvoie maintenant
+--     « code_exhausted », et l'incrément de uses_count sert de garde atomique :
+--     deux personnes qui activent la dernière place en même temps ne peuvent
+--     plus passer toutes les deux.
+--   · l'activation est tracée dans promo_redemptions.
+--
+--  Le modèle de crédits lui-même est inchangé (jeton food inclus).
+-- ---------------------------------------------------------------------------
+create or replace function public.redeem_pass(p_event uuid, p_code text)
+returns public.event_passes
+language plpgsql volatile security definer set search_path = public
+as $$
+declare
+  v_cust      uuid := public.my_customer_id();
+  v_promo     public.promo_codes;
+  v_pass      public.event_passes;
+  v_now_paris time;
+begin
+  if v_cust is null then raise exception 'not_a_customer'; end if;
+
+  -- Un pass par personne et par soirée : un second appel — inévitable puisque
+  -- le client peut rescanner — renvoie le pass déjà actif, sans recréditer.
+  select * into v_pass from public.event_passes
+    where event_id = p_event and customer_id = v_cust;
+  if v_pass.id is not null then
+    return v_pass;
+  end if;
+
+  select * into v_promo from public.promo_codes
+    where event_id = p_event and upper(code) = upper(trim(p_code)) and active
+      and kind = 'credits'
+      and (starts_at is null or starts_at <= now())
+      and (ends_at is null or ends_at >= now());
+  if v_promo.id is null then raise exception 'invalid_pass_code'; end if;
+
+  update public.promo_codes
+     set uses_count = uses_count + 1
+   where id = v_promo.id
+     and (max_uses is null or uses_count < max_uses);
+  if not found then raise exception 'code_exhausted'; end if;
+
+  v_now_paris := (now() at time zone 'Europe/Paris')::time;
+
+  insert into public.event_passes
+    (event_id, customer_id, promo_code_id, credits_total, credits_remaining,
+     food_token_total, food_token_available)
+  values (
+    p_event, v_cust, v_promo.id,
+    v_promo.credits_per_person, v_promo.credits_per_person,
+    v_promo.food_tokens_per_person,
+    v_promo.food_tokens_per_person > 0 and v_now_paris < time '22:30:00'
+  )
+  returning * into v_pass;
+
+  -- Arrivée après 22h30 : le jeton food est automatiquement converti en
+  -- crédits (2 crédits par jeton), comme en 0013.
+  if v_promo.food_tokens_per_person > 0 and v_now_paris >= time '22:30:00' then
+    update public.event_passes
+       set credits_total     = credits_total + v_promo.food_tokens_per_person * 2,
+           credits_remaining = credits_remaining + v_promo.food_tokens_per_person * 2
+     where id = v_pass.id
+     returning * into v_pass;
+  end if;
+
+  insert into public.promo_redemptions
+    (promo_code_id, customer_id, event_id, credits_granted)
+  values (v_promo.id, v_cust, p_event, v_pass.credits_total)
+  on conflict (promo_code_id, customer_id) do nothing;
+
+  return v_pass;
+end;
+$$;
+
+grant execute on function public.redeem_pass(uuid, text) to authenticated;
+
+-- ---------------------------------------------------------------------------
+--  place_order() — reprise EXACTE de la version 0013 (mécanique de crédits
+--  inchangée : credit_kind / credit_once / jeton food), avec un seul ajout :
+--  `credit_units_used` mémorise le nombre de crédits consommés par la
+--  commande, ce qui permet de les rendre si elle est annulée. Sans cela,
+--  annuler une commande au bar faisait perdre au client des crédits qu'il
+--  n'avait jamais consommés.
+-- ---------------------------------------------------------------------------
+alter table public.orders
+  add column if not exists credit_units_used int not null default 0,
+  add column if not exists food_token_used   boolean not null default false;
+
+create or replace function public.place_order(
+  p_event      uuid,
+  p_scan_point uuid,
+  p_items      jsonb,
+  p_note       text default null,
+  p_promo      text default null
+)
+returns public.orders
+language plpgsql volatile security definer set search_path = public
+as $$
+declare
+  v_cust     uuid := public.my_customer_id();
+  v_order    public.orders;
+  v_item     jsonb;
+  v_prod     public.products;
+  v_qty      int;
+  v_unit     numeric(10,2);
+  v_variant  jsonb;
+  v_vlabel   text;
+  v_opt      jsonb;
+  v_subtotal numeric(10,2) := 0;
+  v_discount numeric(10,2) := 0;
+  v_promo    public.promo_codes;
+  v_prep     int;
+  v_code     text;
+  v_tries    int := 0;
+  v_pass         public.event_passes;
+  v_wallet_cost  int;
+  v_wallet_units int;
+  v_credits_used int := 0;
+  v_food_used    boolean := false;
+begin
+  if v_cust is null then raise exception 'not_a_customer'; end if;
+
+  if not exists (select 1 from public.events e
+                 where e.id = p_event and e.is_active and e.accept_orders) then
+    raise exception 'orders_closed';
+  end if;
+
+  if not public.can_order(p_event) then
+    raise exception 'pickup_pending';
+  end if;
+
+  if p_items is null or jsonb_array_length(p_items) = 0 then
+    raise exception 'empty_cart';
+  end if;
+
+  select default_prep_min into v_prep from public.events where id = p_event;
+  select * into v_pass from public.event_passes
+    where event_id = p_event and customer_id = v_cust;
+
+  -- Code de retrait unique sur l'événement
+  loop
+    v_code := public.gen_pickup_code();
+    exit when not exists (
+      select 1 from public.orders where event_id = p_event and pickup_code = v_code
+    );
+    v_tries := v_tries + 1;
+    if v_tries > 40 then
+      v_code := v_code || floor(random() * 10)::text;
+      exit;
+    end if;
+  end loop;
+
+  insert into public.orders (event_id, customer_id, scan_point_id, pickup_code, status,
+                             note, estimated_ready_at)
+  values (p_event, v_cust, p_scan_point, v_code, 'RECEIVED',
+          nullif(trim(p_note), ''), now() + make_interval(mins => coalesce(v_prep, 1)))
+  returning * into v_order;
+
+  for v_item in select * from jsonb_array_elements(p_items) loop
+    select * into v_prod from public.products
+      where id = (v_item ->> 'product_id')::uuid and is_listed and not sold_out;
+    if v_prod.id is null then raise exception 'product_unavailable'; end if;
+
+    v_qty := greatest(1, least(50, coalesce((v_item ->> 'quantity')::int, 1)));
+
+    -- Format (12cl / 75cl / 150cl…) : prix pris dans le variant si fourni
+    v_unit := v_prod.price;
+    v_vlabel := null;
+    if jsonb_array_length(coalesce(v_prod.variants, '[]'::jsonb)) > 0 then
+      select value into v_variant
+        from jsonb_array_elements(v_prod.variants)
+        where value ->> 'id' = coalesce(v_item ->> 'variant_id', '')
+        limit 1;
+      if v_variant is null then raise exception 'variant_required'; end if;
+      v_unit := (v_variant ->> 'price')::numeric;
+      v_vlabel := v_variant ->> 'label';
+    end if;
+
+    -- Options : le prix est relu dans option_groups, jamais pris du client
+    if v_item ? 'options' then
+      for v_opt in select * from jsonb_array_elements(v_item -> 'options') loop
+        v_unit := v_unit + coalesce((
+          select (o ->> 'price')::numeric
+          from jsonb_array_elements(v_prod.option_groups) g,
+               jsonb_array_elements(g -> 'options') o
+          where o ->> 'id' = v_opt ->> 'id'
+          limit 1
+        ), 0);
+      end loop;
+    end if;
+
+    insert into public.order_items (order_id, product_id, name_snapshot, variant_label,
+                                    unit_price, vat_rate, quantity, detail)
+    values (v_order.id, v_prod.id, v_prod.name, v_vlabel, v_unit, v_prod.vat_rate, v_qty,
+            jsonb_build_object('options', coalesce(v_item -> 'options', '[]'::jsonb)));
+
+    v_subtotal := v_subtotal + v_unit * v_qty;
+
+    -- ---- Forfait Noti : consommation du portefeuille (crédits / jeton food) ----
+    if v_pass.id is not null then
+      if v_prod.credit_once and not v_pass.richard_used then
+        v_wallet_cost := case when v_prod.credit_kind = 'alcohol' then 2 else 1 end;
+        if v_pass.credits_remaining >= v_wallet_cost then
+          v_pass.credits_remaining := v_pass.credits_remaining - v_wallet_cost;
+          v_pass.richard_used := true;
+          v_credits_used := v_credits_used + v_wallet_cost;
+          v_discount := v_discount + v_unit;
+        end if;
+      elsif v_prod.credit_kind in ('alcohol', 'soft') then
+        v_wallet_cost := case when v_prod.credit_kind = 'alcohol' then 2 else 1 end;
+        v_wallet_units := least(v_qty, v_pass.credits_remaining / v_wallet_cost);
+        if v_wallet_units > 0 then
+          v_pass.credits_remaining := v_pass.credits_remaining - v_wallet_units * v_wallet_cost;
+          v_credits_used := v_credits_used + v_wallet_units * v_wallet_cost;
+          v_discount := v_discount + v_wallet_units * v_unit;
+        end if;
+      elsif v_prod.universe = 'food' and v_pass.food_token_available then
+        v_pass.food_token_available := false;
+        v_food_used := true;
+        v_discount := v_discount + v_unit;
+      end if;
+    end if;
+  end loop;
+
+  -- Code promo classique (pourcentage / montant), cumulable avec le forfait
+  if p_promo is not null and length(trim(p_promo)) > 0 then
+    select * into v_promo from public.promo_codes
+      where event_id = p_event and upper(code) = upper(trim(p_promo)) and active
+        and kind in ('percent', 'amount')
+        and (starts_at is null or starts_at <= now())
+        and (ends_at is null or ends_at >= now())
+        and (max_uses is null or uses_count < max_uses)
+        and min_total <= v_subtotal;
+    if v_promo.id is not null then
+      v_discount := v_discount + least(
+        case when v_promo.kind = 'amount' then v_promo.value
+             else round(v_subtotal * v_promo.value / 100, 2) end,
+        v_subtotal);
+      update public.promo_codes set uses_count = uses_count + 1 where id = v_promo.id;
+    end if;
+  end if;
+
+  if v_pass.id is not null then
+    update public.event_passes
+       set credits_remaining    = v_pass.credits_remaining,
+           food_token_available = v_pass.food_token_available,
+           richard_used         = v_pass.richard_used
+     where id = v_pass.id;
+  end if;
+
+  update public.orders
+     set subtotal          = v_subtotal,
+         discount          = v_discount,
+         total             = greatest(0, v_subtotal - v_discount),
+         credit_units_used = v_credits_used,
+         food_token_used   = v_food_used,
+         promo_code        = case when v_promo.id is not null then upper(trim(p_promo)) else null end
+   where id = v_order.id
+   returning * into v_order;
+
+  update public.customers set last_seen_at = now() where id = v_cust;
+
+  return v_order;
+end;
+$$;
+
+grant execute on function public.place_order(uuid, uuid, jsonb, text, text) to authenticated;
+
+-- ---------------------------------------------------------------------------
+--  Annulation d'une commande : les crédits (et le jeton food) consommés sont
+--  rendus au client.
+-- ---------------------------------------------------------------------------
+create or replace function public.refund_credits_on_cancel()
+returns trigger
+language plpgsql security definer set search_path = public
+as $$
+begin
+  if new.status = 'CANCELLED'
+     and old.status is distinct from 'CANCELLED'
+     and (coalesce(old.credit_units_used, 0) > 0 or coalesce(old.food_token_used, false)) then
+
+    update public.event_passes
+       set credits_remaining = least(credits_total,
+                                     credits_remaining + coalesce(old.credit_units_used, 0)),
+           food_token_available = food_token_available or coalesce(old.food_token_used, false)
+     where event_id = new.event_id and customer_id = new.customer_id;
+
+    new.credit_units_used := 0;
+    new.food_token_used   := false;
+  end if;
+  return new;
+end;
+$$;
+
+drop trigger if exists trg_orders_credit_refund on public.orders;
+create trigger trg_orders_credit_refund
+  before update on public.orders
+  for each row execute function public.refund_credits_on_cancel();
+
+-- ---------------------------------------------------------------------------
+--  preview_promo() — reprise de 0008 avec le filtre de type qui manquait.
+--  Sans lui, un code de forfait était accepté par l'aperçu et affiché au
+--  client comme une remise de 0,00 €, alors qu'il ne s'applique pas ainsi.
+-- ---------------------------------------------------------------------------
+create or replace function public.preview_promo(p_event uuid, p_code text, p_subtotal numeric)
+returns jsonb
+language plpgsql stable security definer set search_path = public
+as $$
+declare
+  v_promo    public.promo_codes;
+  v_discount numeric(10,2) := 0;
+begin
+  if p_code is null or length(trim(p_code)) = 0 then
+    return jsonb_build_object('valid', false);
+  end if;
+
+  select * into v_promo from public.promo_codes
+    where event_id = p_event and upper(code) = upper(trim(p_code)) and active
+      and kind in ('percent', 'amount')
+      and (starts_at is null or starts_at <= now())
+      and (ends_at is null or ends_at >= now())
+      and (max_uses is null or uses_count < max_uses)
+      and min_total <= coalesce(p_subtotal, 0);
+
+  if v_promo.id is null then
+    return jsonb_build_object('valid', false);
+  end if;
+
+  v_discount := least(
+    case when v_promo.kind = 'amount' then v_promo.value
+         else round(coalesce(p_subtotal, 0) * v_promo.value / 100, 2) end,
+    coalesce(p_subtotal, 0));
+
+  return jsonb_build_object(
+    'valid', true,
+    'kind', v_promo.kind,
+    'value', v_promo.value,
+    'label', v_promo.label,
+    'discount', v_discount
+  );
+end;
+$$;
+
+grant execute on function public.preview_promo(uuid, text, numeric) to authenticated;

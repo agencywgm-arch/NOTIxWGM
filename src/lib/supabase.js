@@ -55,11 +55,13 @@ export function frError(err) {
   if (m.includes('invalid_birthdate')) return 'Date de naissance invalide.'
   if (m.includes('invalid_email')) return 'Adresse e-mail invalide.'
   if (m.includes('code_exhausted'))
-    return 'Ce code a atteint son nombre maximum d’utilisations.'
+    return 'Ce forfait est complet : toutes les places du groupe ont été activées.'
   if (m.includes('invalid_pass_code'))
     return 'Code invalide, expiré ou déjà entièrement utilisé.'
-  if (m.includes('no_food_token')) return 'Les jetons food ont été remplacés par la cagnotte en euros.'
-  if (m.includes('no_pass')) return 'Aucune cagnotte active pour cette soirée.'
+  if (m.includes('conversion_closed'))
+    return 'La conversion du jeton food est fermée (disponible jusqu’à 22h).'
+  if (m.includes('no_food_token')) return 'Aucun jeton food disponible à convertir.'
+  if (m.includes('no_pass')) return 'Aucun forfait actif pour cette soirée.'
   if (m.includes('unknown_order')) return 'Commande introuvable.'
   if (m.includes('invalid_flag')) return 'Type de signalement inconnu.'
   if (m.includes('empty_note')) return 'Le commentaire ne peut pas être vide.'
