@@ -1308,23 +1308,20 @@ function OrderingApp({ event, venue, scanPoint, lang, setLang, customer, showToa
     loadPass()
   }, [loadPass])
 
-  async function convertFoodToken() {
-    const { data, error } = await supabase.rpc('convert_food_token', { p_event: event.id })
-    if (error) throw error
-    setPass(data)
-  }
-
   /**
-   * Saisie unifiée : un seul champ pour un code forfait (crédits) ou un code
-   * promo classique (% / montant). On tente d'abord le forfait (redeem_pass) ;
-   * s'il ne s'agit pas de ce type de code, on bascule sur la validation
-   * classique et on retient le code pour les prochaines commandes.
+   * Saisie unifiée : un seul champ pour un code à crédit (qui remplit la
+   * cagnotte) ou un code promo classique (% / montant). On tente d'abord le
+   * code à crédit ; s'il ne s'agit pas de ce type de code, on bascule sur la
+   * validation classique et on retient le code pour les prochaines commandes.
    */
   async function redeemCode(code) {
-    const { data, error } = await supabase.rpc('redeem_pass', { p_event: event.id, p_code: code })
+    const { data, error } = await supabase.rpc('redeem_credit_code', {
+      p_event: event.id,
+      p_code: code,
+    })
     if (!error) {
       setPass(data)
-      return { kind: 'credits' }
+      return { kind: 'credit', amount: Number(data?.credit_remaining ?? 0) }
     }
     if (!String(error.message || '').includes('invalid_pass_code')) throw error
 
@@ -1587,15 +1584,15 @@ function OrderingApp({ event, venue, scanPoint, lang, setLang, customer, showToa
     await loadOrders()
 
     if (pass) {
-      const hadCredits = pass.credits_remaining > 0
+      const hadCredit = Number(pass.credit_remaining) > 0
       const { data: fresh } = await supabase
         .from('event_passes')
         .select('*')
         .eq('id', pass.id)
         .maybeSingle()
       setPass(fresh || pass)
-      if (hadCredits && fresh && fresh.credits_remaining === 0) {
-        showToast('Crédits épuisés — prochaine conso au prix carte, à régler lors du retrait de la commande.', 'error')
+      if (hadCredit && fresh && Number(fresh.credit_remaining) === 0) {
+        showToast('Cagnotte épuisée — les prochaines consos sont au prix de la carte, à régler au bar.', 'error')
       }
     }
 
@@ -1797,14 +1794,13 @@ function OrderingApp({ event, venue, scanPoint, lang, setLang, customer, showToa
           </div>
         )}
 
-        {/* Forfait Groupe (pass à crédits) */}
+        {/* Cagnotte et codes promo */}
         <div style={{ marginBottom: 14 }}>
           <PromoCodeCard
             pass={pass}
             promoCode={promoCode}
             onRedeemCode={redeemCode}
             onClearCode={clearCode}
-            onConvert={convertFoodToken}
             showToast={showToast}
           />
         </div>
@@ -2463,51 +2459,34 @@ function ScrollHint({ children, sticky = false, top = 0, style }) {
  * côté serveur (même ordre d'itération sur le panier) : sert d'aperçu avant
  * envoi, la source de vérité reste le serveur.
  */
-function estimateWalletDiscount(cart, pass) {
-  if (!pass) return { discount: 0, creditsRemaining: 0, foodAvailable: false }
-  let creditsRemaining = pass.credits_remaining
-  let richardUsed = pass.richard_used
-  let foodAvailable = pass.food_token_available
-  let discount = 0
-  for (const l of cart) {
-    const p = l.product
-    const unit = Number(l.basePrice) + (l.options || []).reduce((s, o) => s + Number(o.price || 0), 0)
-    if (p.credit_once && !richardUsed) {
-      const cost = p.credit_kind === 'alcohol' ? 2 : 1
-      if (creditsRemaining >= cost) {
-        creditsRemaining -= cost
-        richardUsed = true
-        discount += unit
-      }
-    } else if (p.credit_kind === 'alcohol' || p.credit_kind === 'soft') {
-      const cost = p.credit_kind === 'alcohol' ? 2 : 1
-      const units = Math.min(l.quantity, Math.floor(creditsRemaining / cost))
-      if (units > 0) {
-        creditsRemaining -= units * cost
-        discount += units * unit
-      }
-    } else if (p.universe === 'food' && foodAvailable) {
-      foodAvailable = false
-      discount += unit
-    }
-  }
-  return { discount, creditsRemaining, foodAvailable }
+/**
+ * La cagnotte se dépense euro pour euro sur n'importe quel article : elle
+ * couvre ce qu'il reste à payer une fois la remise promo déduite. Miroir exact
+ * de ce que fait place_order() côté serveur, qui reste seul juge.
+ */
+function estimateWalletDiscount(subtotal, promoDiscount, pass) {
+  const remaining = Number(pass?.credit_remaining ?? 0)
+  if (!pass || remaining <= 0) return { discount: 0, creditLeft: remaining }
+  const payable = Math.max(0, Number(subtotal) - Number(promoDiscount || 0))
+  const discount = Math.min(remaining, payable)
+  return { discount, creditLeft: remaining - discount }
 }
 
 /**
- * Saisie unique pour TOUT code (réduction % / montant, ou forfait à
- * crédits) — le client n'a plus à savoir de quel type il s'agit, ni à
- * chercher deux emplacements différents.
+ * Saisie unique pour TOUT code (réduction % / montant, ou code à crédit qui
+ * remplit la cagnotte) — le client n'a pas à savoir de quel type il s'agit,
+ * ni à chercher deux emplacements différents.
  */
-function PromoCodeCard({ pass, promoCode, onRedeemCode, onClearCode, onConvert, showToast }) {
+function PromoCodeCard({ pass, promoCode, onRedeemCode, onClearCode, showToast }) {
   const [code, setCode] = useState('')
   const [busy, setBusy] = useState(false)
   const [open, setOpen] = useState(false)
 
-  const hasPass = Boolean(pass)
-  const hasPromo = Boolean(promoCode) && !hasPass
+  const credit = Number(pass?.credit_remaining ?? 0)
+  const hasCredit = credit > 0
+  const hasPromo = Boolean(promoCode)
 
-  if (!hasPass && !hasPromo) {
+  if (!hasCredit && !hasPromo) {
     return (
       <div style={{ ...S.card, padding: 14 }}>
         {open ? (
@@ -2530,7 +2509,12 @@ function PromoCodeCard({ pass, promoCode, onRedeemCode, onClearCode, onConvert, 
                     const res = await onRedeemCode(code.trim())
                     setCode('')
                     setOpen(false)
-                    showToast(res.kind === 'credits' ? 'Forfait activé !' : 'Code activé !', 'ok')
+                    showToast(
+                      res.kind === 'credit'
+                        ? `Cagnotte créditée — ${eur(res.amount)} à dépenser sur la carte.`
+                        : 'Code activé !',
+                      'ok'
+                    )
                   } catch (e) {
                     showToast(frError(e), 'error')
                   } finally {
@@ -2554,70 +2538,87 @@ function PromoCodeCard({ pass, promoCode, onRedeemCode, onClearCode, onConvert, 
             onClick={() => setOpen(true)}
             style={{ background: 'none', border: 'none', padding: 0, cursor: 'pointer', color: C.indigo, fontSize: 13, fontWeight: 600 }}
           >
-            🎟️ Un code promo ou un forfait de groupe ? Activez-le ici
+            🎟️ Un code promo ou une cagnotte ? Activez-le ici
           </button>
         )}
       </div>
     )
   }
 
-  if (hasPromo) {
-    return (
-      <div style={{ ...S.card, padding: 14, display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-        <div>
-          <div style={{ ...S.label, marginBottom: 2 }}>Code actif</div>
-          <div style={{ fontFamily: FONT.label, fontWeight: 600, letterSpacing: 1, fontSize: 15 }}>{promoCode}</div>
-        </div>
-        <button
-          onClick={onClearCode}
-          style={{ ...S.btnGhost, width: 'auto', minHeight: 'auto', padding: '8px 14px', fontSize: 12 }}
-        >
-          Retirer
-        </button>
-      </div>
-    )
-  }
-
-  const canConvert =
-    pass.food_token_available && new Date().toLocaleTimeString('fr-FR', { timeZone: 'Europe/Paris', hour12: false }) < '22:00:00'
-
   return (
-    <div style={{ ...S.card, padding: 14, border: `1.5px solid ${C.terracotta}55` }}>
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-        <div>
-          <div style={{ ...S.label, marginBottom: 2 }}>🎟️ Forfait actif</div>
-          <div style={{ ...S.money, fontSize: 20, fontWeight: 600, color: C.terracotta }}>
-            {pass.credits_remaining} crédit{pass.credits_remaining > 1 ? 's' : ''} restant{pass.credits_remaining > 1 ? 's' : ''}
+    <div style={{ display: 'grid', gap: 10 }}>
+      {hasCredit && (
+        <div style={{ ...S.card, padding: 14, border: `1.5px solid ${C.terracotta}55` }}>
+          <div style={{ ...S.label, marginBottom: 2 }}>💰 Ma cagnotte</div>
+          <div style={{ ...S.money, fontSize: 26, fontWeight: 600, color: C.terracotta }}>
+            {eur(credit)}
+          </div>
+          <div style={{ fontSize: 12, color: C.dim, marginTop: 4, lineHeight: 1.5 }}>
+            Déduite automatiquement de vos commandes, sur tout ce que vous voulez de la carte.
+            Au-delà, vous réglez la différence au bar.
           </div>
         </div>
-        {pass.food_token_total > 0 && (
-          <div style={{ textAlign: 'right', fontSize: 12, color: C.dim }}>
-            Jeton food
-            <br />
-            <strong style={{ color: pass.food_token_available ? C.ok : C.faint }}>
-              {pass.food_token_available ? 'disponible' : 'utilisé'}
-            </strong>
+      )}
+
+      {hasPromo && (
+        <div style={{ ...S.card, padding: 14, display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+          <div>
+            <div style={{ ...S.label, marginBottom: 2 }}>Code actif</div>
+            <div style={{ fontFamily: FONT.label, fontWeight: 600, letterSpacing: 1, fontSize: 15 }}>{promoCode}</div>
           </div>
-        )}
-      </div>
-      {canConvert && (
+          <button
+            onClick={onClearCode}
+            style={{ ...S.btnGhost, width: 'auto', minHeight: 'auto', padding: '8px 14px', fontSize: 12 }}
+          >
+            Retirer
+          </button>
+        </div>
+      )}
+
+      {!open ? (
         <button
-          disabled={busy}
-          onClick={async () => {
-            setBusy(true)
-            try {
-              await onConvert()
-              showToast('Jeton food converti en 2 crédits.', 'ok')
-            } catch (e) {
-              showToast(frError(e), 'error')
-            } finally {
-              setBusy(false)
-            }
-          }}
-          style={{ ...S.btnGhost, marginTop: 10, minHeight: 40, fontSize: 12.5, opacity: busy ? 0.6 : 1 }}
+          onClick={() => setOpen(true)}
+          style={{ background: 'none', border: 'none', padding: '2px 0', cursor: 'pointer', color: C.indigo, fontSize: 12.5, fontWeight: 600, textAlign: 'left' }}
         >
-          {busy ? '…' : 'Convertir mon jeton food en 2 crédits (1 alcool ou 2 softs)'}
+          + Ajouter un autre code
         </button>
+      ) : (
+        <div style={{ ...S.card, padding: 14 }}>
+          <div style={{ ...S.label, marginBottom: 8 }}>Autre code</div>
+          <div style={{ display: 'flex', gap: 8 }}>
+            <input
+              style={{ ...S.input, textTransform: 'uppercase', flex: 1 }}
+              value={code}
+              onChange={(e) => setCode(e.target.value)}
+              placeholder="Réduction ou cagnotte"
+              autoFocus
+            />
+            <button
+              disabled={!code.trim() || busy}
+              onClick={async () => {
+                setBusy(true)
+                try {
+                  const res = await onRedeemCode(code.trim())
+                  setCode('')
+                  setOpen(false)
+                  showToast(
+                    res.kind === 'credit'
+                      ? `Cagnotte créditée — ${eur(res.amount)} à dépenser sur la carte.`
+                      : 'Code activé !',
+                    'ok'
+                  )
+                } catch (e) {
+                  showToast(frError(e), 'error')
+                } finally {
+                  setBusy(false)
+                }
+              }}
+              style={{ ...S.btnGhost, width: 'auto', minHeight: 'auto', padding: '0 18px', opacity: !code.trim() || busy ? 0.5 : 1 }}
+            >
+              {busy ? '…' : 'Activer'}
+            </button>
+          </div>
+        </div>
       )}
     </div>
   )
@@ -2831,8 +2832,6 @@ function CheckoutSheet({ open, lang, event, cart, pass, promoCode, subtotal, pre
   const [promoResult, setPromoResult] = useState(null)
   const [busy, setBusy] = useState(false)
 
-  const walletEst = useMemo(() => estimateWalletDiscount(cart || [], pass), [cart, pass])
-
   // Le code (s'il y en a un) est saisi une seule fois, au niveau de la carte
   // (voir PromoCodeCard) — ici on ne fait qu'en afficher l'effet, recalculé
   // automatiquement à chaque ouverture / changement de panier.
@@ -2853,6 +2852,7 @@ function CheckoutSheet({ open, lang, event, cart, pass, promoCode, subtotal, pre
   }, [open, promoCode, event.id, subtotal])
 
   const promoDiscount = promoResult?.valid ? Number(promoResult.discount) : 0
+  const walletEst = estimateWalletDiscount(subtotal, promoDiscount, pass)
   const discount = promoDiscount + walletEst.discount
   const total = Math.max(0, subtotal - discount)
 
@@ -2886,8 +2886,8 @@ function CheckoutSheet({ open, lang, event, cart, pass, promoCode, subtotal, pre
       {walletEst.discount > 0 && (
         <div style={{ marginBottom: 14 }}>
           <Banner tone="ok">
-            🎟️ Forfait : {eur(walletEst.discount)} couverts par votre portefeuille — il vous restera{' '}
-            {walletEst.creditsRemaining} crédit{walletEst.creditsRemaining > 1 ? 's' : ''} après cette commande.
+            💰 Cagnotte : {eur(walletEst.discount)} déduits de cette commande — il vous restera{' '}
+            {eur(walletEst.creditLeft)}.
           </Banner>
         </div>
       )}
@@ -3720,6 +3720,29 @@ const STAFF_TABS = [
   { k: 'reglages', t: 'Réglages', e: '⚙️' },
 ]
 
+/**
+ * Trois niveaux d'accès :
+ *  · owner   — le créateur du lieu : tout, y compris l'équipe et les mentions légales
+ *  · manager — tout sauf la gestion de l'équipe
+ *  · staff   — service en salle : bar, caisse, clients (version réduite)
+ */
+const ROLE_TABS = {
+  owner: STAFF_TABS.map((t) => t.k),
+  manager: STAFF_TABS.map((t) => t.k),
+  staff: ['bar', 'caisse', 'clients'],
+}
+
+const ROLE_LABEL = {
+  owner: 'Propriétaire',
+  manager: 'Manager',
+  staff: 'Équipe (accès bar)',
+}
+
+function tabsForRole(role) {
+  const allowed = ROLE_TABS[role] || ROLE_TABS.staff
+  return STAFF_TABS.filter((t) => allowed.includes(t.k))
+}
+
 function StaffApp({ session }) {
   const [venues, setVenues] = useState(null)
   const [venueId, setVenueId] = useState(LS.get('noti:venue', null))
@@ -3727,14 +3750,25 @@ function StaffApp({ session }) {
   const [eventId, setEventId] = useState(LS.get('noti:event', null))
   const [tab, setTab] = useState('bar')
   const [switcher, setSwitcher] = useState(false)
+  const [roles, setRoles] = useState({})
   const [toast, showToast] = useToast()
 
   const loadVenues = useCallback(async () => {
+    // Une invitation adressée à cet e-mail devient une adhésion dès la première
+    // connexion — c'est ce qui permet d'inviter quelqu'un qui n'a pas encore de
+    // compte. À faire AVANT de lister les lieux, sinon l'invité tomberait sur
+    // l'écran de création de lieu.
+    if (!session.user.is_anonymous) {
+      const { error } = await supabase.rpc('accept_my_staff_invites')
+      if (error) console.warn('[Noti] invitations', error)
+    }
+
     const { data: mine } = await supabase.from('venues').select('*').eq('owner_id', session.user.id)
     const { data: memberships } = await supabase
       .from('staff_members')
-      .select('venue_id')
+      .select('venue_id, role')
       .eq('user_id', session.user.id)
+
     const ids = (memberships || []).map((m) => m.venue_id)
     let all = mine || []
     if (ids.length) {
@@ -3743,9 +3777,15 @@ function StaffApp({ session }) {
       all = [...all, ...(extra || []).filter((v) => !seen.has(v.id))]
     }
     all.sort((a, b) => a.name.localeCompare(b.name))
+
+    // Le propriétaire l'emporte toujours sur une éventuelle ligne staff_members.
+    const byVenue = Object.fromEntries((memberships || []).map((m) => [m.venue_id, m.role]))
+    for (const v of mine || []) byVenue[v.id] = 'owner'
+
+    setRoles(byVenue)
     setVenues(all)
     setVenueId((cur) => (all.find((v) => v.id === cur) ? cur : all[0]?.id ?? null))
-  }, [session.user.id])
+  }, [session.user.id, session.user.is_anonymous])
 
   const loadEvents = useCallback(async () => {
     if (!venueId) return
@@ -3806,6 +3846,10 @@ function StaffApp({ session }) {
 
   const venue = venues.find((v) => v.id === venueId) || venues[0]
   const event = events.find((e) => e.id === eventId) || null
+  const role = roles[venue.id] || 'staff'
+  const tabs = tabsForRole(role)
+  // Un changement de lieu peut retirer l'accès à l'onglet courant.
+  const activeTab = tabs.some((t) => t.k === tab) ? tab : tabs[0].k
 
   return (
     <div style={{ ...S.page, paddingBottom: 96 }}>
@@ -3854,17 +3898,18 @@ function StaffApp({ session }) {
           <NoEvent venue={venue} onCreated={loadEvents} showToast={showToast} />
         ) : (
           <>
-            {tab === 'bar' && <BarTab event={event} venue={venue} onEventChange={loadEvents} showToast={showToast} />}
-            {tab === 'caisse' && <CaisseTab event={event} venue={venue} showToast={showToast} />}
-            {tab === 'orga' && <OrgaTab event={event} venue={venue} showToast={showToast} onEventChange={loadEvents} />}
-            {tab === 'carte' && <CarteTab venue={venue} showToast={showToast} />}
-            {tab === 'clients' && <ClientsTab event={event} showToast={showToast} />}
-            {tab === 'qr' && <QrTab event={event} venue={venue} showToast={showToast} />}
-            {tab === 'reglages' && (
+            {activeTab === 'bar' && <BarTab event={event} venue={venue} onEventChange={loadEvents} showToast={showToast} />}
+            {activeTab === 'caisse' && <CaisseTab event={event} venue={venue} showToast={showToast} />}
+            {activeTab === 'orga' && <OrgaTab event={event} venue={venue} showToast={showToast} onEventChange={loadEvents} />}
+            {activeTab === 'carte' && <CarteTab venue={venue} showToast={showToast} />}
+            {activeTab === 'clients' && <ClientsTab event={event} showToast={showToast} />}
+            {activeTab === 'qr' && <QrTab event={event} venue={venue} showToast={showToast} />}
+            {activeTab === 'reglages' && (
               <ReglagesTab
                 venue={venue}
                 event={event}
                 session={session}
+                role={role}
                 onReload={() => {
                   loadVenues()
                   loadEvents()
@@ -3892,7 +3937,7 @@ function StaffApp({ session }) {
         }}
         className="no-print"
       >
-        {STAFF_TABS.map((t) => (
+        {tabs.map((t) => (
           <button
             key={t.k}
             onClick={() => {
@@ -3906,10 +3951,10 @@ function StaffApp({ session }) {
               border: 'none',
               cursor: 'pointer',
               padding: '6px 4px',
-              color: tab === t.k ? C.terracotta : C.faint,
+              color: activeTab === t.k ? C.terracotta : C.faint,
             }}
           >
-            <div style={{ fontSize: 18, opacity: tab === t.k ? 1 : 0.6 }}>{t.e}</div>
+            <div style={{ fontSize: 18, opacity: activeTab === t.k ? 1 : 0.6 }}>{t.e}</div>
             <div style={{ fontFamily: FONT.label, fontSize: 9.5, fontWeight: 500, marginTop: 3, letterSpacing: 0.5 }}>
               {t.t.toUpperCase()}
             </div>
@@ -3960,15 +4005,17 @@ function StaffApp({ session }) {
             </div>
           </div>
         ))}
-        <button
-          onClick={() => {
-            setSwitcher(false)
-            setTab('reglages')
-          }}
-          style={S.btnGhost}
-        >
-          + Nouvelle soirée / nouveau lieu
-        </button>
+        {tabs.some((t) => t.k === 'reglages') && (
+          <button
+            onClick={() => {
+              setSwitcher(false)
+              setTab('reglages')
+            }}
+            style={S.btnGhost}
+          >
+            + Nouvelle soirée / nouveau lieu
+          </button>
+        )}
         <div style={{ marginTop: 10 }}>
           <button
             onClick={() => supabase.auth.signOut()}
@@ -4088,6 +4135,14 @@ function StaffOnboarding({ session, onDone }) {
           <h1 style={{ ...S.h1, fontSize: 25, marginTop: 20 }}>Premier lieu</h1>
         </div>
 
+        <div style={{ marginBottom: 14 }}>
+          <Banner tone="info">
+            Vous avez été <strong>invité à rejoindre une équipe</strong> ? Ne créez rien ici :
+            demandez à l’organisateur de vous inviter à l’adresse <strong>{session.user.email}</strong>,
+            puis rechargez cette page — vous serez rattaché automatiquement.
+          </Banner>
+        </div>
+
         <div style={S.card}>
           <Field label="Nom du lieu">
             <input style={S.input} value={venueName} onChange={(e) => setVenueName(e.target.value)} />
@@ -4140,11 +4195,200 @@ function StaffOnboarding({ session, onDone }) {
 //  STAFF · BAR — écran de production temps réel
 // ============================================================================
 
+/**
+ * Signalements posables sur une commande, à n'importe quel stade. « Incident »
+ * est le seul qui taggue aussi la fiche du client (côté serveur).
+ */
+const ORDER_FLAGS = [
+  { k: 'info', label: 'Note', emoji: '💬', color: C.indigo },
+  { k: 'attention', label: 'À surveiller', emoji: '⚠️', color: C.warn },
+  { k: 'geste', label: 'Geste commercial', emoji: '🎁', color: C.ok },
+  { k: 'incident', label: 'Incident', emoji: '🚨', color: C.danger },
+]
+
+const flagOf = (k) => ORDER_FLAGS.find((f) => f.k === k)
+
+/** Pastille de signalement affichée sur la carte de commande. */
+function FlagDot({ flag, count }) {
+  const f = flagOf(flag)
+  if (!f || !count) return null
+  return (
+    <span
+      style={{
+        display: 'inline-flex',
+        alignItems: 'center',
+        gap: 3,
+        padding: '2px 7px',
+        borderRadius: 999,
+        fontSize: 10.5,
+        fontWeight: 600,
+        background: `${f.color}1f`,
+        color: f.color,
+      }}
+    >
+      {f.emoji} {count > 1 ? count : f.label}
+    </span>
+  )
+}
+
+/**
+ * Commenter / signaler une commande en un clic — avant, pendant la préparation
+ * ou après le service. L'historique alimente la fiche client.
+ */
+function OrderNotesSheet({ order, onClose, onSaved, showToast }) {
+  const [notes, setNotes] = useState([])
+  const [body, setBody] = useState('')
+  const [flag, setFlag] = useState('info')
+  const [busy, setBusy] = useState(false)
+  const [loading, setLoading] = useState(true)
+
+  const load = useCallback(async () => {
+    if (!order) return
+    const { data } = await supabase
+      .from('order_notes')
+      .select('*')
+      .eq('order_id', order.id)
+      .order('created_at', { ascending: false })
+    setNotes(data || [])
+    setLoading(false)
+  }, [order])
+
+  useEffect(() => {
+    setBody('')
+    setFlag('info')
+    setLoading(true)
+    load()
+  }, [load])
+
+  async function add() {
+    if (!body.trim()) return showToast('Écrivez un commentaire.', 'error')
+    setBusy(true)
+    const { error } = await supabase.rpc('add_order_note', {
+      p_order: order.id,
+      p_body: body.trim(),
+      p_flag: flag,
+    })
+    setBusy(false)
+    if (error) return showToast(frError(error), 'error')
+    setBody('')
+    setFlag('info')
+    showToast('Commentaire enregistré.', 'ok')
+    load()
+    onSaved?.()
+  }
+
+  async function remove(id) {
+    const { error } = await supabase.from('order_notes').delete().eq('id', id)
+    if (error) return showToast(frError(error), 'error')
+    load()
+    onSaved?.()
+  }
+
+  if (!order) return null
+
+  return (
+    <Sheet open={!!order} onClose={onClose} title={`Suivi · ${order.pickup_code}`}>
+      <div style={{ fontSize: 13, color: C.dim, marginBottom: 14 }}>
+        {order.customers?.first_name} {order.customers?.last_name} · {eur(order.total)} ·{' '}
+        {ORDER_STATUS[order.status]?.label || order.status}
+      </div>
+
+      <Field label="Type">
+        <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+          {ORDER_FLAGS.map((f) => (
+            <button
+              key={f.k}
+              onClick={() => setFlag(f.k)}
+              style={{
+                ...S.chip,
+                flex: '1 0 46%',
+                minHeight: 44,
+                borderColor: flag === f.k ? f.color : C.lineHi,
+                color: flag === f.k ? f.color : C.dim,
+              }}
+            >
+              {f.emoji} {f.label}
+            </button>
+          ))}
+        </div>
+      </Field>
+
+      <Field
+        label="Commentaire"
+        hint={
+          flag === 'incident'
+            ? 'Un incident est aussi ajouté aux tags de la fiche client.'
+            : 'Visible par l’équipe uniquement — jamais par le client.'
+        }
+      >
+        <textarea
+          style={{ ...S.input, minHeight: 90, paddingTop: 12, resize: 'vertical' }}
+          value={body}
+          onChange={(e) => setBody(e.target.value)}
+          placeholder="Verre renversé, client mécontent, cadeau offert…"
+        />
+      </Field>
+
+      <button disabled={busy || !body.trim()} onClick={add} style={{ ...S.btn, opacity: busy || !body.trim() ? 0.5 : 1 }}>
+        {busy ? '…' : 'Enregistrer'}
+      </button>
+
+      <div style={{ marginTop: 20 }}>
+        <div style={{ ...S.label, marginBottom: 8 }}>Historique</div>
+        {loading ? (
+          <Spinner label="Chargement…" />
+        ) : notes.length === 0 ? (
+          <div style={{ color: C.faint, fontSize: 12.5 }}>Aucun commentaire sur cette commande.</div>
+        ) : (
+          <div style={{ display: 'grid', gap: 8 }}>
+            {notes.map((n) => {
+              const f = flagOf(n.flag)
+              return (
+                <div
+                  key={n.id}
+                  style={{
+                    padding: 11,
+                    borderRadius: 12,
+                    background: C.paper,
+                    border: `1px solid ${C.line}`,
+                    borderLeft: `3px solid ${f?.color || C.line}`,
+                  }}
+                >
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                    <span style={{ fontSize: 11.5, fontWeight: 600, color: f?.color || C.dim }}>
+                      {f?.emoji} {f?.label || n.flag}
+                    </span>
+                    <span style={{ marginLeft: 'auto', fontSize: 10.5, color: C.faint }}>
+                      {timeFR(n.created_at)}
+                    </span>
+                    <button
+                      onClick={() => remove(n.id)}
+                      title="Supprimer"
+                      style={{ background: 'none', border: 'none', cursor: 'pointer', color: C.faint, padding: 0, fontSize: 13 }}
+                    >
+                      ✕
+                    </button>
+                  </div>
+                  <div style={{ fontSize: 13.5, marginTop: 5, whiteSpace: 'pre-wrap' }}>{n.body}</div>
+                  {n.author_email && (
+                    <div style={{ fontSize: 10.5, color: C.faint, marginTop: 4 }}>{n.author_email}</div>
+                  )}
+                </div>
+              )
+            })}
+          </div>
+        )}
+      </div>
+    </Sheet>
+  )
+}
+
 function BarTab({ event, venue, onEventChange, showToast }) {
   const [orders, setOrders] = useState([])
   const [loading, setLoading] = useState(true)
   const [prep, setPrep] = useState(event.default_prep_min ?? 1)
   const [detail, setDetail] = useState(null)
+  const [notesFor, setNotesFor] = useState(null)
   const [soldOutOpen, setSoldOutOpen] = useState(false)
   const [staffPush, setStaffPush] = useState(false)
   const [ack, setAck] = useState(() => new Set(LS.get(`noti:ack:${event.id}`, [])))
@@ -4424,6 +4668,11 @@ function BarTab({ event, venue, onEventChange, showToast }) {
                           <span style={{ color: C.indigo, fontWeight: 600 }}> · VIP</span>
                         )}
                       </div>
+                      {o.notes_count > 0 && (
+                        <div style={{ marginTop: 5 }}>
+                          <FlagDot flag={o.flag} count={o.notes_count} />
+                        </div>
+                      )}
                     </div>
                     <div style={{ ...S.money, fontWeight: 600, color: C.terracotta }}>{eur(o.total)}</div>
                   </div>
@@ -4490,6 +4739,19 @@ function BarTab({ event, venue, onEventChange, showToast }) {
                     >
                       {col.action}
                     </button>
+                    <button
+                      onClick={() => setNotesFor(o)}
+                      title="Commenter / signaler cette commande"
+                      style={{
+                        ...stepBtn,
+                        width: 44,
+                        height: 44,
+                        fontSize: 15,
+                        borderColor: o.flag ? flagOf(o.flag)?.color : undefined,
+                      }}
+                    >
+                      {o.flag ? flagOf(o.flag)?.emoji : '💬'}
+                    </button>
                     <button onClick={() => printTicket(o)} title="Imprimer le ticket (optionnel)" style={{ ...stepBtn, width: 44, height: 44, fontSize: 15 }}>
                       🖨
                     </button>
@@ -4505,6 +4767,13 @@ function BarTab({ event, venue, onEventChange, showToast }) {
       </div>
 
       <SoldOutSheet open={soldOutOpen} venue={venue} onClose={() => setSoldOutOpen(false)} />
+
+      <OrderNotesSheet
+        order={notesFor}
+        onClose={() => setNotesFor(null)}
+        onSaved={load}
+        showToast={showToast}
+      />
 
       <Sheet open={!!detail} onClose={() => setDetail(null)} title={detail ? `Commande ${detail.pickup_code}` : ''}>
         {detail && (
@@ -4561,6 +4830,17 @@ function BarTab({ event, venue, onEventChange, showToast }) {
               <span style={{ ...S.money, fontWeight: 600, color: C.terracotta }}>{eur(detail.total)}</span>
             </div>
             <div style={{ display: 'grid', gap: 8, marginTop: 16 }}>
+              <button
+                onClick={() => {
+                  const o = detail
+                  setDetail(null)
+                  setNotesFor(o)
+                }}
+                style={S.btnGhost}
+              >
+                💬 Commenter / signaler
+                {detail.notes_count > 0 ? ` (${detail.notes_count})` : ''}
+              </button>
               <button onClick={() => printTicket(detail)} style={S.btnGhost}>
                 Imprimer le ticket
               </button>
@@ -4911,6 +5191,131 @@ function CaisseTab({ event, venue, showToast }) {
 //  STAFF · ORGA — pilotage temps réel, interaction, reporting
 // ============================================================================
 
+/**
+ * Jauge d'affluence : remplissage courant si une capacité est renseignée dans
+ * les réglages, rythme d'arrivée sur la dernière heure, et courbe des arrivées
+ * par tranche de 15 min — le tout alimenté par les scans QR.
+ */
+function AffluenceCard({ pulse, slots }) {
+  const live = pulse
+  const headcount = Number(live?.headcount ?? 0)
+  const capacity = Number(live?.capacity ?? 0)
+  const pct = capacity > 0 ? Math.min(100, Math.round((headcount / capacity) * 100)) : null
+  const last15 = Number(live?.arrivals_15min ?? 0)
+  const last60 = Number(live?.arrivals_60min ?? 0)
+  const active = Number(live?.active_30min ?? 0)
+
+  const tone = pct == null ? C.indigo : pct >= 90 ? C.danger : pct >= 70 ? C.warn : C.ok
+  const toneLabel =
+    pct == null ? null : pct >= 90 ? 'Salle pleine' : pct >= 70 ? 'Bien remplie' : 'De la place'
+
+  // Douze dernières tranches de 15 min, y compris celles sans arrivée : sans
+  // ça, une accalmie disparaîtrait de la courbe au lieu de s'y voir.
+  const bars = useMemo(() => {
+    const now = Date.now()
+    const step = 15 * 60 * 1000
+    const currentSlot = Math.floor(now / step) * step
+    const bySlot = Object.fromEntries(
+      (slots || []).map((s) => [Math.floor(new Date(s.slot).getTime() / step) * step, Number(s.people) || 0])
+    )
+    return Array.from({ length: 12 }, (_, i) => {
+      const t = currentSlot - (11 - i) * step
+      return { t, people: bySlot[t] || 0 }
+    })
+  }, [slots])
+
+  const peak = Math.max(1, ...bars.map((b) => b.people))
+
+  return (
+    <div style={{ ...S.card, marginBottom: 14 }}>
+      <div style={{ display: 'flex', alignItems: 'baseline', gap: 8, marginBottom: 12 }}>
+        <div style={{ ...S.h2, marginBottom: 0 }}>Affluence</div>
+        <div style={{ marginLeft: 'auto', fontSize: 11.5, color: C.dim }}>
+          {active} actif{active > 1 ? 's' : ''} · 30 dernières min
+        </div>
+      </div>
+
+      <div style={{ display: 'flex', alignItems: 'baseline', gap: 10, marginBottom: 10 }}>
+        <div style={{ ...S.money, fontSize: 34, fontWeight: 600, color: tone }}>{headcount}</div>
+        <div style={{ fontSize: 13, color: C.dim }}>
+          {capacity > 0 ? `sur ${capacity} places` : 'personnes présentes'}
+        </div>
+        {toneLabel && (
+          <div style={{ marginLeft: 'auto', fontSize: 11.5, fontWeight: 600, color: tone }}>
+            {pct}% · {toneLabel}
+          </div>
+        )}
+      </div>
+
+      {capacity > 0 && (
+        <div
+          style={{
+            height: 12,
+            borderRadius: 999,
+            background: 'rgba(28,42,74,.08)',
+            overflow: 'hidden',
+            marginBottom: 14,
+          }}
+        >
+          <div
+            style={{
+              width: `${pct}%`,
+              height: '100%',
+              borderRadius: 999,
+              background: tone,
+              transition: 'width .6s ease',
+            }}
+          />
+        </div>
+      )}
+
+      {capacity === 0 && (
+        <div style={{ fontSize: 11.5, color: C.faint, marginBottom: 14, lineHeight: 1.5 }}>
+          Renseignez la capacité de la salle dans les Réglages pour afficher le taux de remplissage.
+        </div>
+      )}
+
+      <div style={{ display: 'flex', gap: 8, marginBottom: 14 }}>
+        <div style={{ flex: 1, padding: '10px 12px', borderRadius: 12, background: C.paper, border: `1px solid ${C.line}` }}>
+          <div style={{ ...S.money, fontSize: 19, fontWeight: 600 }}>+{last15}</div>
+          <div style={{ ...S.label, marginBottom: 0, marginTop: 2, fontSize: 9.5 }}>15 dernières min</div>
+        </div>
+        <div style={{ flex: 1, padding: '10px 12px', borderRadius: 12, background: C.paper, border: `1px solid ${C.line}` }}>
+          <div style={{ ...S.money, fontSize: 19, fontWeight: 600 }}>+{last60}</div>
+          <div style={{ ...S.label, marginBottom: 0, marginTop: 2, fontSize: 9.5 }}>Dernière heure</div>
+        </div>
+        <div style={{ flex: 1, padding: '10px 12px', borderRadius: 12, background: C.paper, border: `1px solid ${C.line}` }}>
+          <div style={{ ...S.money, fontSize: 19, fontWeight: 600 }}>
+            {live?.last_arrival_at ? timeFR(live.last_arrival_at) : '—'}
+          </div>
+          <div style={{ ...S.label, marginBottom: 0, marginTop: 2, fontSize: 9.5 }}>Dernière arrivée</div>
+        </div>
+      </div>
+
+      <div style={{ ...S.label, marginBottom: 8 }}>Arrivées · 3 dernières heures</div>
+      <div style={{ display: 'flex', alignItems: 'flex-end', gap: 4, height: 64 }}>
+        {bars.map((b) => (
+          <div key={b.t} style={{ flex: 1, display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 4 }}>
+            <div
+              title={`${b.people} personne(s) à ${timeFR(new Date(b.t).toISOString())}`}
+              style={{
+                width: '100%',
+                height: `${Math.max(3, (b.people / peak) * 48)}px`,
+                borderRadius: 4,
+                background: b.people > 0 ? C.indigo : 'rgba(28,42,74,.10)',
+                transition: 'height .5s ease',
+              }}
+            />
+            <div style={{ fontSize: 8.5, color: C.faint, whiteSpace: 'nowrap' }}>
+              {new Date(b.t).getMinutes() === 0 ? timeFR(new Date(b.t).toISOString()) : ''}
+            </div>
+          </div>
+        ))}
+      </div>
+    </div>
+  )
+}
+
 function OrgaTab({ event, venue, showToast, onEventChange }) {
   const [live, setLive] = useState(null)
   const [board, setBoard] = useState([])
@@ -4922,6 +5327,8 @@ function OrgaTab({ event, venue, showToast, onEventChange }) {
   const [promoCodes, setPromoCodes] = useState([])
   const [editingPromo, setEditingPromo] = useState(null)
   const [waiting, setWaiting] = useState([])
+  const [slots, setSlots] = useState([])
+  const [pulse, setPulse] = useState(null)
   const [now, setNow] = useState(Date.now())
   const [ficheFor, setFicheFor] = useState(null)
 
@@ -4931,7 +5338,7 @@ function OrgaTab({ event, venue, showToast, onEventChange }) {
   }, [])
 
   const load = useCallback(async () => {
-    const [l, b, m, pc, w] = await Promise.all([
+    const [l, b, m, pc, w, af, pu] = await Promise.all([
       supabase.from('v_event_live').select('*').eq('event_id', event.id).maybeSingle(),
       supabase
         .from('v_event_leaderboard')
@@ -4959,12 +5366,20 @@ function OrgaTab({ event, venue, showToast, onEventChange }) {
         .eq('event_id', event.id)
         .eq('status', 'READY')
         .order('ready_at', { ascending: true }),
+      supabase
+        .from('v_event_affluence')
+        .select('*')
+        .eq('event_id', event.id)
+        .order('slot', { ascending: true }),
+      supabase.from('v_event_pulse').select('*').eq('event_id', event.id).maybeSingle(),
     ])
     setLive(l.data || null)
     setBoard(b.data || [])
     setMessages(m.data || [])
     setPromoCodes(pc.data || [])
     setWaiting(w.data || [])
+    setSlots(af.data || [])
+    setPulse(pu.data || null)
   }, [event.id])
 
   const overdue = waiting
@@ -5010,9 +5425,11 @@ function OrgaTab({ event, venue, showToast, onEventChange }) {
           .select('customer_id, promo_code, order_items ( name_snapshot, quantity, variant_label )')
           .eq('event_id', event.id)
           .neq('status', 'CANCELLED'),
+        // promo_redemptions garde une ligne par (code, client) : c'est la
+        // source fiable de l'historique, y compris quand deux codes se cumulent.
         supabase
-          .from('event_passes')
-          .select('customer_id, promo_codes ( code )')
+          .from('promo_redemptions')
+          .select('customer_id, credit_granted, promo_codes ( code )')
           .eq('event_id', event.id),
       ])
 
@@ -5042,18 +5459,22 @@ function OrgaTab({ event, venue, showToast, onEventChange }) {
           .join(', ')
       }
 
-      // Historique des codes promo utilisés : codes % / montant réellement
-      // appliqués sur les commandes + le code forfait éventuellement activé.
+      // Historique des codes utilisés : les activations tracées dans
+      // promo_redemptions (codes à crédit) + les codes % / montant réellement
+      // appliqués sur les commandes, qui ne laissent de trace que là.
       const promoCodesById = {}
+      const creditById = {}
       for (const o of ords || []) {
         if (!o.promo_code) continue
         const set = promoCodesById[o.customer_id] || (promoCodesById[o.customer_id] = new Set())
         set.add(o.promo_code)
       }
       for (const p of passes || []) {
-        if (!p.promo_codes?.code) continue
-        const set = promoCodesById[p.customer_id] || (promoCodesById[p.customer_id] = new Set())
-        set.add(p.promo_codes.code)
+        if (p.promo_codes?.code) {
+          const set = promoCodesById[p.customer_id] || (promoCodesById[p.customer_id] = new Set())
+          set.add(p.promo_codes.code)
+        }
+        creditById[p.customer_id] = (creditById[p.customer_id] || 0) + Number(p.credit_granted || 0)
       }
       const promoCodesSummary = (customerId) => [...(promoCodesById[customerId] || [])].join(', ')
 
@@ -5066,6 +5487,7 @@ function OrgaTab({ event, venue, showToast, onEventChange }) {
         'Commande',
         'Tags',
         'Codes promo utilisés',
+        'Cagnotte reçue EUR',
         'Commandes',
         'Total EUR',
         'Dernière commande',
@@ -5079,6 +5501,7 @@ function OrgaTab({ event, venue, showToast, onEventChange }) {
         itemsSummary(r.customer_id),
         (r.tags || []).join('|'),
         promoCodesSummary(r.customer_id),
+        (creditById[r.customer_id] || 0).toFixed(2),
         r.orders_count,
         Number(r.total_spent).toFixed(2),
         r.last_order_at ? dateFR(r.last_order_at) : '',
@@ -5120,6 +5543,8 @@ function OrgaTab({ event, venue, showToast, onEventChange }) {
         {stat('À retirer', live?.awaiting_pickup ?? 0, C.terracotta)}
         {stat('Encaissé', eur(live?.revenue_paid ?? 0), C.ok)}
       </div>
+
+      <AffluenceCard pulse={pulse} slots={slots} />
 
       {(live?.unpaid_count ?? 0) > 0 && (
         <div style={{ marginBottom: 14 }}>
@@ -5301,7 +5726,16 @@ function OrgaTab({ event, venue, showToast, onEventChange }) {
         ))}
       </div>
 
-      <ClientFicheSheet customerId={ficheFor} onClose={() => setFicheFor(null)} showToast={showToast} />
+      <ClientFicheSheet
+        customerId={ficheFor}
+        event={event}
+        onClose={() => setFicheFor(null)}
+        onMessage={(target) => {
+          setFicheFor(null)
+          setDmFor(target)
+        }}
+        showToast={showToast}
+      />
 
       {/* Reporting */}
       <div style={{ ...S.h2, marginBottom: 10 }}>Reporting</div>
@@ -5382,12 +5816,12 @@ function OrgaTab({ event, venue, showToast, onEventChange }) {
                 {p.code}
               </div>
               <div style={{ fontSize: 11.5, color: C.faint, marginTop: 2 }}>
-                {p.kind === 'credits'
-                  ? `🎟️ ${p.credits_per_person} crédits${p.food_tokens_per_person > 0 ? ` + ${p.food_tokens_per_person} food` : ''} /pers`
+                {p.kind === 'credit'
+                  ? `💰 ${eur(p.credit_amount)} de cagnotte /pers`
                   : p.kind === 'percent'
                     ? `-${p.value}%`
                     : `-${eur(p.value)}`}
-                {p.kind !== 'credits' && p.min_total > 0 ? ` · dès ${eur(p.min_total)}` : ''}
+                {p.kind !== 'credit' && p.min_total > 0 ? ` · dès ${eur(p.min_total)}` : ''}
                 {' · '}
                 {p.uses_count}
                 {p.max_uses ? `/${p.max_uses}` : ''} utilisé{p.uses_count > 1 ? 's' : ''}
@@ -5449,6 +5883,7 @@ function OrgaTab({ event, venue, showToast, onEventChange }) {
           )
           load()
         }}
+        onChanged={load}
         showToast={showToast}
       />
 
@@ -5481,9 +5916,39 @@ const BROADCAST_TEMPLATES = [
   'Forfaits : dernière ligne droite pour convertir votre jeton food en conso (crédits), fenêtre fermée à 22h — après quoi il reste un jeton food perdu s’il n’est pas utilisé.',
 ]
 
-function BroadcastSheet({ open, event, onClose, onSent, showToast }) {
+function BroadcastSheet({ open, event, onClose, onSent, onChanged, showToast }) {
   const [body, setBody] = useState('')
   const [busy, setBusy] = useState(false)
+  const [sent, setSent] = useState([])
+  const [loadingSent, setLoadingSent] = useState(false)
+
+  // Historique des messages déjà partis, pour pouvoir en retirer un.
+  const loadSent = useCallback(async () => {
+    if (!open) return
+    setLoadingSent(true)
+    const { data } = await supabase
+      .from('messages')
+      .select('*, customers ( first_name, last_name )')
+      .eq('event_id', event.id)
+      .neq('kind', 'status')
+      .order('created_at', { ascending: false })
+      .limit(30)
+    setSent(data || [])
+    setLoadingSent(false)
+  }, [open, event.id])
+
+  useEffect(() => {
+    loadSent()
+  }, [loadSent])
+
+  async function remove(id) {
+    if (!confirm('Supprimer ce message ? Il disparaîtra aussi du canal des clients.')) return
+    const { error } = await supabase.from('messages').delete().eq('id', id)
+    if (error) return showToast(frError(error), 'error')
+    showToast('Message supprimé.', 'ok')
+    loadSent()
+    onChanged?.()
+  }
 
   return (
     <Sheet open={open} onClose={onClose} title="Diffusion">
@@ -5535,20 +6000,71 @@ function BroadcastSheet({ open, event, onClose, onSent, showToast }) {
           setBusy(false)
           if (!res) return showToast('Envoi impossible : message non enregistré.', 'error')
           setBody('')
+          loadSent()
           onSent(res)
         }}
         style={{ ...S.btn, opacity: !body.trim() || busy ? 0.5 : 1 }}
       >
         {busy ? 'Envoi…' : 'Diffuser'}
       </button>
+
+      <div style={{ marginTop: 22 }}>
+        <div style={{ ...S.label, marginBottom: 8 }}>Messages envoyés</div>
+        {loadingSent ? (
+          <Spinner label="Chargement…" />
+        ) : sent.length === 0 ? (
+          <div style={{ fontSize: 12.5, color: C.faint }}>Aucun message envoyé sur cette soirée.</div>
+        ) : (
+          <div style={{ display: 'grid', gap: 8 }}>
+            {sent.map((m) => (
+              <div
+                key={m.id}
+                style={{
+                  padding: 11,
+                  borderRadius: 12,
+                  background: C.paper,
+                  border: `1px solid ${C.line}`,
+                }}
+              >
+                <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                  <span style={{ fontSize: 10.5, fontWeight: 600, color: m.customer_id ? C.indigo : C.terracotta }}>
+                    {m.customer_id
+                      ? `À ${m.customers?.first_name || 'un client'} ${m.customers?.last_name || ''}`.trim()
+                      : 'Diffusion générale'}
+                  </span>
+                  <span style={{ marginLeft: 'auto', fontSize: 10.5, color: C.faint }}>
+                    {dateFR(m.created_at)} {timeFR(m.created_at)}
+                  </span>
+                  <button
+                    onClick={() => remove(m.id)}
+                    title="Supprimer ce message"
+                    style={{ background: 'none', border: 'none', cursor: 'pointer', color: C.danger, padding: 0, fontSize: 13 }}
+                  >
+                    ✕
+                  </button>
+                </div>
+                <div style={{ fontSize: 13, marginTop: 5, whiteSpace: 'pre-wrap' }}>{m.body}</div>
+              </div>
+            ))}
+          </div>
+        )}
+        <div style={{ fontSize: 11, color: C.faint, marginTop: 10, lineHeight: 1.5 }}>
+          Supprimer retire le message du canal 💬 des clients. Une notification push ou un SMS déjà
+          reçu sur le téléphone, lui, ne peut pas être repris.
+        </div>
+      </div>
     </Sheet>
   )
 }
 
 /** Fiche client complète (staff) — tous les champs collectés, tous événements confondus. */
-function ClientFicheSheet({ customerId, onClose, showToast }) {
+function ClientFicheSheet({ customerId, event, onClose, onMessage, showToast }) {
   const [cust, setCust] = useState(null)
   const [promoCodesUsed, setPromoCodesUsed] = useState([])
+  const [orders, setOrders] = useState([])
+  const [notes, setNotes] = useState([])
+  const [attendance, setAttendance] = useState(null)
+  const [wallet, setWallet] = useState(null)
   const [loading, setLoading] = useState(false)
 
   useEffect(() => {
@@ -5559,17 +6075,61 @@ function ClientFicheSheet({ customerId, onClose, showToast }) {
     let dead = false
     setLoading(true)
     ;(async () => {
-      const [{ data: c, error }, { data: ords }, { data: passes }] = await Promise.all([
+      const [
+        { data: c, error },
+        { data: ords },
+        { data: reds },
+        { data: nts },
+        { data: att },
+        { data: wal },
+      ] = await Promise.all([
         supabase.from('customers').select('*').eq('id', customerId).maybeSingle(),
-        supabase.from('orders').select('promo_code').eq('customer_id', customerId).not('promo_code', 'is', null),
-        supabase.from('event_passes').select('promo_codes ( code )').eq('customer_id', customerId),
+        supabase
+          .from('orders')
+          .select('*, order_items ( name_snapshot, quantity, variant_label ), events ( name )')
+          .eq('customer_id', customerId)
+          .order('created_at', { ascending: false })
+          .limit(40),
+        supabase
+          .from('promo_redemptions')
+          .select('credit_granted, created_at, promo_codes ( code )')
+          .eq('customer_id', customerId),
+        supabase
+          .from('order_notes')
+          .select('*')
+          .eq('customer_id', customerId)
+          .order('created_at', { ascending: false })
+          .limit(30),
+        event
+          ? supabase
+              .from('attendances')
+              .select('*, scan_points ( label, kind )')
+              .eq('customer_id', customerId)
+              .eq('event_id', event.id)
+              .maybeSingle()
+          : Promise.resolve({ data: null }),
+        event
+          ? supabase
+              .from('event_passes')
+              .select('credit_total, credit_remaining')
+              .eq('customer_id', customerId)
+              .eq('event_id', event.id)
+              .maybeSingle()
+          : Promise.resolve({ data: null }),
       ])
       if (dead) return
       if (error) showToast?.(frError(error), 'error')
       setCust(c || null)
+      setOrders(ords || [])
+      setNotes(nts || [])
+      setAttendance(att || null)
+      setWallet(wal || null)
+
+      // promo_redemptions est la source fiable ; les codes % / montant ne
+      // laissent de trace que sur la commande, on complète donc avec eux.
       const codes = new Set([
+        ...(reds || []).map((r) => r.promo_codes?.code).filter(Boolean),
         ...(ords || []).map((o) => o.promo_code).filter(Boolean),
-        ...(passes || []).map((p) => p.promo_codes?.code).filter(Boolean),
       ])
       setPromoCodesUsed([...codes])
       setLoading(false)
@@ -5577,7 +6137,11 @@ function ClientFicheSheet({ customerId, onClose, showToast }) {
     return () => {
       dead = true
     }
-  }, [customerId, showToast])
+  }, [customerId, event, showToast])
+
+  // « Actif en live » : un scan ou une commande dans la dernière demi-heure.
+  const lastSeen = attendance?.last_scan_at
+  const liveNow = lastSeen && Date.now() - new Date(lastSeen).getTime() < 30 * 60 * 1000
 
   return (
     <Sheet open={!!customerId} onClose={onClose} title="Fiche client">
@@ -5609,6 +6173,48 @@ function ClientFicheSheet({ customerId, onClose, showToast }) {
             )}
           </div>
 
+          {/* Présence sur la soirée en cours */}
+          {attendance && (
+            <div
+              style={{
+                ...S.card,
+                padding: 14,
+                border: `1.5px solid ${liveNow ? C.ok : C.line}`,
+                background: liveNow ? 'rgba(46,125,90,.06)' : C.paper,
+              }}
+            >
+              <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 8 }}>
+                <span
+                  style={{
+                    width: 8,
+                    height: 8,
+                    borderRadius: 4,
+                    background: liveNow ? C.ok : C.faint,
+                    animation: liveNow ? 'notipulse 1.6s infinite' : 'none',
+                  }}
+                />
+                <span style={{ fontFamily: FONT.label, fontWeight: 600, letterSpacing: 1, fontSize: 11.5, color: liveNow ? C.ok : C.dim }}>
+                  {liveNow ? 'PRÉSENT MAINTENANT' : 'SUR CETTE SOIRÉE'}
+                </span>
+              </div>
+              <div style={{ display: 'grid', gap: 4, fontSize: 13 }}>
+                <div>
+                  🚪 Arrivé à <strong>{timeFR(attendance.first_scan_at)}</strong>
+                  {attendance.scan_points?.label ? ` · ${attendance.scan_points.label}` : ''}
+                </div>
+                <div>👥 Groupe de {attendance.group_size}</div>
+                <div style={{ color: C.dim }}>
+                  Dernière activité à {timeFR(attendance.last_scan_at)}
+                </div>
+                {wallet && Number(wallet.credit_total) > 0 && (
+                  <div style={{ color: C.terracotta, fontWeight: 500 }}>
+                    💰 Cagnotte : {eur(wallet.credit_remaining)} restants sur {eur(wallet.credit_total)}
+                  </div>
+                )}
+              </div>
+            </div>
+          )}
+
           <div style={{ ...S.card, padding: 14, display: 'grid', gap: 8, fontSize: 14 }}>
             <div>📞 {phoneFR(cust.phone) || '—'}</div>
             <div>✉️ {cust.email || '—'}</div>
@@ -5616,6 +6222,21 @@ function ClientFicheSheet({ customerId, onClose, showToast }) {
             <div>📮 {cust.postal_code || '—'}</div>
             <div>🎂 {cust.birthdate ? new Date(cust.birthdate).toLocaleDateString('fr-FR') : '—'}</div>
           </div>
+
+          {onMessage && (
+            <button
+              onClick={() =>
+                onMessage({
+                  customer_id: cust.id,
+                  first_name: cust.first_name,
+                  last_name: cust.last_name,
+                })
+              }
+              style={S.btn}
+            >
+              ✉️ Envoyer un message à {cust.first_name || 'ce client'}
+            </button>
+          )}
 
           <div style={{ display: 'flex', gap: 8 }}>
             <div style={{ ...S.card, flex: 1, padding: 12, textAlign: 'center' }}>
@@ -5651,6 +6272,99 @@ function ClientFicheSheet({ customerId, onClose, showToast }) {
               <div style={{ fontSize: 13.5, color: C.dim }}>{cust.staff_note}</div>
             </div>
           )}
+
+          {/* Signalements posés par l'équipe sur ses commandes */}
+          {notes.length > 0 && (
+            <div>
+              <div style={{ ...S.label, marginBottom: 6 }}>Suivi de l’équipe ({notes.length})</div>
+              <div style={{ display: 'grid', gap: 8 }}>
+                {notes.map((n) => {
+                  const f = flagOf(n.flag)
+                  return (
+                    <div
+                      key={n.id}
+                      style={{
+                        padding: 11,
+                        borderRadius: 12,
+                        background: C.paper,
+                        border: `1px solid ${C.line}`,
+                        borderLeft: `3px solid ${f?.color || C.line}`,
+                      }}
+                    >
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                        <span style={{ fontSize: 11.5, fontWeight: 600, color: f?.color || C.dim }}>
+                          {f?.emoji} {f?.label || n.flag}
+                        </span>
+                        <span style={{ marginLeft: 'auto', fontSize: 10.5, color: C.faint }}>
+                          {dateFR(n.created_at)} {timeFR(n.created_at)}
+                        </span>
+                      </div>
+                      <div style={{ fontSize: 13.5, marginTop: 5, whiteSpace: 'pre-wrap' }}>{n.body}</div>
+                    </div>
+                  )
+                })}
+              </div>
+            </div>
+          )}
+
+          {/* Historique des commandes, toutes soirées confondues */}
+          <div>
+            <div style={{ ...S.label, marginBottom: 6 }}>
+              Historique des commandes ({orders.length})
+            </div>
+            {orders.length === 0 ? (
+              <div style={{ fontSize: 12.5, color: C.faint }}>Aucune commande enregistrée.</div>
+            ) : (
+              <div style={{ display: 'grid', gap: 8 }}>
+                {orders.map((o) => {
+                  const st = ORDER_STATUS[o.status]
+                  return (
+                    <div
+                      key={o.id}
+                      style={{
+                        padding: 11,
+                        borderRadius: 12,
+                        background: C.paper,
+                        border: `1px solid ${C.line}`,
+                      }}
+                    >
+                      <div style={{ display: 'flex', alignItems: 'baseline', gap: 8 }}>
+                        <span style={{ fontFamily: FONT.label, fontWeight: 600, letterSpacing: 1.4, fontSize: 13 }}>
+                          {o.pickup_code}
+                        </span>
+                        <span style={{ fontSize: 11, color: C.faint }}>
+                          {dateFR(o.created_at)} · {timeFR(o.created_at)}
+                        </span>
+                        <span style={{ marginLeft: 'auto', ...S.money, fontWeight: 600 }}>{eur(o.total)}</span>
+                      </div>
+                      <div style={{ fontSize: 12, color: C.dim, marginTop: 4 }}>
+                        {(o.order_items || [])
+                          .map((it) => `${it.quantity}× ${it.name_snapshot}${it.variant_label ? ` (${it.variant_label})` : ''}`)
+                          .join(', ') || '—'}
+                      </div>
+                      <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginTop: 6, alignItems: 'center' }}>
+                        <span style={{ fontSize: 10.5, fontWeight: 600, color: st?.color || C.dim }}>
+                          {st?.label || o.status}
+                        </span>
+                        {o.events?.name && (
+                          <span style={{ fontSize: 10.5, color: C.faint }}>· {o.events.name}</span>
+                        )}
+                        {Number(o.credit_used) > 0 && (
+                          <span style={{ fontSize: 10.5, color: C.terracotta }}>
+                            · {eur(o.credit_used)} de cagnotte
+                          </span>
+                        )}
+                        {o.promo_code && (
+                          <span style={{ fontSize: 10.5, color: C.indigo }}>· {o.promo_code}</span>
+                        )}
+                        {o.notes_count > 0 && <FlagDot flag={o.flag} count={o.notes_count} />}
+                      </div>
+                    </div>
+                  )
+                })}
+              </div>
+            )}
+          </div>
         </div>
       )}
     </Sheet>
@@ -5711,8 +6425,7 @@ const EMPTY_PROMO = {
   min_total: 0,
   max_uses: null,
   active: true,
-  credits_per_person: 6,
-  food_tokens_per_person: 1,
+  credit_amount: 30,
 }
 
 function PromoCodeSheet({ promo, event, onClose, onSaved, showToast }) {
@@ -5738,8 +6451,7 @@ function PromoCodeSheet({ promo, event, onClose, onSaved, showToast }) {
       min_total: Number(f.min_total) || 0,
       max_uses: f.max_uses === '' || f.max_uses == null ? null : Number(f.max_uses),
       active: !!f.active,
-      credits_per_person: Number(f.credits_per_person) || 0,
-      food_tokens_per_person: Number(f.food_tokens_per_person) || 0,
+      credit_amount: Number(f.credit_amount) || 0,
     }
     const { error } = f.id
       ? await supabase.from('promo_codes').update(payload).eq('id', f.id)
@@ -5804,55 +6516,50 @@ function PromoCodeSheet({ promo, event, onClose, onSaved, showToast }) {
             Montant fixe €
           </button>
           <button
-            onClick={() => set('kind', 'credits')}
+            onClick={() => set('kind', 'credit')}
             style={{
               ...S.chip,
               flex: '1 0 100%',
               minHeight: 44,
-              borderColor: f.kind === 'credits' ? C.terracotta : C.lineHi,
-              color: f.kind === 'credits' ? C.terracotta : C.dim,
+              borderColor: f.kind === 'credit' ? C.terracotta : C.lineHi,
+              color: f.kind === 'credit' ? C.terracotta : C.dim,
             }}
           >
-            🎟️ Forfait (crédits)
+            💰 Cagnotte (crédit en €)
           </button>
         </div>
       </Field>
 
-      {f.kind === 'credits' ? (
+      {f.kind === 'credit' ? (
         <>
           <div style={{ marginBottom: 12 }}>
             <Banner tone="info">
-              Chaque personne qui active ce code reçoit son propre portefeuille : 1 alcool éligible
-              = 2 crédits, 1 soft = 1 crédit. Le jeton food se convertit en 2 crédits (avant 22h, ou
-              automatiquement si arrivée après 22h30).
+              Chaque personne qui saisit ce code reçoit {eur(Number(f.credit_amount) || 0)} de
+              cagnotte, déduits automatiquement de ses commandes sur n’importe quel article. Le code
+              ne peut être activé qu’une fois par personne.
             </Banner>
           </div>
-          <Field label="Crédits par personne" hint="Forfait groupe classique : 6">
+          <Field label="Montant crédité par personne (€)" hint="Forfait groupe classique : 30 €">
             <input
               style={S.input}
               type="number"
               min="0"
-              value={f.credits_per_person}
-              onChange={(e) => set('credits_per_person', e.target.value)}
+              step="0.5"
+              value={f.credit_amount}
+              onChange={(e) => set('credit_amount', e.target.value)}
             />
           </Field>
-          <Field label="Jetons food par personne" hint="0 = pas de jeton food (ex. entrée seule)">
-            <input
-              style={S.input}
-              type="number"
-              min="0"
-              value={f.food_tokens_per_person}
-              onChange={(e) => set('food_tokens_per_person', e.target.value)}
-            />
-          </Field>
-          <Field label="Nombre de personnes du groupe" hint="Chaque redemption consomme 1 place">
+          <Field
+            label="Nombre d'activations max"
+            hint="Le nombre de personnes qui peuvent utiliser ce code. Vide = illimité."
+          >
             <input
               style={S.input}
               type="number"
               min="1"
               value={f.max_uses ?? ''}
               onChange={(e) => set('max_uses', e.target.value)}
-              placeholder="ex. 10"
+              placeholder="ex. 10 personnes"
             />
           </Field>
         </>
@@ -6532,6 +7239,8 @@ function ClientsTab({ event, showToast }) {
   const [q, setQ] = useState('')
   const [filter, setFilter] = useState(null)
   const [detail, setDetail] = useState(null)
+  const [ficheFor, setFicheFor] = useState(null)
+  const [dmFor, setDmFor] = useState(null)
 
   const load = useCallback(async () => {
     // Clients présents sur cette soirée (la RLS limite déjà à nos événements).
@@ -6719,9 +7428,60 @@ function ClientsTab({ event, showToast }) {
                 )
               })}
             </div>
+
+            <div style={{ display: 'grid', gap: 8 }}>
+              <button
+                onClick={() => {
+                  const d = detail
+                  setDetail(null)
+                  setDmFor({ customer_id: d.id, first_name: d.first_name, last_name: d.last_name })
+                }}
+                style={S.btn}
+              >
+                ✉️ Envoyer un message à {detail.first_name || 'ce client'}
+              </button>
+              <button
+                onClick={() => {
+                  const d = detail
+                  setDetail(null)
+                  setFicheFor(d.id)
+                }}
+                style={S.btnGhost}
+              >
+                Voir la fiche complète
+              </button>
+            </div>
           </>
         )}
       </Sheet>
+
+      <ClientFicheSheet
+        customerId={ficheFor}
+        event={event}
+        onClose={() => setFicheFor(null)}
+        onMessage={(target) => {
+          setFicheFor(null)
+          setDmFor(target)
+        }}
+        showToast={showToast}
+      />
+
+      <DirectMessageSheet
+        target={dmFor}
+        event={event}
+        onClose={() => setDmFor(null)}
+        onSent={(res) => {
+          setDmFor(null)
+          showToast(
+            res.degraded
+              ? 'Message publié dans l’onglet 💬 du client. Push et SMS non envoyés : ' +
+                  'la fonction notify n’est pas déployée.'
+              : 'Message envoyé.',
+            res.degraded ? 'warn' : 'ok'
+          )
+        }}
+        showToast={showToast}
+      />
     </div>
   )
 }
@@ -6896,7 +7656,217 @@ function QrTab({ event, venue, showToast }) {
 //  STAFF · RÉGLAGES
 // ============================================================================
 
-function ReglagesTab({ venue, event, session, onReload, showToast }) {
+/**
+ * Gestion de l'équipe — réservée au propriétaire du lieu.
+ *
+ * Une invitation est une simple ligne (lieu + e-mail + rôle) : la personne
+ * invitée crée son compte avec cette adresse (ou se connecte si elle en a
+ * déjà un) et se retrouve rattachée à l'équipe dès l'ouverture de l'espace,
+ * sans qu'aucun e-mail ait besoin d'être envoyé.
+ */
+function TeamCard({ venue, session, showToast }) {
+  const [members, setMembers] = useState([])
+  const [invites, setInvites] = useState([])
+  const [email, setEmail] = useState('')
+  const [role, setRole] = useState('staff')
+  const [busy, setBusy] = useState(false)
+  const [loading, setLoading] = useState(true)
+
+  const load = useCallback(async () => {
+    const [{ data: m }, { data: i }] = await Promise.all([
+      supabase.from('staff_members').select('*').eq('venue_id', venue.id).order('created_at'),
+      supabase.from('staff_invites').select('*').eq('venue_id', venue.id).order('created_at', { ascending: false }),
+    ])
+    setMembers(m || [])
+    setInvites(i || [])
+    setLoading(false)
+  }, [venue.id])
+
+  useEffect(() => {
+    load()
+  }, [load])
+
+  async function invite() {
+    const mail = email.trim().toLowerCase()
+    if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(mail)) return showToast('Adresse e-mail invalide.', 'error')
+    setBusy(true)
+    const { error } = await supabase
+      .from('staff_invites')
+      .upsert({ venue_id: venue.id, email: mail, role, invited_by: session.user.id }, { onConflict: 'venue_id,email' })
+    setBusy(false)
+    if (error) return showToast(frError(error), 'error')
+    setEmail('')
+    showToast(`${mail} fait maintenant partie de l’équipe dès sa première connexion.`, 'ok')
+    load()
+  }
+
+  async function removeInvite(id) {
+    const { error } = await supabase.from('staff_invites').delete().eq('id', id)
+    if (error) return showToast(frError(error), 'error')
+    load()
+  }
+
+  async function removeMember(m) {
+    if (m.role === 'owner') return showToast('Le propriétaire ne peut pas être retiré.', 'error')
+    if (!confirm('Retirer cette personne de l’équipe ?')) return
+    const { error } = await supabase.from('staff_members').delete().eq('id', m.id)
+    if (error) return showToast(frError(error), 'error')
+    // L'invitation correspondante est supprimée aussi, sinon la personne serait
+    // réintégrée automatiquement à sa prochaine connexion.
+    const inv = invites.find((i) => i.accepted_by === m.user_id)
+    if (inv) await supabase.from('staff_invites').delete().eq('id', inv.id)
+    showToast('Personne retirée de l’équipe.', 'ok')
+    load()
+  }
+
+  async function changeRole(m, next) {
+    const { error } = await supabase.from('staff_members').update({ role: next }).eq('id', m.id)
+    if (error) return showToast(frError(error), 'error')
+    load()
+  }
+
+  const pending = invites.filter((i) => !i.accepted_at)
+  const emailFor = (m) => invites.find((i) => i.accepted_by === m.user_id)?.email
+
+  return (
+    <div style={{ ...S.card, marginBottom: 14 }}>
+      <div style={{ ...S.h2, marginBottom: 6 }}>Équipe</div>
+      <div style={{ fontSize: 12, color: C.dim, marginBottom: 14, lineHeight: 1.55 }}>
+        Invitez par e-mail. La personne crée son compte avec cette adresse depuis l’écran
+        « Espace équipe » et rejoint automatiquement ce lieu — aucun code à transmettre.
+      </div>
+
+      {loading ? (
+        <Spinner label="Chargement de l’équipe…" />
+      ) : (
+        <>
+          <div style={{ display: 'grid', gap: 8, marginBottom: 14 }}>
+            {members.map((m) => {
+              const isMe = m.user_id === session.user.id
+              return (
+                <div
+                  key={m.id}
+                  style={{
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: 10,
+                    padding: 11,
+                    borderRadius: 12,
+                    background: C.paper,
+                    border: `1px solid ${C.line}`,
+                  }}
+                >
+                  <div style={{ minWidth: 0, flex: 1 }}>
+                    <div style={{ fontSize: 13.5, fontWeight: 500, overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                      {isMe ? session.user.email : emailFor(m) || 'Membre de l’équipe'}
+                      {isMe && <span style={{ color: C.faint, fontWeight: 400 }}> · vous</span>}
+                    </div>
+                    <div style={{ fontSize: 11, color: C.faint, marginTop: 2 }}>{ROLE_LABEL[m.role] || m.role}</div>
+                  </div>
+                  {m.role !== 'owner' && (
+                    <>
+                      <select
+                        value={m.role}
+                        onChange={(e) => changeRole(m, e.target.value)}
+                        style={{ ...S.input, width: 'auto', minHeight: 38, padding: '0 8px', fontSize: 12 }}
+                      >
+                        <option value="staff">Équipe</option>
+                        <option value="manager">Manager</option>
+                      </select>
+                      <button
+                        onClick={() => removeMember(m)}
+                        title="Retirer de l’équipe"
+                        style={{ ...stepBtn, width: 38, height: 38, fontSize: 14, color: C.danger }}
+                      >
+                        ✕
+                      </button>
+                    </>
+                  )}
+                </div>
+              )
+            })}
+          </div>
+
+          {pending.length > 0 && (
+            <>
+              <div style={{ ...S.label, marginBottom: 6 }}>Invitations en attente</div>
+              <div style={{ display: 'grid', gap: 8, marginBottom: 14 }}>
+                {pending.map((i) => (
+                  <div
+                    key={i.id}
+                    style={{
+                      display: 'flex',
+                      alignItems: 'center',
+                      gap: 10,
+                      padding: 11,
+                      borderRadius: 12,
+                      background: 'rgba(201,130,31,.07)',
+                      border: `1px dashed ${C.warn}66`,
+                    }}
+                  >
+                    <div style={{ minWidth: 0, flex: 1 }}>
+                      <div style={{ fontSize: 13.5, overflow: 'hidden', textOverflow: 'ellipsis' }}>{i.email}</div>
+                      <div style={{ fontSize: 11, color: C.faint, marginTop: 2 }}>
+                        {ROLE_LABEL[i.role] || i.role} · en attente de première connexion
+                      </div>
+                    </div>
+                    <button
+                      onClick={() => removeInvite(i.id)}
+                      title="Annuler l’invitation"
+                      style={{ ...stepBtn, width: 38, height: 38, fontSize: 14, color: C.danger }}
+                    >
+                      ✕
+                    </button>
+                  </div>
+                ))}
+              </div>
+            </>
+          )}
+
+          <Field label="Inviter quelqu’un">
+            <input
+              style={S.input}
+              type="email"
+              inputMode="email"
+              autoComplete="off"
+              value={email}
+              onChange={(e) => setEmail(e.target.value)}
+              placeholder="prenom@exemple.fr"
+            />
+          </Field>
+          <div style={{ display: 'flex', gap: 8, marginBottom: 12 }}>
+            {[
+              ['staff', 'Équipe', 'Bar, caisse, clients'],
+              ['manager', 'Manager', 'Accès complet'],
+            ].map(([k, label, hint]) => (
+              <button
+                key={k}
+                onClick={() => setRole(k)}
+                style={{
+                  ...S.chip,
+                  flex: 1,
+                  minHeight: 52,
+                  flexDirection: 'column',
+                  gap: 2,
+                  borderColor: role === k ? C.terracotta : C.lineHi,
+                  color: role === k ? C.terracotta : C.dim,
+                }}
+              >
+                <span style={{ fontWeight: 600 }}>{label}</span>
+                <span style={{ fontSize: 9.5, opacity: 0.8 }}>{hint}</span>
+              </button>
+            ))}
+          </div>
+          <button disabled={busy || !email.trim()} onClick={invite} style={{ ...S.btnGhost, opacity: busy || !email.trim() ? 0.5 : 1 }}>
+            {busy ? '…' : 'Envoyer l’invitation'}
+          </button>
+        </>
+      )}
+    </div>
+  )
+}
+
+function ReglagesTab({ venue, event, session, role, onReload, showToast }) {
   const [v, setV] = useState(venue)
   const [e, setE] = useState(event)
   const [busy, setBusy] = useState(false)
@@ -6927,6 +7897,7 @@ function ReglagesTab({ venue, event, session, onReload, showToast }) {
           name: e.name?.trim() || event.name,
           default_prep_min: Number(e.default_prep_min) || 1,
           closes_at: e.closes_at || null,
+          capacity: e.capacity == null || e.capacity === '' ? null : Number(e.capacity),
           accept_orders: !!e.accept_orders,
           service_message: e.service_message || null,
           welcome_message: e.welcome_message || null,
@@ -7008,6 +7979,19 @@ function ReglagesTab({ venue, event, session, onReload, showToast }) {
             onChange={(ev) => setE({ ...e, closes_at: ev.target.value ? new Date(ev.target.value).toISOString() : null })}
           />
         </Field>
+        <Field
+          label="Capacité de la salle"
+          hint="Sert de repère à la jauge d'affluence dans l'onglet Orga. Vide = pas de jauge, juste le compte."
+        >
+          <input
+            style={S.input}
+            type="number"
+            min="0"
+            value={e.capacity ?? ''}
+            onChange={(ev) => setE({ ...e, capacity: ev.target.value === '' ? null : Number(ev.target.value) })}
+            placeholder="ex. 250"
+          />
+        </Field>
         <Field label="Message d'accueil">
           <input
             style={S.input}
@@ -7054,6 +8038,8 @@ function ReglagesTab({ venue, event, session, onReload, showToast }) {
           </div>
         </Field>
       </div>
+
+      {role === 'owner' && <TeamCard venue={venue} session={session} showToast={showToast} />}
 
       <div style={{ ...S.card, marginBottom: 14 }}>
         <div style={{ ...S.h2, marginBottom: 14 }}>Lieu & mentions légales</div>
@@ -7105,7 +8091,7 @@ function ReglagesTab({ venue, event, session, onReload, showToast }) {
       </div>
 
       <div style={{ textAlign: 'center', marginTop: 22, color: C.faint, fontSize: 11, lineHeight: 1.8 }}>
-        {session.user.email}
+        {session.user.email} · {ROLE_LABEL[role] || role}
         <br />
         Noti Calling ne traite aucun paiement en ligne.
       </div>
