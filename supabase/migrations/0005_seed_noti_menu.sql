@@ -201,6 +201,9 @@ begin
   -- Illustration par article (cf. 0017).
   perform public.tag_product_illustrations(p_venue);
 
+  -- Carte food (plats + illustrations, cf. 0019).
+  perform public.seed_noti_food(p_venue);
+
   return n;
 end;
 $$;

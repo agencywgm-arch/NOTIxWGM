@@ -52,8 +52,9 @@ feuille de route *v2.0 — août 2026* (cas pilote **Noti Club · Noti Calling**
   en cas d'incident (impayé passé)
 - **Espace commande en 3 univers** : Boissons au verre · Food · Bouteilles, avec sous-catégories
 - Formats multiples (12 cl / 75 cl / magnum) et options composables ; panier, note libre
-- **Illustration dessinée par article** (verre/bouteille aux couleurs Noti Calling, une image
-  distincte par ligne de carte) — encodée directement en base, jamais de lien externe cassé
+- **Illustration dessinée par article** (verre, bouteille ou assiette aux couleurs Noti Calling,
+  une image distincte par ligne de carte — boissons, bouteilles **et plats**) — encodée
+  directement en base, jamais de lien externe cassé
 - **Un seul emplacement pour tout code** (réduction % / montant, ou forfait de groupe à crédits)
   — le client n'a pas à savoir de quel type il s'agit ; activé une fois, réappliqué automatiquement
   aux commandes suivantes
@@ -159,6 +160,7 @@ supabase/
     0016_profil_telephone_editable.sql  téléphone modifiable depuis l'espace client (patch, TOUTES installs)
     0017_illustrations_produits.sql     une illustration par article (patch, TOUTES installs)
     0018_profil_cp_naissance_editable.sql  code postal / naissance modifiables (patch, TOUTES installs)
+    0019_illustrations_food.sql  carte food (8 plats) + leurs illustrations (patch, TOUTES installs)
   functions/
     notify/                notification de statut / diffusion / message individuel
     reminders/             relances automatiques (cron)
@@ -258,6 +260,16 @@ feuille de route §10). Notez **Project URL** et **anon public key** (*Settings 
 > existante : code postal et date de naissance deviennent eux aussi modifiables depuis l'espace
 > client (comme le téléphone, 0016) — indispensable pour les fiches créées avant l'ajout de ces
 > deux champs (0015), qui les ont vides sans lui.
+>
+> **`0019_illustrations_food.sql` s'exécute dans tous les cas**, base neuve ou existante :
+> l'univers **Food** ne faisait pas partie de la carte type — il restait donc vide tant qu'aucun
+> plat n'avait été saisi à la main, et n'avait par conséquent aucune illustration à afficher. Ce
+> patch sème les huit plats de la carte Noti Club (frites, houmous pistache, tempura poulet,
+> croque truffé, stracciatella, fritto misto, planche charcuterie, planche fromages) avec leurs
+> prix et une illustration chacun, dans le même style que les boissons. Fichier volumineux
+> (~130 Ko) pour la même raison que 0017. Rejoué à chaque clic sur **🍸 Carte Noti Club** : les
+> prix se mettent à jour sans jamais créer de doublon, et un plat déjà saisi sous un libellé
+> proche récupère quand même son illustration.
 
 ### 3. Activer l'authentification
 

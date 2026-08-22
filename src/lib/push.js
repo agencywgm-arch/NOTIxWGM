@@ -73,6 +73,11 @@ export async function subscribePush({ customerId = null, eventId = null, venueId
 /**
  * Notification métier (statut / diffusion / message individuel).
  * Best-effort : ne bloque jamais l'action en cours (canal dégradé, §09).
+ *
+ * Si l'Edge Function n'est pas joignable (le cas le plus courant : elle n'a
+ * jamais été déployée), le message est quand même écrit dans `messages` — le
+ * client le voit dans son onglet 💬, seuls le push et le SMS manquent. Le
+ * retour porte alors `degraded: true` pour que l'écran le dise clairement.
  */
 export async function notify(payload) {
   try {
@@ -81,6 +86,32 @@ export async function notify(payload) {
     return data
   } catch (e) {
     console.warn('[Noti] notify', e)
+    return notifyFallback(payload)
+  }
+}
+
+async function notifyFallback({ eventId, kind = 'broadcast', body, customerId = null, orderId = null }) {
+  try {
+    const { error } = await supabase.from('messages').insert({
+      event_id: eventId,
+      kind,
+      body,
+      customer_id: customerId,
+      order_id: orderId,
+    })
+    if (error) throw error
+
+    let recipients = 1
+    if (!customerId) {
+      const { count } = await supabase
+        .from('attendances')
+        .select('customer_id', { count: 'exact', head: true })
+        .eq('event_id', eventId)
+      recipients = count ?? 0
+    }
+    return { recipients, push: 0, sms: 0, degraded: true }
+  } catch (e) {
+    console.warn('[Noti] notify fallback', e)
     return null
   }
 }

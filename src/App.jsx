@@ -291,7 +291,11 @@ function Logo({ size = 1, stacked = true }) {
 
 function Toast({ toast }) {
   if (!toast) return null
-  const color = toast.kind === 'error' ? C.danger : toast.kind === 'ok' ? C.ok : C.indigo
+  const color =
+    toast.kind === 'error' ? C.danger
+    : toast.kind === 'ok' ? C.ok
+    : toast.kind === 'warn' ? C.warn
+    : C.indigo
   return (
     <div
       style={{
@@ -5434,9 +5438,15 @@ function OrgaTab({ event, venue, showToast, onEventChange }) {
         open={broadcastOpen}
         event={event}
         onClose={() => setBroadcastOpen(false)}
-        onSent={(n) => {
+        onSent={(res) => {
           setBroadcastOpen(false)
-          showToast(`Message diffusé à ${n} personne(s).`, 'ok')
+          showToast(
+            res.degraded
+              ? `Message publié pour ${res.recipients} personne(s), visible dans leur onglet 💬. ` +
+                  'Push et SMS non envoyés : la fonction notify n’est pas déployée.'
+              : `Message diffusé à ${res.recipients} personne(s).`,
+            res.degraded ? 'warn' : 'ok'
+          )
           load()
         }}
         showToast={showToast}
@@ -5446,9 +5456,15 @@ function OrgaTab({ event, venue, showToast, onEventChange }) {
         target={dmFor}
         event={event}
         onClose={() => setDmFor(null)}
-        onSent={() => {
+        onSent={(res) => {
           setDmFor(null)
-          showToast('Message envoyé.', 'ok')
+          showToast(
+            res.degraded
+              ? 'Message publié dans l’onglet 💬 du client. Push et SMS non envoyés : ' +
+                  'la fonction notify n’est pas déployée.'
+              : 'Message envoyé.',
+            res.degraded ? 'warn' : 'ok'
+          )
           load()
         }}
         showToast={showToast}
@@ -5517,9 +5533,9 @@ function BroadcastSheet({ open, event, onClose, onSent, showToast }) {
             title: event.name,
           })
           setBusy(false)
-          if (!res) return showToast('Envoi impossible (Edge Function notify).', 'error')
+          if (!res) return showToast('Envoi impossible : message non enregistré.', 'error')
           setBody('')
-          onSent(res.recipients ?? 0)
+          onSent(res)
         }}
         style={{ ...S.btn, opacity: !body.trim() || busy ? 0.5 : 1 }}
       >
@@ -5675,8 +5691,8 @@ function DirectMessageSheet({ target, event, onClose, onSent, showToast }) {
             title: event.name,
           })
           setBusy(false)
-          if (!res) return showToast('Envoi impossible (Edge Function notify).', 'error')
-          onSent()
+          if (!res) return showToast('Envoi impossible : message non enregistré.', 'error')
+          onSent(res)
         }}
         style={{ ...S.btn, opacity: !body.trim() || busy ? 0.5 : 1 }}
       >
