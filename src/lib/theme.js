@@ -27,6 +27,11 @@ export const C = {
   warn: '#C9821F',
   danger: '#C0392B',
 
+  // Or — réservé aux cadeaux (articles offerts). Même teinte que l'accent des
+  // illustrations produits, pour que « offert » se lise d'un coup d'œil au bar.
+  gold: '#C9A24B',
+  goldDark: '#8A6A20',
+
   // Texte
   text: '#1C2A4A',
   dim: '#5A6480',

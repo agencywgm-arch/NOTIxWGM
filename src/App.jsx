@@ -1301,6 +1301,7 @@ function OrderingApp({ event, venue, scanPoint, lang, setLang, customer, showToa
   const profileIncomplete =
     !customer?.email || !customer?.instagram || !customer?.postal_code || !customer?.birthdate
   const [pass, setPass] = useState(null)
+  const [gifts, setGifts] = useState([])
   // Code % / montant classique — saisi une seule fois (même emplacement que
   // le forfait), réappliqué automatiquement à chaque commande tant qu'il
   // n'est pas retiré. Persisté par soirée : survit à un rechargement de page.
@@ -1322,9 +1323,17 @@ function OrderingApp({ event, venue, scanPoint, lang, setLang, customer, showToa
     setPass(data || null)
   }, [event?.id, customer?.id])
 
+  // Cadeaux qu'il reste au client sur cette soirée (« 1 boisson offerte »).
+  const loadGifts = useCallback(async () => {
+    if (!event?.id || !customer?.id) return
+    const { data } = await supabase.rpc('my_gift_summary', { p_event: event.id })
+    setGifts(Array.isArray(data) ? data : [])
+  }, [event?.id, customer?.id])
+
   useEffect(() => {
     loadPass()
-  }, [loadPass])
+    loadGifts()
+  }, [loadPass, loadGifts])
 
   async function convertFoodToken() {
     const { data, error } = await supabase.rpc('convert_food_token', { p_event: event.id })
@@ -1333,12 +1342,20 @@ function OrderingApp({ event, venue, scanPoint, lang, setLang, customer, showToa
   }
 
   /**
-   * Saisie unifiée : un seul champ pour un code forfait (crédits) ou un code
-   * promo classique (% / montant). On tente d'abord le forfait (redeem_pass) ;
-   * s'il ne s'agit pas de ce type de code, on bascule sur la validation
-   * classique et on retient le code pour les prochaines commandes.
+   * Saisie unifiée : un seul champ pour un code cadeau (article offert), un
+   * code forfait (crédits) ou un code promo classique (% / montant). On essaie
+   * chaque type dans l'ordre ; le client n'a pas à savoir lequel il détient.
    */
   async function redeemCode(code) {
+    // 1. Code cadeau — « une boisson alcoolisée offerte »
+    const gift = await supabase.rpc('redeem_gift_code', { p_event: event.id, p_code: code })
+    if (!gift.error) {
+      await loadGifts()
+      return { kind: 'gift', info: gift.data }
+    }
+    if (!String(gift.error.message || '').includes('invalid_gift_code')) throw gift.error
+
+    // 2. Forfait de groupe à crédits
     const { data, error } = await supabase.rpc('redeem_pass', { p_event: event.id, p_code: code })
     if (!error) {
       setPass(data)
@@ -1604,6 +1621,8 @@ function OrderingApp({ event, venue, scanPoint, lang, setLang, customer, showToa
     setView('orders')
     await loadOrders()
 
+    await loadGifts()
+
     if (pass) {
       const hadCredits = pass.credits_remaining > 0
       const { data: fresh } = await supabase
@@ -1819,6 +1838,7 @@ function OrderingApp({ event, venue, scanPoint, lang, setLang, customer, showToa
         <div style={{ marginBottom: 14 }}>
           <PromoCodeCard
             pass={pass}
+            gifts={gifts}
             promoCode={promoCode}
             onRedeemCode={redeemCode}
             onClearCode={clearCode}
@@ -2522,15 +2542,44 @@ function estimateWalletDiscount(cart, pass) {
  * crédits) — le client n'a pas à savoir de quel type il s'agit, ni à chercher
  * deux emplacements différents.
  */
-function PromoCodeCard({ pass, promoCode, onRedeemCode, onClearCode, onConvert, showToast }) {
+function PromoCodeCard({ pass, gifts, promoCode, onRedeemCode, onClearCode, onConvert, showToast }) {
   const [code, setCode] = useState('')
   const [busy, setBusy] = useState(false)
   const [open, setOpen] = useState(false)
 
+  const giftList = Array.isArray(gifts) ? gifts : []
+  const hasGift = giftList.length > 0
   const hasPass = Boolean(pass)
   const hasPromo = Boolean(promoCode) && !hasPass
 
-  if (!hasPass && !hasPromo) {
+  // Ce que le client a d'offert, dans ses mots : « 1 boisson alcoolisée offerte ».
+  const giftCard = hasGift && (
+    <div style={{ ...S.card, padding: 14, border: `1.5px solid ${C.terracotta}`, marginBottom: 10 }}>
+      <div style={{ ...S.label, marginBottom: 6 }}>🎁 Offert pour vous</div>
+      <div style={{ display: 'grid', gap: 5 }}>
+        {giftList.map((g, i) => (
+          <div key={i} style={{ fontSize: 14.5, fontWeight: 500, color: C.terracotta }}>
+            {giftCatEmoji(g.category)}{' '}
+            {g.mode === 'product'
+              ? `${g.remaining} × ${g.product_name || 'article offert'}`
+              : `${g.remaining} ${giftCatLabel(g.category).toLowerCase()}${g.remaining > 1 ? 's' : ''} au choix`}
+            {g.max_value ? (
+              <span style={{ color: C.dim, fontWeight: 400, fontSize: 12 }}>
+                {' '}
+                — jusqu’à {eur(g.max_value)}
+              </span>
+            ) : null}
+          </div>
+        ))}
+      </div>
+      <div style={{ fontSize: 11.5, color: C.dim, marginTop: 6, lineHeight: 1.5 }}>
+        Déduit automatiquement quand vous l’ajoutez au panier. Au-delà du plafond, vous réglez la
+        différence au bar.
+      </div>
+    </div>
+  )
+
+  if (!hasGift && !hasPass && !hasPromo) {
     return (
       <div style={{ ...S.card, padding: 14 }}>
         {open ? (
@@ -2542,7 +2591,7 @@ function PromoCodeCard({ pass, promoCode, onRedeemCode, onClearCode, onConvert, 
                 value={code}
                 onChange={(e) => setCode(e.target.value)}
                 onKeyDown={(e) => e.key === 'Enter' && code.trim() && document.activeElement.blur()}
-                placeholder="Réduction ou forfait de groupe"
+                placeholder="Réduction, cadeau ou forfait"
                 autoFocus
               />
               <button
@@ -2553,7 +2602,14 @@ function PromoCodeCard({ pass, promoCode, onRedeemCode, onClearCode, onConvert, 
                     const res = await onRedeemCode(code.trim())
                     setCode('')
                     setOpen(false)
-                    showToast(res.kind === 'credits' ? 'Forfait activé !' : 'Code activé !', 'ok')
+                    showToast(
+                      res.kind === 'gift'
+                        ? 'Cadeau activé — retrouvez-le en haut de la carte !'
+                        : res.kind === 'credits'
+                          ? 'Forfait activé !'
+                          : 'Code activé !',
+                      'ok'
+                    )
                   } catch (e) {
                     showToast(frError(e), 'error')
                   } finally {
@@ -2586,6 +2642,8 @@ function PromoCodeCard({ pass, promoCode, onRedeemCode, onClearCode, onConvert, 
 
   if (hasPromo) {
     return (
+      <>
+      {giftCard}
       <div style={{ ...S.card, padding: 14, display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
         <div>
           <div style={{ ...S.label, marginBottom: 2 }}>Code actif</div>
@@ -2598,13 +2656,19 @@ function PromoCodeCard({ pass, promoCode, onRedeemCode, onClearCode, onConvert, 
           Retirer
         </button>
       </div>
+      </>
     )
   }
+
+  // Cadeau seul, sans forfait ni code promo : la carte cadeau suffit.
+  if (!hasPass) return giftCard
 
   const canConvert =
     pass.food_token_available && new Date().toLocaleTimeString('fr-FR', { timeZone: 'Europe/Paris', hour12: false }) < '22:00:00'
 
   return (
+    <>
+    {giftCard}
     <div style={{ ...S.card, padding: 14, border: `1.5px solid ${C.terracotta}55` }}>
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
         <div>
@@ -2646,6 +2710,7 @@ function PromoCodeCard({ pass, promoCode, onRedeemCode, onClearCode, onConvert, 
         </button>
       )}
     </div>
+    </>
   )
 }
 
@@ -4408,6 +4473,65 @@ function OrderNotesSheet({ order, onClose, onSaved, showToast }) {
   )
 }
 
+/**
+ * Détail des articles offerts sur une commande — ce que le bar doit servir
+ * sans encaisser, et au titre de quel code.
+ */
+function GiftBanner({ orderId }) {
+  const [rows, setRows] = useState(null)
+
+  useEffect(() => {
+    if (!orderId) return
+    let dead = false
+    supabase
+      .from('gift_redemptions')
+      .select('product_name, unit_price, covered, paid, redeemed_at, promo_codes ( code, label )')
+      .eq('order_id', orderId)
+      .order('redeemed_at')
+      .then(({ data }) => {
+        if (!dead) setRows(data || [])
+      })
+    return () => {
+      dead = true
+    }
+  }, [orderId])
+
+  if (!rows || rows.length === 0) return null
+
+  return (
+    <div
+      style={{
+        padding: 14,
+        borderRadius: 14,
+        background: `${C.gold}14`,
+        border: `2px solid ${C.gold}`,
+      }}
+    >
+      <div style={{ ...S.h1, fontSize: 16, color: C.goldDark, marginBottom: 8 }}>
+        🎁 {rows.length} article{rows.length > 1 ? 's' : ''} offert{rows.length > 1 ? 's' : ''}
+      </div>
+      <div style={{ display: 'grid', gap: 5 }}>
+        {rows.map((r, i) => (
+          <div key={i} style={{ fontSize: 13 }}>
+            <strong>{r.product_name}</strong>
+            <span style={{ color: C.dim }}>
+              {' '}
+              — {eur(r.covered)} offerts
+              {Number(r.paid) > 0 ? `, ${eur(r.paid)} à encaisser` : ''}
+            </span>
+            {r.promo_codes?.code && (
+              <span style={{ color: C.faint, fontSize: 11.5 }}>
+                {' '}
+                · {r.promo_codes.label || r.promo_codes.code}
+              </span>
+            )}
+          </div>
+        ))}
+      </div>
+    </div>
+  )
+}
+
 function BarTab({ event, venue, onEventChange, showToast }) {
   const [orders, setOrders] = useState([])
   const [loading, setLoading] = useState(true)
@@ -4698,6 +4822,25 @@ function BarTab({ event, venue, onEventChange, showToast }) {
                           <FlagDot flag={o.flag} count={o.notes_count} />
                         </div>
                       )}
+                      {o.gift_count > 0 && (
+                        <div
+                          style={{
+                            marginTop: 6,
+                            display: 'inline-flex',
+                            alignItems: 'center',
+                            gap: 4,
+                            padding: '3px 9px',
+                            borderRadius: 999,
+                            fontSize: 11,
+                            fontWeight: 700,
+                            background: `${C.gold}22`,
+                            color: C.goldDark,
+                            border: `1px solid ${C.gold}66`,
+                          }}
+                        >
+                          🎁 {o.gift_count} OFFERT{o.gift_count > 1 ? 'S' : ''} · {eur(o.gift_total)}
+                        </div>
+                      )}
                     </div>
                     <div style={{ ...S.money, fontWeight: 600, color: C.terracotta }}>{eur(o.total)}</div>
                   </div>
@@ -4803,6 +4946,11 @@ function BarTab({ event, venue, onEventChange, showToast }) {
       <Sheet open={!!detail} onClose={() => setDetail(null)} title={detail ? `Commande ${detail.pickup_code}` : ''}>
         {detail && (
           <>
+            {detail.gift_count > 0 && (
+              <div style={{ marginBottom: 14 }}>
+                <GiftBanner orderId={detail.id} />
+              </div>
+            )}
             <div style={{ marginBottom: 14, fontSize: 13.5 }}>
               <strong>
                 {detail.customers?.first_name} {detail.customers?.last_name}
@@ -5841,17 +5989,22 @@ function OrgaTab({ event, venue, showToast, onEventChange }) {
                 {p.code}
               </div>
               <div style={{ fontSize: 11.5, color: C.faint, marginTop: 2 }}>
-                {p.kind === 'credits'
-                  ? `🎟️ ${Math.round((p.credits_per_person || 0) / CREDITS_PAR_CONSO)} conso${
-                      Math.round((p.credits_per_person || 0) / CREDITS_PAR_CONSO) > 1 ? 's' : ''
-                    }${p.food_tokens_per_person > 0 ? ' + 1 plat' : ''} /pers`
-                  : p.kind === 'percent'
-                    ? `-${p.value}%`
-                    : `-${eur(p.value)}`}
-                {p.kind !== 'credits' && p.min_total > 0 ? ` · dès ${eur(p.min_total)}` : ''}
+                {p.kind === 'gift'
+                  ? `🎁 ${(p.gift_items || [])
+                      .map((g) => giftLineLabel(g))
+                      .join(' + ') || 'aucun article'}`
+                  : p.kind === 'credits'
+                    ? `🎟️ ${Math.round((p.credits_per_person || 0) / CREDITS_PAR_CONSO)} conso${
+                        Math.round((p.credits_per_person || 0) / CREDITS_PAR_CONSO) > 1 ? 's' : ''
+                      }${p.food_tokens_per_person > 0 ? ' + 1 plat' : ''} /pers`
+                    : p.kind === 'percent'
+                      ? `-${p.value}%`
+                      : `-${eur(p.value)}`}
+                {!['credits', 'gift'].includes(p.kind) && p.min_total > 0 ? ` · dès ${eur(p.min_total)}` : ''}
                 {' · '}
                 {p.uses_count}
-                {p.max_uses ? `/${p.max_uses}` : ''} {p.kind === 'credits' ? 'personne' : 'utilisé'}
+                {p.max_uses ? `/${p.max_uses}` : ''}{' '}
+                {['credits', 'gift'].includes(p.kind) ? 'personne' : 'utilisé'}
                 {p.uses_count > 1 ? 's' : ''}
               </div>
             </div>
@@ -5872,6 +6025,7 @@ function OrgaTab({ event, venue, showToast, onEventChange }) {
       <PromoCodeSheet
         promo={editingPromo}
         event={event}
+        venue={venue}
         onClose={() => setEditingPromo(null)}
         onSaved={() => {
           setEditingPromo(null)
@@ -6090,6 +6244,7 @@ function ClientFicheSheet({ customerId, event, onClose, onMessage, showToast }) 
   const [cust, setCust] = useState(null)
   const [promoCodesUsed, setPromoCodesUsed] = useState([])
   const [orders, setOrders] = useState([])
+  const [giftsUsed, setGiftsUsed] = useState([])
   const [notes, setNotes] = useState([])
   const [attendance, setAttendance] = useState(null)
   const [wallet, setWallet] = useState(null)
@@ -6107,6 +6262,7 @@ function ClientFicheSheet({ customerId, event, onClose, onMessage, showToast }) 
         { data: c, error },
         { data: ords },
         { data: reds },
+        { data: giftRows },
         { data: nts },
         { data: att },
         { data: wal },
@@ -6122,6 +6278,12 @@ function ClientFicheSheet({ customerId, event, onClose, onMessage, showToast }) 
           .from('promo_redemptions')
           .select('credits_granted, created_at, promo_codes ( code )')
           .eq('customer_id', customerId),
+        supabase
+          .from('gift_redemptions')
+          .select('product_name, unit_price, covered, paid, redeemed_at, promo_codes ( code, label ), orders ( pickup_code )')
+          .eq('customer_id', customerId)
+          .order('redeemed_at', { ascending: false })
+          .limit(50),
         supabase
           .from('order_notes')
           .select('*')
@@ -6149,6 +6311,7 @@ function ClientFicheSheet({ customerId, event, onClose, onMessage, showToast }) 
       if (error) showToast?.(frError(error), 'error')
       setCust(c || null)
       setOrders(ords || [])
+      setGiftsUsed(giftRows || [])
       setNotes(nts || [])
       setAttendance(att || null)
       setWallet(wal || null)
@@ -6301,6 +6464,46 @@ function ClientFicheSheet({ customerId, event, onClose, onMessage, showToast }) 
             <div>
               <div style={{ ...S.label, marginBottom: 6 }}>Note</div>
               <div style={{ fontSize: 13.5, color: C.dim }}>{cust.staff_note}</div>
+            </div>
+          )}
+
+          {/* Cadeaux consommés — l'article exact, l'heure exacte, le code */}
+          {giftsUsed.length > 0 && (
+            <div>
+              <div style={{ ...S.label, marginBottom: 6 }}>
+                🎁 Cadeaux utilisés ({giftsUsed.length}) ·{' '}
+                {eur(giftsUsed.reduce((s, g) => s + Number(g.covered || 0), 0))} offerts
+              </div>
+              <div style={{ display: 'grid', gap: 8 }}>
+                {giftsUsed.map((g, i) => (
+                  <div
+                    key={i}
+                    style={{
+                      padding: 11,
+                      borderRadius: 12,
+                      background: `${C.gold}12`,
+                      border: `1px solid ${C.gold}55`,
+                    }}
+                  >
+                    <div style={{ display: 'flex', alignItems: 'baseline', gap: 8 }}>
+                      <strong style={{ fontSize: 13.5 }}>{g.product_name}</strong>
+                      <span style={{ marginLeft: 'auto', ...S.money, fontWeight: 600, color: C.goldDark }}>
+                        {eur(g.covered)}
+                      </span>
+                    </div>
+                    <div style={{ fontSize: 11.5, color: C.dim, marginTop: 3 }}>
+                      {dateFR(g.redeemed_at)} à <strong>{timeFR(g.redeemed_at)}</strong>
+                      {g.orders?.pickup_code ? ` · commande ${g.orders.pickup_code}` : ''}
+                      {Number(g.paid) > 0 ? ` · ${eur(g.paid)} réglés en plus` : ''}
+                    </div>
+                    {g.promo_codes?.code && (
+                      <div style={{ fontSize: 11, color: C.faint, marginTop: 2 }}>
+                        via {g.promo_codes.label || g.promo_codes.code} ({g.promo_codes.code})
+                      </div>
+                    )}
+                  </div>
+                ))}
+              </div>
             </div>
           )}
 
@@ -6458,6 +6661,29 @@ const EMPTY_PROMO = {
   active: true,
   credits_per_person: 6,
   food_tokens_per_person: 1,
+  gift_items: [],
+}
+
+/** Catégories offrables par un code cadeau, dans les mots de la carte. */
+const GIFT_CATEGORIES = [
+  { k: 'alcohol', label: 'Boisson alcoolisée', emoji: '🍸' },
+  { k: 'soft', label: 'Soft', emoji: '🥤' },
+  { k: 'food', label: 'Plat', emoji: '🍽️' },
+  { k: 'bottle', label: 'Bouteille', emoji: '🍾' },
+]
+
+const giftCatLabel = (k) => GIFT_CATEGORIES.find((c) => c.k === k)?.label || k
+const giftCatEmoji = (k) => GIFT_CATEGORIES.find((c) => c.k === k)?.emoji || '🎁'
+
+/** Résumé en français d'une ligne de cadeau, tel que le staff et le client le lisent. */
+function giftLineLabel(item, productName) {
+  const q = Number(item.quantity) || 1
+  if (item.mode === 'product') {
+    return `${q} × ${productName || 'article de la carte'}`
+  }
+  const cat = giftCatLabel(item.category)
+  const plafond = item.max_value ? ` jusqu’à ${eur(item.max_value)}` : ''
+  return `${q} ${cat.toLowerCase()}${q > 1 ? 's' : ''} au choix${plafond}`
 }
 
 // Barème inchangé : 1 alcool éligible = 2 crédits, 1 soft = 1 crédit. Le staff
@@ -6570,7 +6796,205 @@ function ForfaitFields({ f, set }) {
   )
 }
 
-function PromoCodeSheet({ promo, event, onClose, onSaved, showToast }) {
+/**
+ * Éditeur des lignes d'un code cadeau.
+ *
+ * Chaque ligne dit ce qui est offert : soit une catégorie de la carte avec un
+ * plafond facultatif (« 1 boisson alcoolisée au choix jusqu'à 15 € »), soit un
+ * article précis (« 1 Spritz »). Un code peut en cumuler plusieurs.
+ */
+function GiftFields({ f, set, venueId, showToast }) {
+  const [products, setProducts] = useState([])
+  const items = Array.isArray(f.gift_items) ? f.gift_items : []
+
+  useEffect(() => {
+    if (!venueId) return
+    let dead = false
+    supabase
+      .from('products')
+      .select('id, name, price, universe, subcategory')
+      .eq('venue_id', venueId)
+      .eq('is_listed', true)
+      .order('universe')
+      .order('subcategory')
+      .order('name')
+      .then(({ data }) => {
+        if (!dead) setProducts(data || [])
+      })
+    return () => {
+      dead = true
+    }
+  }, [venueId])
+
+  const nameOf = (id) => products.find((p) => p.id === id)?.name
+  const update = (i, patch) => set('gift_items', items.map((it, k) => (k === i ? { ...it, ...patch } : it)))
+  const remove = (i) => set('gift_items', items.filter((_, k) => k !== i))
+  const add = (mode) =>
+    set('gift_items', [
+      ...items,
+      mode === 'product'
+        ? { mode: 'product', product_id: products[0]?.id || '', quantity: 1 }
+        : { mode: 'category', category: 'alcohol', quantity: 1, max_value: 15 },
+    ])
+
+  return (
+    <>
+      <div style={{ marginBottom: 12 }}>
+        <Banner tone="info">
+          Chaque personne qui saisit ce code reçoit ce qui est listé ci-dessous. À la commande,
+          l’article est automatiquement offert — et l’équipe voit apparaître, dans la fiche du
+          client, <strong>l’heure exacte et l’article précis</strong> qu’il a pris.
+        </Banner>
+      </div>
+
+      <div style={{ ...S.label, marginBottom: 8 }}>Ce que le code offre</div>
+
+      {items.length === 0 && (
+        <div style={{ fontSize: 12.5, color: C.faint, marginBottom: 10 }}>
+          Aucune ligne pour l’instant — ajoutez ce que vous offrez ci-dessous.
+        </div>
+      )}
+
+      <div style={{ display: 'grid', gap: 10, marginBottom: 12 }}>
+        {items.map((it, i) => (
+          <div
+            key={i}
+            style={{
+              padding: 12,
+              borderRadius: 14,
+              background: C.paper,
+              border: `1.5px solid ${C.terracotta}44`,
+            }}
+          >
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 10 }}>
+              <span style={{ fontSize: 13, fontWeight: 600, flex: 1 }}>
+                🎁 {giftLineLabel(it, nameOf(it.product_id))}
+              </span>
+              <button
+                onClick={() => remove(i)}
+                title="Retirer cette ligne"
+                style={{ background: 'none', border: 'none', cursor: 'pointer', color: C.danger, fontSize: 14, padding: 0 }}
+              >
+                ✕
+              </button>
+            </div>
+
+            {it.mode === 'category' ? (
+              <>
+                <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginBottom: 10 }}>
+                  {GIFT_CATEGORIES.map((c) => (
+                    <button
+                      key={c.k}
+                      onClick={() => update(i, { category: c.k })}
+                      style={{
+                        ...S.chip,
+                        flex: '1 0 46%',
+                        minHeight: 40,
+                        fontSize: 11.5,
+                        borderColor: it.category === c.k ? C.terracotta : C.lineHi,
+                        color: it.category === c.k ? C.terracotta : C.dim,
+                      }}
+                    >
+                      {c.emoji} {c.label}
+                    </button>
+                  ))}
+                </div>
+                <div style={{ display: 'flex', gap: 10 }}>
+                  <div style={{ flex: 1 }}>
+                    <Field label="Quantité">
+                      <input
+                        style={S.input}
+                        type="number"
+                        min="1"
+                        value={it.quantity ?? 1}
+                        onChange={(e) => update(i, { quantity: Math.max(1, Number(e.target.value) || 1) })}
+                      />
+                    </Field>
+                  </div>
+                  <div style={{ flex: 1 }}>
+                    <Field label="Plafond (€)" hint="Vide = sans plafond">
+                      <input
+                        style={S.input}
+                        type="number"
+                        min="0"
+                        step="0.5"
+                        value={it.max_value ?? ''}
+                        onChange={(e) =>
+                          update(i, { max_value: e.target.value === '' ? null : Number(e.target.value) })
+                        }
+                        placeholder="ex. 15"
+                      />
+                    </Field>
+                  </div>
+                </div>
+                <div style={{ fontSize: 11, color: C.faint, lineHeight: 1.5 }}>
+                  Au-delà du plafond, le client règle la différence au bar.
+                </div>
+              </>
+            ) : (
+              <>
+                <Field label="Article de la carte">
+                  <select
+                    style={S.input}
+                    value={it.product_id || ''}
+                    onChange={(e) => update(i, { product_id: e.target.value })}
+                  >
+                    <option value="">— choisir —</option>
+                    {products.map((p) => (
+                      <option key={p.id} value={p.id}>
+                        {p.name} · {eur(p.price)}
+                      </option>
+                    ))}
+                  </select>
+                </Field>
+                <Field label="Quantité">
+                  <input
+                    style={S.input}
+                    type="number"
+                    min="1"
+                    value={it.quantity ?? 1}
+                    onChange={(e) => update(i, { quantity: Math.max(1, Number(e.target.value) || 1) })}
+                  />
+                </Field>
+              </>
+            )}
+          </div>
+        ))}
+      </div>
+
+      <div style={{ display: 'flex', gap: 8, marginBottom: 14 }}>
+        <button onClick={() => add('category')} style={{ ...S.btnGhost, minHeight: 44, fontSize: 12.5 }}>
+          + Catégorie au choix
+        </button>
+        <button
+          onClick={() => {
+            if (!products.length) return showToast('Aucun article sur la carte de ce lieu.', 'error')
+            add('product')
+          }}
+          style={{ ...S.btnGhost, minHeight: 44, fontSize: 12.5 }}
+        >
+          + Article précis
+        </button>
+      </div>
+
+      <Field
+        label="Nombre de personnes"
+        hint="Combien de personnes peuvent activer ce code. Vide = illimité."
+      >
+        <input
+          style={S.input}
+          type="number"
+          min="1"
+          value={f.max_uses ?? ''}
+          onChange={(e) => set('max_uses', e.target.value === '' ? null : Number(e.target.value))}
+          placeholder="ex. 6 personnes"
+        />
+      </Field>
+    </>
+  )
+}
+
+function PromoCodeSheet({ promo, event, venue, onClose, onSaved, showToast }) {
   const [f, setF] = useState(EMPTY_PROMO)
   const [busy, setBusy] = useState(false)
 
@@ -6583,6 +7007,14 @@ function PromoCodeSheet({ promo, event, onClose, onSaved, showToast }) {
 
   async function save() {
     if (!f.code.trim()) return showToast('Le code est obligatoire.', 'error')
+
+    const gifts = Array.isArray(f.gift_items) ? f.gift_items : []
+    if (f.kind === 'gift') {
+      if (gifts.length === 0) return showToast('Ajoutez au moins un article offert.', 'error')
+      if (gifts.some((g) => g.mode === 'product' && !g.product_id))
+        return showToast('Choisissez l’article offert pour chaque ligne « article précis ».', 'error')
+    }
+
     setBusy(true)
     const payload = {
       event_id: event.id,
@@ -6595,6 +7027,7 @@ function PromoCodeSheet({ promo, event, onClose, onSaved, showToast }) {
       active: !!f.active,
       credits_per_person: Number(f.credits_per_person) || 0,
       food_tokens_per_person: Number(f.food_tokens_per_person) || 0,
+      gift_items: f.kind === 'gift' ? gifts : [],
     }
     const { error } = f.id
       ? await supabase.from('promo_codes').update(payload).eq('id', f.id)
@@ -6623,12 +7056,12 @@ function PromoCodeSheet({ promo, event, onClose, onSaved, showToast }) {
         />
       </Field>
 
-      <Field label="Libellé" hint="Usage interne, non affiché au client">
+      <Field label="Nom du code" hint="Pour vous retrouver dans vos codes — non affiché au client">
         <input
           style={S.input}
           value={f.label || ''}
           onChange={(e) => set('label', e.target.value)}
-          placeholder="Réduction soirée lancement"
+          placeholder="Soirée Noti 1"
         />
       </Field>
 
@@ -6670,10 +7103,24 @@ function PromoCodeSheet({ promo, event, onClose, onSaved, showToast }) {
           >
             🎟️ Forfait groupe
           </button>
+          <button
+            onClick={() => set('kind', 'gift')}
+            style={{
+              ...S.chip,
+              flex: '1 0 100%',
+              minHeight: 44,
+              borderColor: f.kind === 'gift' ? C.terracotta : C.lineHi,
+              color: f.kind === 'gift' ? C.terracotta : C.dim,
+            }}
+          >
+            🎁 Article offert
+          </button>
         </div>
       </Field>
 
-      {f.kind === 'credits' ? (
+      {f.kind === 'gift' ? (
+        <GiftFields f={f} set={set} venueId={venue?.id} showToast={showToast} />
+      ) : f.kind === 'credits' ? (
         <ForfaitFields f={f} set={set} />
       ) : (
         <>
