@@ -25,6 +25,46 @@
 
 
 -- ============================================================================
+--  0 bis. RATTRAPAGE DE L'ÉTAPE « EN PRÉPARATION » (ex-0010 / 0011)
+--
+--  Une base installée avant le patch 0010 n'a pas la valeur 'IN_PREP' dans son
+--  type order_status : la colonne « En préparation » du tableau du bar y est
+--  alors inutilisable, et ce patch échouait à la création de la vue de
+--  pilotage. On l'ajoute donc ici.
+--
+--  PostgreSQL autorise l'ajout d'une valeur d'enum dans une transaction, mais
+--  INTERDIT de s'en servir avant le commit. Partout où ce patch a besoin de
+--  comparer un statut à 'IN_PREP', il le fait donc sur `status::text` : c'est
+--  une comparaison de texte, qui ne touche pas à l'enum et fonctionne aussi
+--  bien avant qu'après. Rien à exécuter séparément.
+-- ============================================================================
+alter type public.order_status add value if not exists 'IN_PREP' after 'RECEIVED';
+
+-- close_event() doit basculer les commandes restées « En préparation » en
+-- impayé à la clôture, sinon elles resteraient bloquées dans cet état.
+create or replace function public.close_event(p_event uuid)
+returns int
+language plpgsql volatile security definer set search_path = public
+as $$
+declare n int;
+begin
+  if not public.is_event_staff(p_event) then raise exception 'forbidden'; end if;
+
+  update public.orders
+     set status = 'UNPAID'
+   where event_id = p_event
+     and status::text in ('RECEIVED', 'IN_PREP', 'READY', 'PICKED_UP');
+  get diagnostics n = row_count;
+
+  update public.events set accept_orders = false, is_active = false where id = p_event;
+  return n;
+end;
+$$;
+
+grant execute on function public.close_event(uuid) to authenticated;
+
+
+-- ============================================================================
 --  0. REPRISE D'UNE VERSION ANTÉRIEURE DE CE PATCH
 --
 --  Une première version de 0020 remplaçait les crédits par une cagnotte en
@@ -280,7 +320,7 @@ select
   (select coalesce(sum(a.group_size), 0) from public.attendances a
     where a.event_id = e.id)                                                        as headcount,
   (select count(*) from public.orders o
-    where o.event_id = e.id and o.status in ('RECEIVED', 'IN_PREP'))                as in_preparation,
+    where o.event_id = e.id and o.status::text in ('RECEIVED', 'IN_PREP'))          as in_preparation,
   (select count(*) from public.orders o
     where o.event_id = e.id and o.status = 'READY')                                 as awaiting_pickup,
   (select count(*) from public.orders o
