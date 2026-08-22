@@ -17,6 +17,7 @@ create extension if not exists "pgcrypto";
 do $$ begin
   create type public.order_status as enum (
     'RECEIVED',   -- reçue au bar
+    'IN_PREP',    -- en préparation au bar/cuisine
     'READY',      -- prête à retirer  → bloque toute nouvelle commande
     'PICKED_UP',  -- retirée par le client
     'PAID',       -- réglée au bar
@@ -319,9 +320,10 @@ $$;
 -- ---------------------------------------------------------------------------
 --  Inscription / mise à jour du client après identification.
 --  Appelée par le front juste après signInAnonymously() : auth.uid() est déjà
---  le client, il n'y a rien d'autre à vérifier.
+--  le client, il n'y a rien d'autre à vérifier. Prénom, nom et e-mail sont
+--  obligatoires : c'est la fiche exploitée ensuite par le staff/CRM.
 -- ---------------------------------------------------------------------------
-create or replace function public.upsert_me(p_first_name text)
+create or replace function public.upsert_me(p_first_name text, p_last_name text, p_email text)
 returns public.customers
 language plpgsql volatile security definer set search_path = public
 as $$
@@ -331,11 +333,19 @@ begin
   if auth.uid() is null then
     raise exception 'not_authenticated';
   end if;
+  if nullif(trim(p_first_name), '') is null or nullif(trim(p_last_name), '') is null then
+    raise exception 'missing_profile';
+  end if;
+  if p_email is null or trim(p_email) !~ '^[^@\s]+@[^@\s]+\.[^@\s]+$' then
+    raise exception 'invalid_email';
+  end if;
 
-  insert into public.customers (auth_user_id, first_name)
-  values (auth.uid(), nullif(trim(p_first_name), ''))
+  insert into public.customers (auth_user_id, first_name, last_name, email)
+  values (auth.uid(), trim(p_first_name), trim(p_last_name), lower(trim(p_email)))
   on conflict (auth_user_id) do update
-    set first_name   = coalesce(excluded.first_name, public.customers.first_name),
+    set first_name   = excluded.first_name,
+        last_name    = excluded.last_name,
+        email        = excluded.email,
         last_seen_at = now()
   returning * into v_row;
 
@@ -535,7 +545,7 @@ $$;
 
 grant execute on function public.is_staff(uuid)                        to authenticated;
 grant execute on function public.is_event_staff(uuid)                  to authenticated;
-grant execute on function public.upsert_me(text)                       to authenticated;
+grant execute on function public.upsert_me(text, text, text)           to authenticated;
 grant execute on function public.register_scan(uuid, int)              to authenticated;
 grant execute on function public.can_order(uuid)                       to authenticated;
 grant execute on function public.place_order(uuid, uuid, jsonb, text, text) to authenticated;

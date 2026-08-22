@@ -45,6 +45,26 @@ export function frError(err) {
   if (m.includes('variant_required')) return 'Choisissez un format pour chaque article.'
   if (m.includes('not_a_customer') || m.includes('not_authenticated')) return 'Identifiez-vous pour commander.'
   if (m.includes('forbidden')) return 'Action non autorisée.'
+  if (m.includes('scan_point_orphan'))
+    return 'Ce QR code ne pointe plus vers une soirée valide. Demandez au staff un QR à jour.'
+  if (m.includes('missing_profile')) return 'Prénom et nom sont obligatoires.'
+  if (m.includes('missing_phone')) return 'Numéro de téléphone obligatoire.'
+  if (m.includes('phone_already_used'))
+    return 'Ce numéro est déjà utilisé par une autre fiche client.'
+  if (m.includes('missing_postal_code')) return 'Code postal obligatoire.'
+  if (m.includes('invalid_birthdate')) return 'Date de naissance invalide.'
+  if (m.includes('invalid_email')) return 'Adresse e-mail invalide.'
+  if (m.includes('code_exhausted'))
+    return 'Ce forfait est complet : toutes les places du groupe ont été activées.'
+  if (m.includes('invalid_pass_code'))
+    return 'Code invalide, expiré ou déjà entièrement utilisé.'
+  if (m.includes('conversion_closed'))
+    return 'La conversion du jeton food est fermée (disponible jusqu’à 22h).'
+  if (m.includes('no_food_token')) return 'Aucun jeton food disponible à convertir.'
+  if (m.includes('no_pass')) return 'Aucun forfait actif pour cette soirée.'
+  if (m.includes('unknown_order')) return 'Commande introuvable.'
+  if (m.includes('invalid_flag')) return 'Type de signalement inconnu.'
+  if (m.includes('empty_note')) return 'Le commentaire ne peut pas être vide.'
 
   // Auth
   if (m.includes('anonymous sign-ins are disabled'))

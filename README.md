@@ -37,13 +37,33 @@ feuille de route *v2.0 — août 2026* (cas pilote **Noti Club · Noti Calling**
 ### Côté client — `/s/{scan_point_id}`
 
 - Écran d'accueil aux couleurs Noti Calling (logo, contexte, point de scan)
-- **Identification légère** : le prénom seul, aucun numéro ni SMS. Une session anonyme Supabase
-  (`signInAnonymously`) porte le JWT ; elle persiste sur l'appareil tant que le stockage local
-  n'est pas effacé
-- **Reconnaissance client au scan** : « Bon retour parmi nous », badge VIP, message dédié en cas
-  d'incident (impayé passé)
+- **Identification obligatoire, une seule fois par appareil** : prénom, nom, **téléphone, code
+  postal, date de naissance** (obligatoires) + e-mail et Instagram (**optionnels**, complétables
+  plus tard) — la commande ne peut pas être envoyée sans les champs obligatoires, exploitables
+  ensuite côté CRM (relances, historique, segmentation géographique/âge). Le téléphone sert
+  d'**ancre d'identité** : un même numéro sur un nouvel appareil (réinstallation, stockage vidé)
+  reprend la fiche existante au lieu d'en créer une seconde. Une session anonyme Supabase
+  (`signInAnonymously`) porte le JWT et **persiste** : aux venues suivantes, le scan du QR ouvre
+  directement la carte, sans repasser par le formulaire. La présence est enregistrée au passage
+- **Espace client** : le client y retrouve ses informations (nom, code postal, date de naissance)
+  et peut modifier son téléphone ou compléter e-mail / Instagram quand il le souhaite — un
+  rappel s'affiche dans l'app tant que les champs optionnels manquent
+- **Reconnaissance client au premier scan** : « Bon retour parmi nous », badge VIP, message dédié
+  en cas d'incident (impayé passé)
 - **Espace commande en 3 univers** : Boissons au verre · Food · Bouteilles, avec sous-catégories
-- Formats multiples (12 cl / 75 cl / magnum) et options composables ; panier, note libre, code promo
+- Formats multiples (12 cl / 75 cl / magnum) et options composables ; panier, note libre
+- **Illustration dessinée par article** (verre, bouteille ou assiette aux couleurs Noti Calling,
+  une image distincte par ligne de carte — boissons, bouteilles **et plats**) — encodée
+  directement en base, jamais de lien externe cassé
+- **Un seul emplacement pour tout code** (réduction % / montant, ou forfait de groupe) — le
+  client n'a pas à savoir de quel type il s'agit ; activé une fois, réappliqué automatiquement
+  aux commandes suivantes
+- **Forfaits Groupes (pass à crédits)** : un code (vendu hors app, lien de paiement en amont)
+  crédite chaque personne d'un portefeuille — **1 alcool éligible = 2 crédits, 1 soft = 1 crédit**
+  — plus un jeton food (convertible en crédits avant 22h, auto-converti si arrivée après 22h30).
+  Consommé automatiquement à la commande, en plus d'un éventuel code promo classique.
+  Côté staff, la configuration se fait en **personnes et en consos**, jamais en crédits : le
+  barème reste interne. Une commande annulée rend les crédits et le jeton
 - **Discipline de la file** : cumul autorisé tant que la commande est en préparation ;
   **blocage dès qu'une commande passe à « prête »**, jusqu'au retrait au bar
 - Confirmation avec **code de retrait**, temps estimé et compte à rebours
@@ -54,10 +74,15 @@ feuille de route *v2.0 — août 2026* (cas pilote **Noti Club · Noti Calling**
 
 ### Côté bar & cuisine
 
-- Écran de production temps réel : **Reçues → Prêtes → Retirées → Réglées**
+- Écran de production temps réel : **Reçues → En préparation → Prêtes → Retirées → Réglées**
 - **Alarme sonore** sur nouvelle commande, qui ne s'arrête que sur accusé de réception explicite
 - **Réglage du temps de préparation** selon le rush, répercuté sur le timer client
-- **Article « épuisé » en un clic** — il reste visible sur la carte, grisé et non commandable
+- **Article « épuisé » en un clic** — il reste visible sur la carte, grisé et non commandable,
+  et le basculement se propage **en direct** sur tous les téléphones connectés (Realtime, sans
+  rechargement)
+- **Retraits en retard** : une commande prête non retirée passe en alerte à **15 min** (bar +
+  organisation), puis à **20 min** l'organisateur prend le relais et contacte le client. La
+  relance automatique au client, elle, part dès **5 min** (Edge Function `reminders`)
 - **Impression de ticket** 80 mm — disponible, non obligatoire, non bloquante
 - Vue **Caisse** : suivi d'encaissement par client, sélection multiple, marquage « réglé »
   (espèces / CB / autre), suivi des impayés
@@ -67,11 +92,27 @@ feuille de route *v2.0 — août 2026* (cas pilote **Noti Club · Noti Calling**
 - **Pilotage temps réel** : présents, commandes en cours, file d'attente, encaissé, impayés
 - **Leaderboard temps réel** (qui commande le plus, panier cumulé)
 - **Diffusion à toute la soirée** (avec modèles prêts à l'emploi) et **messagerie individuelle**
-  organisateur → client
+  organisateur → client — reçus côté client dans un **canal de messages dédié** (onglet 💬,
+  historique complet, pas seulement les non-lus)
+- **Fiche client complète** : en un tap sur le leaderboard, tous les champs collectés (téléphone,
+  e-mail, Instagram, code postal, date de naissance), tags, stats et codes promo utilisés
 - **Base client** : historique, nombre de soirées, taille du groupe, **tags & segmentation**
   (VIP / habitué / gros panier / incident) — tags automatiques inclus. Le suivi cross-soirée
-  repose sur la session anonyme de l'appareil (pas de numéro) : il tient tant que le client garde
-  le même téléphone et ne vide pas son stockage local
+  repose désormais sur le **téléphone** (ancre d'identité) : il tient même si le client change
+  d'appareil ou vide son stockage local
+- **Historique des codes utilisés** par client dans l'export CSV (codes % / montant réellement
+  appliqués sur ses commandes + forfaits activés, avec les crédits reçus)
+- **Équipe & rôles** : invitation par e-mail, rattachement automatique à la première connexion,
+  et trois niveaux d'accès — propriétaire, manager, et un **accès réduit** pour l'équipe de bar
+  (Bar, Caisse, Clients seulement)
+- **Commentaire et signalement sur chaque commande**, à tout stade (note, à surveiller, geste
+  commercial, incident) — interne à l'équipe, jamais visible du client ; un incident remonte
+  automatiquement dans les tags de la fiche client
+- **Fiche client** : historique complet des commandes, heure d'arrivée, taille du groupe,
+  présence live, crédits de forfait restants, signalements de l'équipe — et envoi d'un message
+  en un tap
+- **Jauge d'affluence** alimentée par les scans : remplissage par rapport à la capacité de la
+  salle, arrivées sur les 15 / 60 dernières minutes et courbe par tranche de 15 min
 - **Reporting post-événement** : panier moyen, top produits, pic horaire, nouveaux vs récurrents,
   note moyenne — export **PDF** et **CSV**
 - **Clôture de soirée** : les commandes non réglées passent en « impayé », rattachées à
@@ -118,9 +159,22 @@ supabase/
     0002_rls.sql           Row Level Security
     0003_realtime_reporting.sql  Realtime, vues de pilotage, event_report, close_event
     0004_storage.sql       bucket "noti"
-    0005_seed_noti_menu.sql      carte du Noti Club
+    0005_seed_noti_menu.sql      carte du Noti Club (rentrée 2026)
     0006_simplify_identity.sql   retrait de l'obligation de téléphone (patch, installs existantes)
     0007_reload_menu_idempotent.sql  carte rechargeable sans doublons (patch, installs existantes)
+    0008_promo_preview.sql       aperçu code promo au checkout (patch, installs existantes)
+    0009_require_profile.sql     prénom + nom + e-mail obligatoires (patch, installs existantes)
+    0010_in_prep_status.sql      étape « En préparation » (patch, installs existantes)
+    0011_in_prep_close_event.sql clôture de soirée adaptée à « En préparation » (patch, installs existantes)
+    0012_menu_rentree_2026.sql   nouveaux prix carte Noti Club (patch, installs existantes)
+    0013_forfaits_credits.sql    Forfaits Groupes Noti : pass à crédits (patch, installs existantes)
+    0014_realtime_products.sql   rupture de stock en direct côté client (patch, TOUTES installs)
+    0015_profil_etendu.sql       téléphone/CP/naissance obligatoires, espace client, code unifié (patch, installs existantes)
+    0016_profil_telephone_editable.sql  téléphone modifiable depuis l'espace client (patch, TOUTES installs)
+    0017_illustrations_produits.sql     une illustration par article (patch, TOUTES installs)
+    0018_profil_cp_naissance_editable.sql  code postal / naissance modifiables (patch, TOUTES installs)
+    0019_illustrations_food.sql  carte food (8 plats) + leurs illustrations (patch, TOUTES installs)
+    0020_equipe_suivi_affluence.sql  équipe & rôles, suivi de commande, affluence (patch, TOUTES installs)
   functions/
     notify/                notification de statut / diffusion / message individuel
     reminders/             relances automatiques (cron)
@@ -148,6 +202,8 @@ feuille de route §10). Notez **Project URL** et **anon public key** (*Settings 
 5. `supabase/migrations/0005_seed_noti_menu.sql` *(crée la fonction ; la carte est injectée
    automatiquement à la création du lieu depuis l'app, et rechargeable ensuite à volonté
    depuis l'onglet **Carte** → bouton **🍸 Carte Noti Club**)*
+6. `supabase/migrations/0008_promo_preview.sql` *(aperçu du code promo au checkout — voir la note
+   ci-dessous, le fichier 0006 n'est utile qu'aux bases déjà existantes)*
 
 > **Installation déjà faite avant l'identification par simple prénom ?** Exécutez en plus
 > `supabase/migrations/0006_simplify_identity.sql` — il retire l'obligation de téléphone sans
@@ -157,8 +213,107 @@ feuille de route §10). Notez **Project URL** et **anon public key** (*Settings 
 > `supabase/migrations/0007_reload_menu_idempotent.sql` — sans lui, cliquer sur **Carte Noti Club**
 > une deuxième fois duplique tous les articles au lieu de les mettre à jour.
 >
-> Une base qui n'a encore rien exécuté n'a besoin ni de 0006 ni de 0007 : `0001_schema.sql` et
-> `0005_seed_noti_menu.sql` contiennent déjà directement ces versions.
+> **Installation déjà faite avant que nom et e-mail soient obligatoires ?** Exécutez en plus
+> `supabase/migrations/0009_require_profile.sql` — sinon `upsert_me()` continue d'accepter le
+> prénom seul.
+>
+> Une base qui n'a encore rien exécuté n'a besoin ni de 0006, ni de 0007, ni de 0009 :
+> `0001_schema.sql` et `0005_seed_noti_menu.sql` contiennent déjà directement ces versions.
+>
+> **`0008_promo_preview.sql` s'exécute dans tous les cas**, base neuve ou existante — c'est un
+> ajout pur (fonction `preview_promo`, aucune version antérieure à remplacer). Sans elle, le champ
+> code promo au checkout reste fonctionnel (validé côté serveur par `place_order()`), mais sans
+> aperçu ni message avant l'envoi de la commande.
+>
+> **Installation déjà faite avant l'étape « En préparation » ?** Exécutez, dans deux **Run**
+> séparés (obligatoire — PostgreSQL interdit d'utiliser une nouvelle valeur d'enum dans la
+> transaction qui vient de la créer) :
+> 1. `supabase/migrations/0010_in_prep_status.sql`
+> 2. `supabase/migrations/0011_in_prep_close_event.sql`
+>
+> Une base neuve n'en a pas besoin : `0001_schema.sql` et `0003_realtime_reporting.sql`
+> contiennent déjà directement cette version.
+>
+> **Nouveaux prix carte Noti Club (rentrée 2026) ?** Exécutez
+> `supabase/migrations/0012_menu_rentree_2026.sql`, puis dans l'onglet **Carte** côté app,
+> cliquez sur **🍸 Carte Noti Club** pour appliquer les nouveaux prix aux articles déjà en
+> base (le rechargement met à jour, il ne duplique pas). Une base neuve n'en a pas besoin :
+> `0005_seed_noti_menu.sql` contient déjà directement cette version.
+>
+> **Forfaits Groupes Noti (pass à crédits) ?** Exécutez
+> `supabase/migrations/0013_forfaits_credits.sql` — il étiquette automatiquement les
+> articles déjà en base et rétroactivement pour tous les venues existants, aucune action
+> supplémentaire nécessaire. Une base neuve n'en a pas besoin : `0005_seed_noti_menu.sql`
+> contient déjà l'appel d'étiquetage.
+>
+> **`0014_realtime_products.sql` s'exécute dans tous les cas**, base neuve ou existante : il
+> publie la table `products` en Realtime. Sans lui, marquer un article « épuisé » depuis la
+> tablette ne se voit côté client qu'au rechargement de la page — un client peut donc commander
+> un article épuisé pendant plusieurs minutes et se faire refuser sa commande à l'envoi.
+>
+> **`0015_profil_etendu.sql` s'exécute dans tous les cas**, base neuve ou existante : il change
+> la signature de `upsert_me()` pour rendre téléphone / code postal / date de naissance
+> obligatoires (e-mail et Instagram devenant optionnels), ajoute les colonnes correspondantes sur
+> `customers`, et ajoute `update_my_optional_profile()` (espace client) /
+> `validate_promo_code()` (saisie de code unifiée). `0001_schema.sql` contient encore l'ancienne
+> version 3 arguments : sans `0015`, l'identification échouera dès que l'app enverra le
+> téléphone/CP/naissance qu'elle collecte désormais.
+>
+> **`0016_profil_telephone_editable.sql` s'exécute dans tous les cas**, base neuve ou existante :
+> il rend le téléphone modifiable depuis l'espace client (en plus d'e-mail / Instagram), avec un
+> message clair si le numéro est déjà utilisé par une autre fiche.
+>
+> **`0017_illustrations_produits.sql` s'exécute dans tous les cas**, base neuve ou existante :
+> une illustration dessinée (verre/bouteille aux couleurs Noti Calling, encodée en data URI —
+> jamais de lien externe, jamais cassée) pour chaque article de la carte type. Fichier volumineux
+> (~250 Ko) car chaque image est intégrée directement dans le SQL ; le collage peut prendre
+> quelques secondes de plus que les autres blocs. Rejoué automatiquement à chaque clic sur
+> **🍸 Carte Noti Club**, donc pas besoin de le recoller après un premier passage.
+>
+> **`0018_profil_cp_naissance_editable.sql` s'exécute dans tous les cas**, base neuve ou
+> existante : code postal et date de naissance deviennent eux aussi modifiables depuis l'espace
+> client (comme le téléphone, 0016) — indispensable pour les fiches créées avant l'ajout de ces
+> deux champs (0015), qui les ont vides sans lui.
+>
+> **`0019_illustrations_food.sql` s'exécute dans tous les cas**, base neuve ou existante :
+> l'univers **Food** ne faisait pas partie de la carte type — il restait donc vide tant qu'aucun
+> plat n'avait été saisi à la main, et n'avait par conséquent aucune illustration à afficher. Ce
+> patch sème les huit plats de la carte Noti Club (frites, houmous pistache, tempura poulet,
+> croque truffé, stracciatella, fritto misto, planche charcuterie, planche fromages) avec leurs
+> prix et une illustration chacun, dans le même style que les boissons. Fichier volumineux
+> (~130 Ko) pour la même raison que 0017. Rejoué à chaque clic sur **🍸 Carte Noti Club** : les
+> prix se mettent à jour sans jamais créer de doublon, et un plat déjà saisi sous un libellé
+> proche récupère quand même son illustration.
+>
+> **`0020_equipe_suivi_affluence.sql` s'exécute dans tous les cas**, base neuve ou existante.
+> Il apporte trois choses, **sans toucher au barème des forfaits** (1 alcool éligible vaut
+> toujours 2 crédits, 1 soft 1 crédit, et le jeton food reste convertible) :
+>
+> 1. **Équipe et rôles.** Invitation par e-mail depuis *Réglages → Équipe* (propriétaire
+>    uniquement) : la personne crée son compte avec cette adresse et rejoint le lieu à sa
+>    première connexion, sans e-mail à envoyer ni code à transmettre. Trois niveaux —
+>    *propriétaire* (tout + équipe), *manager* (tout sauf l'équipe), *équipe* (version réduite :
+>    Bar, Caisse, Clients).
+> 2. **Suivi des commandes.** Un clic sur une commande, à n'importe quel stade, pour la commenter
+>    ou la signaler (note, à surveiller, geste commercial, incident). Un incident taggue aussi la
+>    fiche du client. Ces commentaires sont internes : jamais visibles côté client.
+> 3. **Affluence.** Capacité de la salle (Réglages) + jauge de remplissage, rythme d'arrivée et
+>    courbe des arrivées par tranche de 15 min dans l'onglet Orga, alimentés par les scans.
+>
+> Ce que ce patch change sur les forfaits est volontairement limité : un code complet renvoie
+> désormais une erreur explicite (« forfait complet ») au lieu d'un « code invalide » ambigu, et
+> l'incrément du compteur sert de garde atomique — deux personnes ne peuvent plus prendre la même
+> dernière place. Les activations sont tracées dans `promo_redemptions`, ce qui donne enfin un
+> historique fiable par client.
+>
+> Il corrige au passage trois défauts : le compteur « En prépa » du tableau de bord ignorait les
+> commandes au stade *En préparation* ; une commande annulée ne rendait pas au client les crédits
+> ni le jeton food qu'elle avait consommés ; et l'aperçu de code promo acceptait un code de
+> forfait en affichant une remise de 0,00 €.
+>
+> *(Une première version de ce patch, nommée `0020_equipe_cagnotte_suivi.sql`, remplaçait les
+> crédits par une cagnotte en euros. Elle est abandonnée. Si vous l'avez déjà exécutée, le
+> nouveau patch remet tout en place sans perte de données — il suffit de le coller par-dessus.)*
 
 ### 3. Activer l'authentification
 
@@ -173,6 +328,16 @@ feuille de route §10). Notez **Project URL** et **anon public key** (*Settings 
 > Sans le provider Anonymous activé, l'écran d'identification renvoie une erreur. C'est le seul
 > point bloquant pour tester le parcours client de bout en bout — et il ne demande qu'un bouton à
 > cocher dans le dashboard.
+
+**Mot de passe oublié (staff)** — l'écran de connexion a un lien *Mot de passe oublié ?* qui envoie
+un e-mail de réinitialisation (`resetPasswordForEmail`). Pour qu'il fonctionne :
+
+- *Authentication → URL Configuration → Redirect URLs* : ajoutez l'URL de votre déploiement
+  (`https://votre-site.vercel.app/*`) — sans elle, Supabase refuse de rediriger vers le lien de
+  réinitialisation et l'e-mail échoue silencieusement.
+- L'envoi passe par le service e-mail intégré de Supabase par défaut (volume limité, parfois classé
+  en spam) ; pour un usage réel, configurez un SMTP dédié dans *Authentication → Settings → SMTP
+  Settings*.
 
 ### 4. Générer les clés VAPID (Web Push)
 
@@ -201,7 +366,7 @@ supabase secrets set \
 | Secret | Sert à | Si absent |
 |---|---|---|
 | `VAPID_*` | notifications Web Push — canal principal du suivi client | l'app marche, sans push |
-| `SMS_PROVIDER` + secrets du fournisseur | SMS de statut, relances, diffusion — **optionnel** : le client n'a plus de numéro par défaut (identification au prénom seul), ce canal ne sert que si un téléphone est ajouté manuellement | les messages restent dans l'app (tracés, non envoyés) |
+| `SMS_PROVIDER` + secrets du fournisseur | SMS de statut, relances, diffusion — **optionnel** : le client n'a pas de numéro par défaut (identification par prénom/nom/e-mail, pas de téléphone), ce canal ne sert que si un téléphone est ajouté manuellement | les messages restent dans l'app (tracés, non envoyés) |
 | `CRON_SECRET` | protéger la fonction `reminders` | la fonction refuse tout appel |
 | `ANTHROPIC_API_KEY` | traduction auto FR → EN/ES | bouton de traduction en erreur |
 

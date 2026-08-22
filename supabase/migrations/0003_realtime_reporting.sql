@@ -152,7 +152,7 @@ begin
   update public.orders
      set status = 'UNPAID'
    where event_id = p_event
-     and status in ('RECEIVED', 'READY', 'PICKED_UP');
+     and status in ('RECEIVED', 'IN_PREP', 'READY', 'PICKED_UP');
   get diagnostics n = row_count;
 
   update public.events set accept_orders = false, is_active = false where id = p_event;
