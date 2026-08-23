@@ -25,7 +25,15 @@ import {
   loadImage,
   canvasToPng,
 } from './lib/pdf.js'
-import { Alarm, chime, tick, unlockAudio } from './lib/sound.js'
+import {
+  Alarm,
+  chime,
+  tick,
+  unlockAudio,
+  RINGTONES,
+  DEFAULT_RINGTONE,
+  previewRingtone,
+} from './lib/sound.js'
 import { pushSupported, registerServiceWorker, subscribePush, notify, vibrate } from './lib/push.js'
 
 // ----------------------------------------------------------------------------
@@ -717,35 +725,83 @@ function ProfileReminder({ customer, lang, onOpen }) {
   ].filter(Boolean)
   if (!customer || missing.length === 0) return null
 
+  // Mise en page en blocs plutôt qu'un bouton posé au fil du texte : en ligne,
+  // il ne s'alignait pas sur la ligne de base et la bulle paraissait de
+  // travers. Ici chaque élément occupe sa propre ligne, calée à gauche.
   return (
     <div style={{ marginBottom: 14 }}>
       <Banner tone="info">
-        <div style={{ lineHeight: 1.55 }}>
-          <strong>{t.completeProfile}</strong>
-          <br />
-          {missing.join(', ')}
+        <div style={{ display: 'grid', gap: 6, textAlign: 'left' }}>
+          <strong style={{ fontWeight: 600 }}>{t.completeProfile}</strong>
+          <span style={{ fontWeight: 400, opacity: 0.9 }}>{missing.join(' · ')}</span>
           {onOpen && (
-            <>
-              {' — '}
-              <button
-                onClick={onOpen}
-                style={{
-                  background: 'none',
-                  border: 'none',
-                  padding: 0,
-                  color: C.indigo,
-                  fontWeight: 600,
-                  cursor: 'pointer',
-                  fontSize: 'inherit',
-                  textAlign: 'left',
-                }}
-              >
-                {t.goToAccount}
-              </button>
-            </>
+            <button
+              onClick={onOpen}
+              style={{
+                justifySelf: 'start',
+                background: 'none',
+                border: 'none',
+                padding: 0,
+                marginTop: 2,
+                color: 'inherit',
+                fontWeight: 600,
+                fontSize: 'inherit',
+                textDecoration: 'underline',
+                cursor: 'pointer',
+              }}
+            >
+              {t.goToAccount} ›
+            </button>
           )}
         </div>
       </Banner>
+    </div>
+  )
+}
+
+/**
+ * Mot de passe avec œil de relecture.
+ *
+ * Retour terrain : « lors de ma première connexion, j'avais copié-collé depuis
+ * le message reçu et le collage avait embarqué le préfixe. Impossible de voir
+ * ce que j'avais saisi — que des points. J'ai bloqué un bon moment sur un
+ * problème trivial. » Le collage d'un mot de passe est le cas normal, pas
+ * l'exception : il faut pouvoir relire.
+ */
+function PasswordInput({ value, onChange, autoComplete = 'current-password', autoFocus = false }) {
+  const [shown, setShown] = useState(false)
+  return (
+    <div style={{ position: 'relative' }}>
+      <input
+        style={{ ...S.input, paddingRight: 46 }}
+        type={shown ? 'text' : 'password'}
+        required
+        minLength={6}
+        autoComplete={autoComplete}
+        value={value}
+        onChange={onChange}
+        autoFocus={autoFocus}
+      />
+      <button
+        type="button"
+        onClick={() => setShown((v) => !v)}
+        aria-label={shown ? 'Masquer le mot de passe' : 'Afficher le mot de passe'}
+        title={shown ? 'Masquer' : 'Afficher'}
+        style={{
+          position: 'absolute',
+          right: 6,
+          top: 6,
+          width: 38,
+          height: 38,
+          border: 'none',
+          background: 'transparent',
+          cursor: 'pointer',
+          fontSize: 16,
+          color: C.dim,
+        }}
+      >
+        {shown ? '🙈' : '👁️'}
+      </button>
     </div>
   )
 }
@@ -961,26 +1017,18 @@ function ResetPasswordScreen({ onDone }) {
           ) : (
             <form onSubmit={submit}>
               <Field label="Nouveau mot de passe">
-                <input
-                  style={S.input}
-                  type="password"
-                  required
-                  minLength={6}
-                  autoComplete="new-password"
+                <PasswordInput
                   value={password}
                   onChange={(e) => setPassword(e.target.value)}
+                  autoComplete="new-password"
                   autoFocus
                 />
               </Field>
               <Field label="Confirmer le mot de passe">
-                <input
-                  style={S.input}
-                  type="password"
-                  required
-                  minLength={6}
-                  autoComplete="new-password"
+                <PasswordInput
                   value={confirm}
                   onChange={(e) => setConfirm(e.target.value)}
+                  autoComplete="new-password"
                 />
               </Field>
 
@@ -1273,13 +1321,12 @@ function WelcomeScreen({ event, venue, scanPoint, lang, setLang, onStart, backTo
       {closed ? (
         <>
           <Banner tone="warn">{event?.service_message || t.ordersClosed}</Banner>
-          {/* Commandes fermées : sans ce bouton, un client venu par le logo
-              resterait bloqué sur cet écran. La carte reste consultable. */}
-          {backToMenu && (
-            <button onClick={onStart} style={{ ...S.btnGhost, marginTop: 16 }}>
-              {t.seeMenu}
-            </button>
-          )}
+          {/* Commandes fermées : on entre quand même. C'est par l'application
+              que l'organisateur continue de parler à la salle — « on ferme dans
+              30 minutes » — et sans ce bouton on restait coincé ici. */}
+          <button onClick={onStart} style={{ ...S.btnGhost, marginTop: 16 }}>
+            {t.seeMenu}
+          </button>
         </>
       ) : (
         <>
@@ -1738,6 +1785,9 @@ function OrderingApp({
   // dit une seule fois, au bon moment — à l'arrivée sur la carte, et seulement
   // si la personne a réellement des crédits (pass ou code cadeau). Le drapeau
   // reste sur l'appareil : pas de rappel à chaque rechargement de page.
+  // Commande sur laquelle ouvrir « Mes commandes » quand on arrive depuis un
+  // message de suivi.
+  const [focusOrder, setFocusOrder] = useState(null)
   const [creditsIntro, setCreditsIntro] = useState(false)
   const creditsTotal =
     (pass?.credits_remaining || 0) + gifts.reduce((n, g) => n + (Number(g.remaining) || 0), 0)
@@ -1898,7 +1948,11 @@ function OrderingApp({
 
   // ---- Discipline de la file (§06) ---------------------------------------
   const readyOrder = orders.find((o) => o.status === 'READY')
-  const blocked = Boolean(readyOrder)
+  // Retour terrain : quand le bar ferme, le client doit garder l'accès à
+  // l'application — c'est par là qu'on lui diffuse « on ferme dans 30 minutes,
+  // dirigez-vous vers le vestiaire ». Seul l'ajout au panier est coupé.
+  const ordersClosed = Boolean(event) && (!event.is_active || !event.accept_orders)
+  const blocked = Boolean(readyOrder) || ordersClosed
   const activeOrders = orders.filter((o) => ['RECEIVED', 'IN_PREP', 'READY'].includes(o.status))
   const pendingPayment = orders.filter((o) => ['PICKED_UP', 'UNPAID'].includes(o.status))
 
@@ -2106,6 +2160,14 @@ function OrderingApp({
   const unread = messages.filter((m) => m.kind !== 'status' && !m.read_at)
   const urgentUnread = unread.filter((m) => m.urgent)
 
+  // Retour terrain : « une fois la commande retirée, la notification doit
+  // disparaître, pour éviter la surcharge de la messagerie au fil de la
+  // soirée ». On masque le suivi des commandes abouties — les annonces et les
+  // messages personnels, eux, restent.
+  const doneOrders = new Set(
+    orders.filter((o) => o.status === 'PICKED_UP' || o.status === 'PAID').map((o) => o.id)
+  )
+
   return (
     <div style={{ ...S.page, paddingBottom: 110 }}>
       <Keyframes />
@@ -2273,8 +2335,18 @@ function OrderingApp({
           />
         </div>
 
+        {/* Commandes fermées : la carte reste consultable, le panier est coupé. */}
+        {ordersClosed && (
+          <div style={{ marginBottom: 14 }}>
+            <Banner tone="warn">
+              <strong>{event?.service_message || t.ordersClosed}</strong>
+              <div style={{ fontSize: 12.5, marginTop: 4 }}>{t.closedStillHere}</div>
+            </Banner>
+          </div>
+        )}
+
         {/* Message de blocage de file */}
-        {blocked && (
+        {readyOrder && !ordersClosed && (
           <div style={{ marginBottom: 14 }}>
             <Banner tone="warn">
               <strong>{t.blockedStrong}</strong> {t.blockedRest}{' '}
@@ -2334,17 +2406,24 @@ function OrderingApp({
           <MessagesView
             lang={lang}
             messages={messages}
+            doneOrders={doneOrders}
             customer={customer}
             onOpenProfile={() => setProfileOpen(true)}
             onMarkRead={async (m) => {
               await supabase.from('messages').update({ read_at: new Date().toISOString() }).eq('id', m.id)
               loadMessages()
             }}
+            onOpenOrder={(orderId) => {
+              setFocusOrder(orderId)
+              setView('orders')
+            }}
             onBackToMenu={() => setView('menu')}
           />
         ) : view === 'orders' ? (
           <MyOrders
             orders={orders}
+            focusOrder={focusOrder}
+            onFocusDone={() => setFocusOrder(null)}
             event={event}
             venue={venue}
             customer={customer}
@@ -3030,7 +3109,6 @@ function PromoCodeCard({ lang, pass, gifts, promoCode, onRedeemCode, onClearCode
               {g.mode === 'product'
                 ? g.product_name || t.menuItem
                 : t.ofChoice(giftCatLabel(g.category, lang).toLowerCase())}
-              {g.max_value ? t.upTo(eur(g.max_value)) : ''}
             </span>
           </div>
         ))}
@@ -3668,9 +3746,22 @@ function CheckoutSheet({ open, lang, event, cart, pass, promoCode, subtotal, pre
  * Historique complet des messages (diffusions + messages individuels),
  * contrairement au bandeau qui ne montrait que les 3 derniers non lus.
  */
-function MessagesView({ lang, messages, customer, onMarkRead, onBackToMenu, onOpenProfile }) {
+function MessagesView({
+  lang,
+  messages,
+  customer,
+  onMarkRead,
+  onBackToMenu,
+  onOpenProfile,
+  onOpenOrder,
+  doneOrders,
+}) {
   const t = useT(lang)
-  const shown = messages.filter((m) => m.kind !== 'status' || m.order_id)
+  const shown = messages.filter((m) => {
+    if (m.kind !== 'status') return true
+    if (!m.order_id) return false
+    return !doneOrders?.has(m.order_id)
+  })
 
   if (!shown.length)
     return (
@@ -3698,14 +3789,25 @@ function MessagesView({ lang, messages, customer, onMarkRead, onBackToMenu, onOp
             : m.kind === 'individual'
               ? { fg: C.indigo, bg: 'rgba(106,95,214,.10)', label: t.msgForYou }
               : { fg: C.terracotta, bg: C.paper, label: t.announcement }
+        // Un message qui parle d'une commande mène à cette commande : c'est la
+        // boucle centrale de l'expérience client, et elle était rompue — le
+        // temps d'attente vit dans « Mes commandes », pas dans le message.
+        const linked = Boolean(m.order_id && onOpenOrder)
         return (
           <div
             key={m.id}
+            onClick={linked ? () => onOpenOrder(m.order_id) : undefined}
+            role={linked ? 'button' : undefined}
+            tabIndex={linked ? 0 : undefined}
+            onKeyDown={
+              linked ? (e) => (e.key === 'Enter' || e.key === ' ') && onOpenOrder(m.order_id) : undefined
+            }
             style={{
               background: tone.bg,
               border: `1.5px solid ${urgent || m.kind !== 'broadcast' ? tone.fg : C.line}`,
               borderRadius: 14,
               padding: 14,
+              cursor: linked ? 'pointer' : 'default',
             }}
           >
             <div
@@ -3728,9 +3830,27 @@ function MessagesView({ lang, messages, customer, onMarkRead, onBackToMenu, onOp
               )}
             </div>
             <div style={{ fontSize: 14, lineHeight: 1.55 }}>{m.body}</div>
+            {linked && (
+              <div
+                style={{
+                  marginTop: 8,
+                  fontSize: 12,
+                  fontWeight: 600,
+                  color: tone.fg,
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: 5,
+                }}
+              >
+                {t.seeMyOrder} <span aria-hidden>›</span>
+              </div>
+            )}
             {m.customer_id === customer?.id && !m.read_at && (
               <button
-                onClick={() => onMarkRead(m)}
+                onClick={(e) => {
+                  e.stopPropagation()
+                  onMarkRead(m)
+                }}
                 style={{ background: 'none', border: 'none', color: C.dim, fontSize: 12, padding: '8px 0 0', cursor: 'pointer' }}
               >
                 {t.markRead}
@@ -3748,14 +3868,37 @@ function MessagesView({ lang, messages, customer, onMarkRead, onBackToMenu, onOp
   )
 }
 
-function MyOrders({ orders, event, venue, customer, lang, pushOn, onEnablePush, onReview, onBackToMenu }) {
+function MyOrders({
+  orders,
+  event,
+  venue,
+  customer,
+  lang,
+  pushOn,
+  onEnablePush,
+  onReview,
+  onBackToMenu,
+  focusOrder,
+  onFocusDone,
+}) {
   const t = useT(lang)
   const [now, setNow] = useState(Date.now())
+  const cardRefs = useRef({})
 
   useEffect(() => {
     const id = setInterval(() => setNow(Date.now()), 1000)
     return () => clearInterval(id)
   }, [])
+
+  // Arrivée depuis un message de suivi : on amène directement le bon ticket
+  // sous les yeux plutôt que de laisser chercher dans la liste.
+  useEffect(() => {
+    if (!focusOrder) return
+    const el = cardRefs.current[focusOrder]
+    if (el) glideIntoView(el, 16)
+    const id = setTimeout(() => onFocusDone?.(), 2200)
+    return () => clearTimeout(id)
+  }, [focusOrder, orders, onFocusDone])
 
   if (!orders.length)
     return (
@@ -3783,8 +3926,18 @@ function MyOrders({ orders, event, venue, customer, lang, pushOn, onEnablePush, 
       )}
 
       {orders.map((o) => (
-        <OrderCard
+        <div
           key={o.id}
+          ref={(el) => {
+            cardRefs.current[o.id] = el
+          }}
+          style={{
+            borderRadius: 20,
+            transition: 'box-shadow .4s',
+            boxShadow: focusOrder === o.id ? `0 0 0 3px ${C.terracotta}66` : 'none',
+          }}
+        >
+        <OrderCard
           order={o}
           event={event}
           venue={venue}
@@ -3793,6 +3946,7 @@ function MyOrders({ orders, event, venue, customer, lang, pushOn, onEnablePush, 
           now={now}
           onReview={() => onReview(o)}
         />
+        </div>
       ))}
 
       <button onClick={onBackToMenu} style={S.btnGhost}>
@@ -4352,14 +4506,10 @@ function StaffLogin() {
 
           {mode !== 'forgot' && (
             <Field label="Mot de passe">
-              <input
-                style={S.input}
-                type="password"
-                required
-                minLength={6}
-                autoComplete={mode === 'login' ? 'current-password' : 'new-password'}
+              <PasswordInput
                 value={password}
                 onChange={(e) => setPassword(e.target.value)}
+                autoComplete={mode === 'login' ? 'current-password' : 'new-password'}
               />
             </Field>
           )}
@@ -5182,8 +5332,16 @@ function BarTab({ event, venue, onEventChange, showToast }) {
   const [soldOutOpen, setSoldOutOpen] = useState(false)
   const [staffPush, setStaffPush] = useState(false)
   const [ack, setAck] = useState(() => new Set(LS.get(`noti:ack:${event.id}`, [])))
+  // Sonnerie choisie par l'établissement, mémorisée sur la tablette du bar :
+  // c'est un réglage de poste, pas une donnée de soirée.
+  const [ringtone, setRingtone] = useState(() => LS.get('noti:ringtone', DEFAULT_RINGTONE))
   const alarm = useRef(null)
-  if (!alarm.current) alarm.current = new Alarm()
+  if (!alarm.current) alarm.current = new Alarm(ringtone)
+
+  useEffect(() => {
+    LS.set('noti:ringtone', ringtone)
+    alarm.current?.setKind(ringtone)
+  }, [ringtone])
 
   useEffect(() => setPrep(event.default_prep_min ?? 1), [event.default_prep_min])
 
@@ -5249,7 +5407,7 @@ function BarTab({ event, venue, onEventChange, showToast }) {
     })
   }
 
-  async function move(order, status) {
+  async function move(order, status, opts = {}) {
     unlockAudio()
     const { error } = await supabase.from('orders').update({ status }).eq('id', order.id)
     if (error) return showToast(frError(error), 'error')
@@ -5265,6 +5423,36 @@ function BarTab({ event, venue, onEventChange, showToast }) {
         requireInteraction: true,
       })
     }
+
+    // Retour en arrière après un « Prête » cliqué trop vite : le client a déjà
+    // été prévenu et se déplace. On le rattrape plutôt que de le laisser
+    // attendre devant le bar.
+    if (opts.back && order.status === 'READY') {
+      notify({
+        eventId: event.id,
+        kind: 'status',
+        customerId: order.customer_id,
+        orderId: order.id,
+        title: 'Encore quelques instants',
+        body: `Commande ${order.pickup_code} : finalement encore en préparation, on vous reprévient dès que c’est prêt. Désolé pour l’aller-retour.`,
+      })
+    }
+
+    // Annulation : le client doit l'apprendre autrement qu'en trouvant son
+    // ticket barré. Message urgent, il est peut-être déjà en route.
+    if (status === 'CANCELLED') {
+      notify({
+        eventId: event.id,
+        kind: 'status',
+        customerId: order.customer_id,
+        orderId: order.id,
+        title: 'Commande annulée',
+        body: `Commande ${order.pickup_code} : elle a été annulée par le bar. Rien ne vous sera facturé — voyez avec l’équipe sur place.`,
+        urgent: true,
+      })
+    }
+
+    if (opts.back) showToast(`${order.pickup_code} revenue à « ${statusLabel(status, 'fr')} ».`, 'ok')
     load()
   }
 
@@ -5401,6 +5589,50 @@ function BarTab({ event, venue, onEventChange, showToast }) {
         </div>
       </div>
 
+      {/* Sonnerie d'alerte — un club et un bar à cocktails n'ont pas les mêmes
+          attentes. On écoute avant de choisir. */}
+      <div style={{ ...S.card, padding: 14, marginBottom: 14 }} className="no-print">
+        <div style={{ ...S.label, marginBottom: 8 }}>🔔 Sonnerie des nouvelles commandes</div>
+        <div style={{ display: 'grid', gap: 6 }}>
+          {RINGTONES.map((r) => {
+            const on = ringtone === r.k
+            return (
+              <button
+                key={r.k}
+                onClick={() => {
+                  unlockAudio()
+                  setRingtone(r.k)
+                  previewRingtone(r.k)
+                }}
+                style={{
+                  ...S.chip,
+                  width: '100%',
+                  minHeight: 46,
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: 10,
+                  textAlign: 'left',
+                  whiteSpace: 'normal',
+                  borderColor: on ? C.terracotta : C.lineHi,
+                  background: on ? 'rgba(185,106,76,.08)' : 'transparent',
+                  color: on ? C.terracotta : C.dim,
+                }}
+              >
+                <span style={{ fontSize: 15 }}>{on ? '●' : '○'}</span>
+                <span style={{ flex: 1 }}>
+                  <span style={{ fontWeight: 600, fontSize: 13 }}>{r.label}</span>
+                  <span style={{ display: 'block', fontSize: 11, color: C.faint }}>{r.hint}</span>
+                </span>
+                <span style={{ fontSize: 13 }}>▶</span>
+              </button>
+            )
+          })}
+        </div>
+        <div style={{ fontSize: 11, color: C.faint, marginTop: 8, lineHeight: 1.5 }}>
+          Un tap sélectionne et fait écouter. Le réglage reste sur cette tablette.
+        </div>
+      </div>
+
       <div style={{ display: 'flex', gap: 8, marginBottom: 14 }} className="no-print">
         <button onClick={() => setSoldOutOpen(true)} style={{ ...S.btnGhost, minHeight: 44, fontSize: 12 }}>
           Marquer un article épuisé
@@ -5427,10 +5659,13 @@ function BarTab({ event, venue, onEventChange, showToast }) {
 
       <div style={{ display: 'flex', gap: 12, overflowX: 'auto', paddingBottom: 8 }}>
         {[
-          { title: 'Reçues', list: received, color: C.indigo, action: 'En préparation', next: 'IN_PREP' },
-          { title: 'En préparation', list: inPrep, color: C.warn, action: 'Prête', next: 'READY' },
-          { title: 'Prêtes', list: ready, color: C.terracotta, action: 'Retirée', next: 'PICKED_UP' },
-          { title: 'Retirées', list: pickedUp, color: C.ok, action: 'Réglée', next: 'PAID' },
+          // `prev` : un tap de trop sur « Prête » notifiait le client, qui
+          // venait attendre devant le bar — exactement ce que l'outil est censé
+          // éviter. Mieux vaut pouvoir revenir en arrière et ne pas s'en servir.
+          { title: 'Reçues', list: received, color: C.indigo, action: 'En préparation', next: 'IN_PREP', prev: null },
+          { title: 'En préparation', list: inPrep, color: C.warn, action: 'Prête', next: 'READY', prev: 'RECEIVED' },
+          { title: 'Prêtes', list: ready, color: C.terracotta, action: 'Retirée', next: 'PICKED_UP', prev: 'IN_PREP' },
+          { title: 'Retirées', list: pickedUp, color: C.ok, action: 'Réglée', next: 'PAID', prev: 'READY' },
         ].map((col) => (
           <div key={col.title} style={{ minWidth: 268, flex: '1 0 268px' }}>
             <div
@@ -5576,6 +5811,25 @@ function BarTab({ event, venue, onEventChange, showToast }) {
                     >
                       {col.action}
                     </button>
+                    {col.prev && (
+                      <button
+                        onClick={() => move(o, col.prev, { back: true })}
+                        title={`Revenir à « ${statusLabel(col.prev, 'fr')} »`}
+                        style={{
+                          width: 44,
+                          minHeight: 44,
+                          borderRadius: 12,
+                          border: `1.5px solid ${C.lineHi}`,
+                          background: C.paper,
+                          color: C.dim,
+                          cursor: 'pointer',
+                          fontSize: 17,
+                          lineHeight: 1,
+                        }}
+                      >
+                        ↩
+                      </button>
+                    )}
                     <button
                       onClick={() => setNotesFor(o)}
                       title="Commenter / signaler cette commande"
@@ -5688,9 +5942,11 @@ function BarTab({ event, venue, onEventChange, showToast }) {
               </button>
               <button
                 onClick={async () => {
-                  await supabase.from('orders').update({ status: 'CANCELLED' }).eq('id', detail.id)
+                  if (!confirm(`Annuler la commande ${detail.pickup_code} ? Le client en sera prévenu.`)) return
+                  // Passe par move() pour que le client reçoive la notification
+                  // d'annulation — l'update direct ne prévenait personne.
+                  await move(detail, 'CANCELLED')
                   setDetail(null)
-                  load()
                 }}
                 style={{ ...S.btnGhost, borderColor: C.danger, color: C.danger }}
               >
@@ -6045,7 +6301,9 @@ function AffluenceCard({ pulse, slots }) {
   const pct = capacity > 0 ? Math.min(100, Math.round((headcount / capacity) * 100)) : null
   const last15 = Number(live?.arrivals_15min ?? 0)
   const last60 = Number(live?.arrivals_60min ?? 0)
-  const active = Number(live?.active_30min ?? 0)
+  // v_event_presence expose still_here (scan OU commande sur 30 min) ; on
+  // retombe sur active_30min si la migration 0026 n'est pas encore appliquée.
+  const active = Number(live?.still_here ?? live?.active_30min ?? 0)
 
   const tone = pct == null ? C.indigo : pct >= 90 ? C.danger : pct >= 70 ? C.warn : C.ok
   const toneLabel =
@@ -6213,7 +6471,7 @@ function OrgaTab({ event, venue, showToast, onEventChange }) {
         .select('*')
         .eq('event_id', event.id)
         .order('slot', { ascending: true }),
-      supabase.from('v_event_pulse').select('*').eq('event_id', event.id).maybeSingle(),
+      supabase.from('v_event_presence').select('*').eq('event_id', event.id).maybeSingle(),
     ])
     setLive(l.data || null)
     setBoard(b.data || [])
@@ -6368,10 +6626,13 @@ function OrgaTab({ event, venue, showToast, onEventChange }) {
     await shareOrDownload(blob, `noti-rapport-${event.id.slice(0, 8)}.pdf`, 'Rapport')
   }
 
-  const stat = (t, v, c) => (
+  const stat = (t, v, c, sub) => (
     <div key={t} style={{ ...S.card, flex: 1, minWidth: 92, padding: '13px 10px', textAlign: 'center' }}>
       <div style={{ ...S.money, fontSize: 21, fontWeight: 600, color: c }}>{v}</div>
       <div style={{ ...S.label, marginBottom: 0, marginTop: 4, fontSize: 9.5 }}>{t}</div>
+      {sub && (
+        <div style={{ fontSize: 9, color: C.faint, marginTop: 3, lineHeight: 1.3 }}>{sub}</div>
+      )}
     </div>
   )
 
@@ -6379,8 +6640,12 @@ function OrgaTab({ event, venue, showToast, onEventChange }) {
     <div>
       {/* Temps réel */}
       <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginBottom: 14 }}>
-        {stat('Scans QR', live?.present_count ?? 0, C.indigo)}
-        {stat('Présents', live?.headcount ?? 0, C.indigo)}
+        {/* « Présents » affichait le cumul des entrées et ne redescendait
+            jamais. Les deux chiffres sont maintenant nommés pour ce qu'ils
+            mesurent : total entré depuis l'ouverture, et encore actifs sur les
+            30 dernières minutes (scan ou commande). */}
+        {stat('Entrées', live?.headcount ?? 0, C.dim, 'Cumul depuis l’ouverture')}
+        {stat('Encore là', pulse?.still_here ?? pulse?.active_30min ?? 0, C.indigo, 'Scan ou commande, 30 min')}
         {stat('En prépa', live?.in_preparation ?? 0, C.navy)}
         {stat('À retirer', live?.awaiting_pickup ?? 0, C.terracotta)}
         {stat('Encaissé', eur(live?.revenue_paid ?? 0), C.ok)}
@@ -7422,6 +7687,7 @@ const EMPTY_PROMO = {
   value: 10,
   min_total: 0,
   max_uses: null,
+  uses_per_person: 1,
   active: true,
   credits_per_person: 6,
   food_tokens_per_person: 1,
@@ -7429,31 +7695,59 @@ const EMPTY_PROMO = {
 }
 
 /** Catégories offrables par un code cadeau, dans les mots de la carte. */
+// Trois cases, plus quatre : le type de boisson ne se choisit plus à la
+// création du code. On donne des crédits, et le barème s'applique au moment de
+// la commande — 1 crédit = 1 soft, 2 crédits = 1 conso alcoolisée.
 const GIFT_CATEGORIES = [
-  { k: 'alcohol', label: 'Boisson alcoolisée', emoji: '🍸' },
-  { k: 'soft', label: 'Soft', emoji: '🥤' },
-  { k: 'food', label: 'Plat', emoji: '🍽️' },
+  { k: 'drink', label: 'Boisson', emoji: '🥂' },
+  { k: 'food', label: 'Food', emoji: '🍽️' },
   { k: 'bottle', label: 'Bouteille', emoji: '🍾' },
 ]
 
+/** Ce que coûte une unité, en crédits — miroir de gift_credit_cost() côté base. */
+const CREDIT_COST = { alcohol: 2, soft: 1, food: 1, bottle: 1 }
+
 // Le staff lit ces libellés en français ; le client, dans sa langue (le
 // dictionnaire porte les mêmes catégories sous catAlcohol / catSoft / …).
-const GIFT_CAT_KEY = { alcohol: 'catAlcohol', soft: 'catSoft', food: 'catFood', bottle: 'catBottle' }
+const GIFT_CAT_KEY = { drink: 'catDrink', food: 'catFood', bottle: 'catBottle' }
 const giftCatLabel = (k, lang) =>
   (lang && lang !== 'fr' ? dict(lang)[GIFT_CAT_KEY[k]] : null) ||
   GIFT_CATEGORIES.find((c) => c.k === k)?.label ||
   k
 const giftCatEmoji = (k) => GIFT_CATEGORIES.find((c) => c.k === k)?.emoji || '🎁'
 
-/** Résumé en français d'une ligne de cadeau, tel que le staff et le client le lisent. */
+/**
+ * Résumé d'une ligne de cadeau côté STAFF. On y parle en crédits, et le
+ * plafond en euros y figure : c'est une information de marge, réservée au
+ * staff — le client, lui, ne voit jamais d'euros (cf. bloc 2 du retour).
+ */
 function giftLineLabel(item, productName) {
   const q = Number(item.quantity) || 1
   if (item.mode === 'product') {
     return `${q} × ${productName || 'article de la carte'}`
   }
   const cat = giftCatLabel(item.category)
-  const plafond = item.max_value ? ` jusqu’à ${eur(item.max_value)}` : ''
-  return `${q} ${cat.toLowerCase()}${q > 1 ? 's' : ''} au choix${plafond}`
+  const plafond = item.max_value ? ` · plafond ${eur(item.max_value)}` : ''
+  return `${q} crédit${q > 1 ? 's' : ''} ${cat.toLowerCase()}${plafond}`
+}
+
+/**
+ * Phrase de confirmation lue par le staff AVANT d'enregistrer un code.
+ * Retour terrain : « ces métriques doivent être affichées clairement au moment
+ * de la création, idéalement avec un message récapitulatif de confirmation ».
+ * Sans ça : incompréhensions, tickets, et sorties offertes non prévues.
+ */
+function giftRecap(f, nameOf) {
+  const items = Array.isArray(f.gift_items) ? f.gift_items : []
+  if (!items.length) return null
+
+  const qui = f.max_uses ? `${f.max_uses} personne${f.max_uses > 1 ? 's' : ''} maximum` : 'un nombre illimité de personnes'
+  const quoi = items.map((it) => giftLineLabel(it, nameOf?.(it.product_id))).join(', ')
+  const combien = Number(f.uses_per_person) > 1
+    ? `${f.uses_per_person} fois chacune`
+    : 'une fois chacune'
+
+  return `Ce code permet à ${qui} d’obtenir ${quoi}, ${combien}.`
 }
 
 // Barème inchangé : 1 alcool éligible = 2 crédits, 1 soft = 1 crédit. Le staff
@@ -7597,6 +7891,7 @@ function GiftFields({ f, set, venueId, showToast }) {
   }, [venueId])
 
   const nameOf = (id) => products.find((p) => p.id === id)?.name
+  const recap = giftRecap(f, nameOf)
   const update = (i, patch) => set('gift_items', items.map((it, k) => (k === i ? { ...it, ...patch } : it)))
   const remove = (i) => set('gift_items', items.filter((_, k) => k !== i))
   const add = (mode) =>
@@ -7604,25 +7899,25 @@ function GiftFields({ f, set, venueId, showToast }) {
       ...items,
       mode === 'product'
         ? { mode: 'product', product_id: products[0]?.id || '', quantity: 1 }
-        : { mode: 'category', category: 'alcohol', quantity: 1, max_value: 15 },
+        : { mode: 'category', category: 'drink', quantity: 2, max_value: 15 },
     ])
 
   return (
     <>
       <div style={{ marginBottom: 12 }}>
         <Banner tone="info">
-          Chaque personne qui saisit ce code reçoit des <strong>crédits</strong> — un crédit par
-          ligne ci-dessous, chacun donnant droit à un article de votre carte. À la commande, le
-          crédit est utilisé automatiquement, et l’équipe voit apparaître dans la fiche du client
-          <strong> l’heure exacte et l’article précis</strong> qu’il a pris.
+          Chaque personne qui saisit ce code reçoit des <strong>crédits</strong>. Le barème
+          s’applique tout seul à la commande : <strong>1 crédit = 1 soft</strong>,{' '}
+          <strong>2 crédits = 1 conso alcoolisée</strong>. L’équipe voit ensuite dans la fiche du
+          client <strong>l’heure exacte et l’article précis</strong> qu’il a pris.
         </Banner>
       </div>
 
-      <div style={{ ...S.label, marginBottom: 8 }}>À quoi donne droit chaque crédit</div>
+      <div style={{ ...S.label, marginBottom: 8 }}>Crédits offerts à chaque personne</div>
 
       {items.length === 0 && (
         <div style={{ fontSize: 12.5, color: C.faint, marginBottom: 10 }}>
-          Aucun crédit pour l’instant — ajoutez ce à quoi ils donnent droit ci-dessous.
+          Aucun crédit pour l’instant — ajoutez-en ci-dessous.
         </div>
       )}
 
@@ -7672,7 +7967,14 @@ function GiftFields({ f, set, venueId, showToast }) {
                 </div>
                 <div style={{ display: 'flex', gap: 10 }}>
                   <div style={{ flex: 1 }}>
-                    <Field label="Quantité">
+                    <Field
+                      label="Crédits"
+                      hint={
+                        it.category === 'drink'
+                          ? `= ${Math.floor((it.quantity ?? 1) / 2)} alcool ou ${it.quantity ?? 1} soft`
+                          : `= ${it.quantity ?? 1} article`
+                      }
+                    >
                       <input
                         style={S.input}
                         type="number"
@@ -7683,7 +7985,7 @@ function GiftFields({ f, set, venueId, showToast }) {
                     </Field>
                   </div>
                   <div style={{ flex: 1 }}>
-                    <Field label="Plafond (€)" hint="Vide = sans plafond">
+                    <Field label="Plafond (€)" hint="Interne — jamais montré au client">
                       <input
                         style={S.input}
                         type="number"
@@ -7699,7 +8001,8 @@ function GiftFields({ f, set, venueId, showToast }) {
                   </div>
                 </div>
                 <div style={{ fontSize: 11, color: C.faint, lineHeight: 1.5 }}>
-                  Au-delà du plafond, le client règle la différence au bar.
+                  Protection de marge : au-delà du plafond, le client règle la différence au bar.
+                  Il ne voit pas ce montant, il ne voit que ses crédits.
                 </div>
               </>
             ) : (
@@ -7748,19 +8051,45 @@ function GiftFields({ f, set, venueId, showToast }) {
         </button>
       </div>
 
-      <Field
-        label="Nombre de personnes"
-        hint="Combien de personnes peuvent activer ce code. Vide = illimité."
-      >
-        <input
-          style={S.input}
-          type="number"
-          min="1"
-          value={f.max_uses ?? ''}
-          onChange={(e) => set('max_uses', e.target.value === '' ? null : Number(e.target.value))}
-          placeholder="ex. 6 personnes"
-        />
-      </Field>
+      {/* Deux limites distinctes, et il faut les deux (retour terrain, 2.4) :
+          combien de personnes peuvent activer le code, et combien de fois
+          chacune. Sans la première, la 16ᵉ personne d'un code prévu pour 15
+          passerait quand même. */}
+      <div style={{ ...S.label, marginTop: 6, marginBottom: 8 }}>Limites du code</div>
+      <div style={{ display: 'flex', gap: 10 }}>
+        <div style={{ flex: 1 }}>
+          <Field label="Diffusion" hint="Personnes pouvant l’activer. Vide = illimité.">
+            <input
+              style={S.input}
+              type="number"
+              min="1"
+              value={f.max_uses ?? ''}
+              onChange={(e) => set('max_uses', e.target.value === '' ? null : Number(e.target.value))}
+              placeholder="ex. 15"
+            />
+          </Field>
+        </div>
+        <div style={{ flex: 1 }}>
+          <Field label="Utilisation" hint="Activations par personne.">
+            <input
+              style={S.input}
+              type="number"
+              min="1"
+              value={f.uses_per_person ?? 1}
+              onChange={(e) => set('uses_per_person', Math.max(1, Number(e.target.value) || 1))}
+            />
+          </Field>
+        </div>
+      </div>
+
+      {recap && (
+        <div style={{ marginBottom: 14 }}>
+          <Banner tone="warn">
+            <div style={{ ...S.label, marginBottom: 4, color: 'inherit' }}>Avant d’enregistrer</div>
+            <div style={{ fontSize: 13.5, lineHeight: 1.55 }}>{recap}</div>
+          </Banner>
+        </div>
+      )}
     </>
   )
 }
@@ -7795,6 +8124,7 @@ function PromoCodeSheet({ promo, event, venue, onClose, onSaved, showToast }) {
       value: Number(f.value) || 0,
       min_total: Number(f.min_total) || 0,
       max_uses: f.max_uses === '' || f.max_uses == null ? null : Number(f.max_uses),
+      uses_per_person: Math.max(1, Number(f.uses_per_person) || 1),
       active: !!f.active,
       credits_per_person: Number(f.credits_per_person) || 0,
       food_tokens_per_person: Number(f.food_tokens_per_person) || 0,
@@ -8573,6 +8903,11 @@ function ClientsTab({ event, showToast }) {
   const [ficheFor, setFicheFor] = useState(null)
   const [dmFor, setDmFor] = useState(null)
 
+  // Codes de retrait de la soirée, par client : au bar on a le ticket sous les
+  // yeux, pas le nom. Retour terrain : « pouvoir retrouver un client à partir
+  // de son seul numéro de ticket de retrait ».
+  const [codesByCustomer, setCodesByCustomer] = useState({})
+
   const load = useCallback(async () => {
     // Clients présents sur cette soirée (la RLS limite déjà à nos événements).
     const { data: att } = await supabase
@@ -8584,6 +8919,18 @@ function ClientsTab({ event, showToast }) {
       .filter((c) => c?.id)
     list.sort((a, b) => Number(b.total_spent || 0) - Number(a.total_spent || 0))
     setRows(list)
+
+    const { data: ords } = await supabase
+      .from('orders')
+      .select('customer_id, pickup_code')
+      .eq('event_id', event.id)
+    const map = {}
+    for (const o of ords || []) {
+      if (!o.customer_id || !o.pickup_code) continue
+      ;(map[o.customer_id] ||= []).push(String(o.pickup_code).toUpperCase())
+    }
+    setCodesByCustomer(map)
+
     setLoading(false)
   }, [event.id])
 
@@ -8593,12 +8940,15 @@ function ClientsTab({ event, showToast }) {
 
   if (loading) return <Spinner />
 
-  const filtered = rows.filter(
-    (r) =>
-      `${r.first_name || ''} ${r.last_name || ''} ${r.phone || ''}`
-        .toLowerCase()
-        .includes(q.toLowerCase()) && (!filter || (r.tags || []).includes(filter))
-  )
+  // Nom, prénom, téléphone — et code de retrait.
+  const needle = q.trim().toLowerCase()
+  const filtered = rows.filter((r) => {
+    if (filter && !(r.tags || []).includes(filter)) return false
+    if (!needle) return true
+    const identity = `${r.first_name || ''} ${r.last_name || ''} ${r.phone || ''}`.toLowerCase()
+    if (identity.includes(needle)) return true
+    return (codesByCustomer[r.id] || []).some((c) => c.toLowerCase().includes(needle))
+  })
 
   return (
     <div>
@@ -8619,7 +8969,7 @@ function ClientsTab({ event, showToast }) {
         style={{ ...S.input, marginBottom: 10 }}
         value={q}
         onChange={(e) => setQ(e.target.value)}
-        placeholder="Rechercher…"
+        placeholder="Nom, prénom, téléphone ou code de retrait…"
       />
 
       <div style={{ display: 'flex', gap: 6, marginBottom: 14, overflowX: 'auto' }}>

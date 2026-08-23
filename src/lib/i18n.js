@@ -56,6 +56,7 @@ export const T = {
 
     // Accueil
     ordersClosed: 'Les commandes sont fermées pour le moment.',
+    closedStillHere: 'La carte reste consultable, et l’équipe peut toujours vous écrire.',
     allMenuHere: 'Toute la carte se commande ici, depuis votre téléphone.',
     noQueueStrong: 'récupérer',
     noQueueBottles: 'bouteilles',
@@ -150,9 +151,8 @@ export const T = {
     nCredits: (n) => `${n} crédit${s(n)}`,
     menuItem: 'article de la carte',
     ofChoice: (cat) => `${cat} au choix`,
-    upTo: (v) => ` jusqu’à ${v}`,
     creditAuto:
-      'Un crédit est utilisé automatiquement quand vous ajoutez l’article au panier. Au-delà du plafond, vous réglez la différence au bar.',
+      'Vos crédits se déduisent tout seuls quand vous ajoutez un article au panier. 1 crédit = 1 soft, 2 crédits = 1 conso alcoolisée.',
     promoPlaceholder: 'Réduction, crédit ou forfait',
     promoCta: '🎟️ Un code promo ou un forfait de groupe ? Activez-le ici',
     creditsAdded: 'Crédits ajoutés — retrouvez-les en haut de la carte !',
@@ -173,8 +173,7 @@ export const T = {
     orNSofts: (n) => `, ou ${n} soft${s(n)}`,
     catFood: 'Plat',
     catBottle: 'Bouteille',
-    catAlcohol: 'Boisson alcoolisée',
-    catSoft: 'Soft',
+    catDrink: 'Boisson',
 
     // Espace client
     logout: 'Se déconnecter de cet appareil',
@@ -210,6 +209,7 @@ export const T = {
     noMessagesSub: 'Les annonces de la soirée et les messages qui vous sont adressés apparaîtront ici.',
     msgForYou: 'Message pour vous',
     msgOrder: 'Suivi de commande',
+    seeMyOrder: 'Voir ma commande',
     msgUrgent: 'Message urgent',
     newUrgent: (n) => `${n} message${s(n)} urgent${s(n)}`,
     announcement: 'Annonce de la soirée',
@@ -307,6 +307,7 @@ export const T = {
     payTitle: 'Payment at the bar',
     paySub: 'No online payment. You pay at the counter when you pick up your order.',
     ordersClosed: 'Orders are closed for now.',
+    closedStillHere: 'The menu stays browsable, and the team can still write to you.',
     allMenuHere: 'The whole menu is ordered here, from your phone.',
     noQueueStrong: 'pick up',
     noQueueBottles: 'bottles',
@@ -394,9 +395,8 @@ export const T = {
     nCredits: (n) => `${n} credit${s(n)}`,
     menuItem: 'item from the menu',
     ofChoice: (cat) => `${cat} of your choice`,
-    upTo: (v) => ` up to ${v}`,
     creditAuto:
-      'A credit is used automatically when you add the item to your cart. Above the cap, you pay the difference at the bar.',
+      'Your credits come off on their own when you add an item to your cart. 1 credit = 1 soft drink, 2 credits = 1 alcoholic drink.',
     promoPlaceholder: 'Discount, credit or group pass',
     promoCta: '🎟️ Got a promo code or a group pass? Activate it here',
     creditsAdded: 'Credits added — find them at the top of the menu!',
@@ -417,8 +417,7 @@ export const T = {
     orNSofts: (n) => `, or ${n} soft drink${s(n)}`,
     catFood: 'Food',
     catBottle: 'Bottle',
-    catAlcohol: 'Alcoholic drink',
-    catSoft: 'Soft drink',
+    catDrink: 'Drink',
 
     logout: 'Sign out of this device',
     logoutHint:
@@ -450,6 +449,7 @@ export const T = {
     noMessagesSub: 'Announcements for the night and messages addressed to you will appear here.',
     msgForYou: 'Message for you',
     msgOrder: 'Order update',
+    seeMyOrder: 'View my order',
     msgUrgent: 'Urgent message',
     newUrgent: (n) => `${n} urgent message${s(n)}`,
     announcement: 'Announcement',
@@ -544,6 +544,7 @@ export const T = {
     payTitle: 'Pago en la barra',
     paySub: 'Sin pago en línea. Pagas en el mostrador al recoger tu pedido.',
     ordersClosed: 'Los pedidos están cerrados por ahora.',
+    closedStillHere: 'La carta sigue disponible y el equipo aún puede escribirte.',
     allMenuHere: 'Toda la carta se pide aquí, desde tu móvil.',
     noQueueStrong: 'recoger',
     noQueueBottles: 'botellas',
@@ -631,9 +632,8 @@ export const T = {
     nCredits: (n) => `${n} crédito${s(n)}`,
     menuItem: 'artículo de la carta',
     ofChoice: (cat) => `${cat} a elegir`,
-    upTo: (v) => ` hasta ${v}`,
     creditAuto:
-      'Se usa un crédito automáticamente al añadir el artículo al carrito. Por encima del límite, pagas la diferencia en la barra.',
+      'Tus créditos se descuentan solos al añadir un artículo al carrito. 1 crédito = 1 refresco, 2 créditos = 1 bebida alcohólica.',
     promoPlaceholder: 'Descuento, crédito o bono',
     promoCta: '🎟️ ¿Tienes un código o un bono de grupo? Actívalo aquí',
     creditsAdded: '¡Créditos añadidos — los verás arriba de la carta!',
@@ -654,8 +654,7 @@ export const T = {
     orNSofts: (n) => `, o ${n} refresco${s(n)}`,
     catFood: 'Comida',
     catBottle: 'Botella',
-    catAlcohol: 'Bebida alcohólica',
-    catSoft: 'Refresco',
+    catDrink: 'Bebida',
 
     logout: 'Cerrar sesión en este dispositivo',
     logoutHint:
@@ -687,6 +686,7 @@ export const T = {
     noMessagesSub: 'Los anuncios de la noche y los mensajes dirigidos a ti aparecerán aquí.',
     msgForYou: 'Mensaje para ti',
     msgOrder: 'Seguimiento del pedido',
+    seeMyOrder: 'Ver mi pedido',
     msgUrgent: 'Mensaje urgente',
     newUrgent: (n) => `${n} mensaje${s(n)} urgente${s(n)}`,
     announcement: 'Anuncio de la noche',

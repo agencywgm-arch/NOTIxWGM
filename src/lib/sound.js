@@ -55,13 +55,81 @@ export function tick() {
 }
 
 /**
- * Alarme comptoir : boucle sirène tant que stop() n'est pas appelé.
- * Volontairement pénible — c'est le but : personne ne rate une commande.
+ * Sonneries d'alerte comptoir.
+ *
+ * Retour terrain : « la sonnerie actuelle est très agressive. C'est efficace
+ * dans le bruit, mais selon la typologie d'établissement les attentes
+ * diffèrent. » L'ancienne sonnerie reste disponible sous le nom « sirène » —
+ * c'est encore le bon choix dans un club — mais elle n'est plus imposée.
+ *
+ * Chaque profil décrit une salve : les notes, l'écart entre deux salves, et le
+ * motif de vibration. Rien à télécharger, tout est généré à la volée.
+ */
+export const RINGTONES = [
+  {
+    k: 'siren',
+    label: 'Sirène',
+    hint: 'Perce le bruit. Pour un club ou un bar bondé.',
+    every: 1400,
+    gain: 0.32,
+    vibrate: [200, 100, 200, 100, 400],
+    notes: [
+      [1046, 0, 0.16, 'square'],
+      [784, 0.18, 0.16, 'square'],
+      [1046, 0.36, 0.16, 'square'],
+      [784, 0.54, 0.22, 'square'],
+    ],
+  },
+  {
+    k: 'bell',
+    label: 'Cloche',
+    hint: 'Nette sans être stridente. Pour un bar à cocktails.',
+    every: 2000,
+    gain: 0.26,
+    vibrate: [180, 120, 180],
+    notes: [
+      [1318.51, 0, 0.32, 'sine'],
+      [1760, 0.14, 0.42, 'sine'],
+    ],
+  },
+  {
+    k: 'soft',
+    label: 'Discrète',
+    hint: 'Deux notes basses. Pour une salle calme ou un service en terrasse.',
+    every: 2600,
+    gain: 0.18,
+    vibrate: [140],
+    notes: [
+      [587.33, 0, 0.3, 'triangle'],
+      [880, 0.2, 0.36, 'triangle'],
+    ],
+  },
+]
+
+export const DEFAULT_RINGTONE = 'siren'
+
+const ringtoneOf = (k) => RINGTONES.find((r) => r.k === k) || RINGTONES[0]
+
+/** Joue une salve une seule fois — sert à l'écoute avant de choisir. */
+export function previewRingtone(k) {
+  const r = ringtoneOf(k)
+  for (const [freq, at, dur, type] of r.notes) beep(freq, at, dur, r.gain, type)
+}
+
+/**
+ * Alarme comptoir : boucle tant que stop() n'est pas appelé.
+ * Volontairement insistante — c'est le but : personne ne rate une commande.
  */
 export class Alarm {
-  constructor() {
+  constructor(kind = DEFAULT_RINGTONE) {
     this.timer = null
     this.running = false
+    this.kind = kind
+  }
+
+  /** Changer de sonnerie en cours de service prend effet à la salve suivante. */
+  setKind(kind) {
+    this.kind = kind
   }
 
   start() {
@@ -69,21 +137,21 @@ export class Alarm {
     this.running = true
     const burst = () => {
       if (!this.running) return
-      beep(1046, 0, 0.16, 0.32, 'square')
-      beep(784, 0.18, 0.16, 0.32, 'square')
-      beep(1046, 0.36, 0.16, 0.32, 'square')
-      beep(784, 0.54, 0.22, 0.32, 'square')
+      const r = ringtoneOf(this.kind)
+      for (const [freq, at, dur, type] of r.notes) beep(freq, at, dur, r.gain, type)
       try {
-        navigator.vibrate?.([200, 100, 200, 100, 400])
+        navigator.vibrate?.(r.vibrate)
       } catch (_) {}
+      // L'écart dépend du profil : on replanifie à chaque salve plutôt que de
+      // figer un intervalle au démarrage.
+      if (this.running) this.timer = setTimeout(burst, r.every)
     }
     burst()
-    this.timer = setInterval(burst, 1400)
   }
 
   stop() {
     this.running = false
-    if (this.timer) clearInterval(this.timer)
+    if (this.timer) clearTimeout(this.timer)
     this.timer = null
     try {
       navigator.vibrate?.(0)
