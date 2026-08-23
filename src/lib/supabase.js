@@ -31,6 +31,46 @@ export function scanUrl(scanPointId) {
   return `${origin}${BASE_PATH}s/${scanPointId}`.replace(/([^:]\/)\/+/g, '$1')
 }
 
+/**
+ * Clé stable d'une erreur métier, indépendante de la langue : le parcours
+ * client la traduit via son dictionnaire (voir lib/i18n.js), l'espace staff
+ * garde frError() ci-dessous.
+ */
+const ERROR_KEYS = [
+  'pickup_pending',
+  'orders_closed',
+  'empty_cart',
+  'product_unavailable',
+  'variant_required',
+  'not_a_customer',
+  'not_authenticated',
+  'scan_point_orphan',
+  'missing_profile',
+  'missing_phone',
+  'phone_already_used',
+  'missing_postal_code',
+  'invalid_birthdate',
+  'invalid_email',
+  'code_exhausted',
+  'invalid_pass_code',
+  'conversion_closed',
+  'no_food_token',
+  'no_pass',
+  'unknown_order',
+  'forbidden',
+]
+
+export function errorKey(err) {
+  const m = (err?.message || String(err || '')).toLowerCase()
+  // « forbidden » est testé en dernier : plusieurs messages plus précis le
+  // contiennent, et on préfère toujours le plus parlant pour le client.
+  const hit = ERROR_KEYS.find((k) => m.includes(k))
+  if (hit === 'not_authenticated') return 'not_a_customer'
+  if (hit) return hit
+  if (m.includes('failed to fetch') || m.includes('network')) return 'network'
+  return null
+}
+
 /** Messages d'erreur Supabase traduits. */
 export function frError(err) {
   const raw = err?.message || String(err || '')
@@ -55,7 +95,7 @@ export function frError(err) {
   if (m.includes('invalid_birthdate')) return 'Date de naissance invalide.'
   if (m.includes('invalid_email')) return 'Adresse e-mail invalide.'
   if (m.includes('code_exhausted'))
-    return 'Ce forfait est complet : toutes les places du groupe ont été activées.'
+    return 'Ce code est épuisé : toutes ses utilisations ont déjà été activées.'
   if (m.includes('invalid_pass_code'))
     return 'Code invalide, expiré ou déjà entièrement utilisé.'
   if (m.includes('conversion_closed'))
