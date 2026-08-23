@@ -143,15 +143,59 @@ function glide(read, write, to) {
  * d'historique, le navigateur remontait au site visité avant. Insupportable en
  * pleine soirée : on perdait son panier.
  *
- * Chaque couche qui s'ouvre (feuille modale, onglet secondaire) pose donc une
- * entrée d'historique. « Précédent » la retire et referme la couche ; on ne
- * quitte le site qu'une fois revenu à l'écran d'explication.
+ * MÉCANIQUE. Les couches ouvertes (feuille modale, onglet secondaire) sont
+ * empilées ici, et UNE SEULE entrée d'historique est posée tant que la pile
+ * n'est pas vide. « Précédent » retire cette entrée, ferme la couche du
+ * dessus, et une nouvelle entrée est reposée s'il en reste dessous.
  *
- * Si la couche est fermée autrement (croix, tap derrière, validation), on
- * retire nous-mêmes l'entrée posée pour ne pas laisser d'historique fantôme —
- * d'où la comparaison du marqueur avant `history.back()`.
+ * Pourquoi une seule entrée, et pas une par couche : avec une entrée par
+ * couche, l'enchaînement « Panier → Continuer → Commande » cassait. Les deux
+ * feuilles changent d'état dans le même clic ; la fermeture du panier appelait
+ * history.back(), dont le popstate est différé, et il arrivait APRÈS que
+ * l'écran de commande avait posé son écouteur — qui le prenait pour un
+ * « précédent » de l'utilisateur et refermait l'écran aussitôt. Résultat : on
+ * retombait sur la carte, impossible de commander. Ici, fermer une couche et
+ * en ouvrir une autre dans le même rendu ne touche pas du tout à l'historique.
+ *
+ * La synchronisation est différée d'une micro-tâche pour cette raison : les
+ * démontages et montages d'un même rendu sont ainsi comptés ensemble.
  */
-let backGuardSeq = 0
+const backLayers = []
+let backArmed = false // une entrée d'historique est posée
+let backSelfPop = false // le prochain popstate vient de nous, pas de l'utilisateur
+let backScheduled = false
+let backListening = false
+
+function backSync() {
+  if (backScheduled || typeof window === 'undefined') return
+  backScheduled = true
+  queueMicrotask(() => {
+    backScheduled = false
+    if (backLayers.length > 0 && !backArmed) {
+      backArmed = true
+      window.history.pushState({ notiLayer: true }, '')
+    } else if (backLayers.length === 0 && backArmed) {
+      // Plus rien d'ouvert : on retire l'entrée qu'on avait posée, sinon elle
+      // resterait dans l'historique et le premier « précédent » ne ferait rien.
+      backArmed = false
+      backSelfPop = true
+      window.history.back()
+    }
+  })
+}
+
+function backOnPop() {
+  if (backSelfPop) {
+    backSelfPop = false
+    return
+  }
+  if (!backArmed) return
+  backArmed = false
+  const top = backLayers[backLayers.length - 1]
+  // La fermeture démonte la couche ; c'est son nettoyage qui rappellera
+  // backSync(), lequel reposera une entrée s'il reste des couches dessous.
+  if (top) top()
+}
 
 function useBackGuard(active, onBack) {
   const cb = useRef(onBack)
@@ -159,13 +203,17 @@ function useBackGuard(active, onBack) {
 
   useEffect(() => {
     if (!active || typeof window === 'undefined') return
-    const mark = ++backGuardSeq
-    window.history.pushState({ notiBack: mark }, '')
-    const onPop = () => cb.current?.()
-    window.addEventListener('popstate', onPop)
+    if (!backListening) {
+      backListening = true
+      window.addEventListener('popstate', backOnPop)
+    }
+    const layer = () => cb.current?.()
+    backLayers.push(layer)
+    backSync()
     return () => {
-      window.removeEventListener('popstate', onPop)
-      if (window.history.state?.notiBack === mark) window.history.back()
+      const i = backLayers.lastIndexOf(layer)
+      if (i >= 0) backLayers.splice(i, 1)
+      backSync()
     }
   }, [active])
 }
