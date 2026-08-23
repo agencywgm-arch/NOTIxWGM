@@ -6090,6 +6090,10 @@ function CaisseTab({ event, venue, showToast }) {
 
   const selectedOrders = orders.filter((o) => selected.includes(o.id))
   const selectedTotal = selectedOrders.reduce((s, o) => s + Number(o.total || 0), 0)
+  // Consos déjà payées par un crédit : elles ne sont PAS à encaisser, mais le
+  // bar doit pouvoir rapprocher sa caisse de ce qui est sorti du stock.
+  const selectedGift = selectedOrders.reduce((s, o) => s + Number(o.gift_total || 0), 0)
+  const selectedGross = selectedOrders.reduce((s, o) => s + Number(o.subtotal || 0), 0)
 
   async function markPaid(method) {
     const { error } = await supabase
@@ -6269,6 +6273,49 @@ function CaisseTab({ event, venue, showToast }) {
             aucun paiement — indiquez simplement le moyen utilisé.
           </Banner>
         </div>
+
+        {/* Rapprochement : ce qui est sorti du bar n'est pas ce qui rentre en
+            caisse dès qu'un crédit a été consommé. Les deux chiffres côte à
+            côte évitent d'avoir à le recalculer en fin de soirée. */}
+        {selectedGift > 0 && (
+          <div style={{ ...S.card, padding: 14, marginBottom: 16 }}>
+            <div style={{ ...S.label, marginBottom: 10 }}>Rapprochement</div>
+            {[
+              ['Valeur carte des articles', eur(selectedGross), C.dim],
+              ['Déjà payé par des crédits', `− ${eur(selectedGift)}`, C.goldDark],
+              ['Reste à encaisser', eur(selectedTotal), C.terracotta],
+            ].map(([label, value, color], i, arr) => (
+              <div
+                key={label}
+                style={{
+                  display: 'flex',
+                  justifyContent: 'space-between',
+                  alignItems: 'baseline',
+                  padding: '6px 0',
+                  borderTop: i === arr.length - 1 ? `1px solid ${C.lineHi}` : 'none',
+                  marginTop: i === arr.length - 1 ? 4 : 0,
+                  paddingTop: i === arr.length - 1 ? 10 : 6,
+                }}
+              >
+                <span style={{ fontSize: 13, color: C.dim }}>{label}</span>
+                <span
+                  style={{
+                    ...S.money,
+                    fontWeight: i === arr.length - 1 ? 700 : 500,
+                    fontSize: i === arr.length - 1 ? 16 : 13.5,
+                    color,
+                  }}
+                >
+                  {value}
+                </span>
+              </div>
+            ))}
+            <div style={{ fontSize: 11, color: C.faint, marginTop: 8, lineHeight: 1.5 }}>
+              Les consos réglées en crédits sont prépayées : rien à encaisser dessus, mais elles
+              sont bien sorties du stock.
+            </div>
+          </div>
+        )}
         <div style={{ display: 'grid', gap: 8 }}>
           {[
             ['especes', 'Espèces'],
