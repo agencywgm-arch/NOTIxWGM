@@ -33,13 +33,10 @@ export const T = {
     total: 'Total',
     send: 'Envoyer la commande',
     sending: 'Envoi…',
-    payAtBar: 'À régler au bar',
     soldOut: 'Épuisé',
     note: 'Note pour le bar',
     promo: 'Code promo',
     pickupCode: 'Code de retrait',
-    ready: 'Prête à retirer',
-    newOrder: 'Nouvelle commande',
     save: 'Enregistrer',
     sendShort: 'Envoyer',
     add: 'Ajouter',
@@ -58,9 +55,6 @@ export const T = {
     paySub: 'Aucun paiement en ligne. Vous réglez au comptoir en retirant votre commande.',
 
     // Accueil
-    pointBar: 'Point bar',
-    pointTable: 'Table',
-    pointEntrance: 'Entrée',
     ordersClosed: 'Les commandes sont fermées pour le moment.',
     allMenuHere: 'Toute la carte se commande ici, depuis votre téléphone.',
     noQueueStrong: 'récupérer',
@@ -70,7 +64,7 @@ export const T = {
     step1t: 'Vous commandez ici',
     step1s: 'Toute la carte, sans faire la queue',
     step2t: 'Le bar prépare',
-    step2s: 'Vous suivez en direct, vous restez où vous êtes',
+    step2s: 'Vous êtes prévenu·e dès que c’est prêt — restez où vous êtes',
     step3t: 'Vous retirez au bar',
     step3s: 'Avec votre code, sans attendre',
     step4t: 'Vous réglez sur place',
@@ -95,6 +89,7 @@ export const T = {
     errPostal: 'Code postal obligatoire.',
     errBirth: 'Date de naissance obligatoire.',
     errEmail: 'Adresse e-mail invalide.',
+    errBirthInvalid: 'Date de naissance invalide — vérifiez le jour, le mois et l’année.',
 
     // Reconnaissance
     gladToSeeYou: 'Ravi de vous revoir',
@@ -106,6 +101,8 @@ export const T = {
       'Une commande d’une soirée précédente est restée impayée. Merci de régulariser auprès du bar — l’équipe vous accompagnera.',
 
     // Navigation
+    backHome: 'Retour à l’accueil',
+    back: 'Retour',
     tabMenu: 'La carte',
     tabOrders: 'Mes commandes',
     tabMessages: 'Messages',
@@ -141,6 +138,13 @@ export const T = {
     chooseFirst: (name) => `Choisissez : ${name}`,
 
     // Crédits, forfaits, codes
+    creditsIntroTitle: 'Vos crédits sont prêts',
+    creditsIntroYouHave: (n) => `Vous avez ${n} crédit${s(n)}`,
+    creditsIntroSoft: '1 crédit = 1 soft',
+    creditsIntroAlcohol: '2 crédits = 1 conso alcoolisée',
+    creditsIntroHow:
+      'Ils se déduisent tout seuls quand vous ajoutez un article au panier. Rien à faire de plus.',
+    creditsIntroCta: 'Voir la carte',
     myCredits: 'Mes crédits',
     nAvailable: (n) => `${n} disponible${s(n)}`,
     nCredits: (n) => `${n} crédit${s(n)}`,
@@ -175,6 +179,11 @@ export const T = {
     // Espace client
     clientSpace: 'Espace client',
     yourInfo: 'Vos informations',
+    myNights: (n) => `${n} soirée${s(n)} avec nous`,
+    firstNight: 'Première soirée avec nous',
+    myOrdersHere: 'Vos commandes de ce soir',
+    noOrdersHere: 'Aucune commande ce soir pour l’instant.',
+    creditsNone: 'Aucun crédit en cours',
 
     // Panier
     emptyCart: 'Panier vide',
@@ -195,6 +204,9 @@ export const T = {
     noMessages: 'Aucun message pour l’instant',
     noMessagesSub: 'Les annonces de la soirée et les messages qui vous sont adressés apparaîtront ici.',
     msgForYou: 'Message pour vous',
+    msgOrder: 'Suivi de commande',
+    msgUrgent: 'Message urgent',
+    newUrgent: (n) => `${n} message${s(n)} urgent${s(n)}`,
     announcement: 'Annonce de la soirée',
     markRead: 'Marquer comme lu',
 
@@ -270,13 +282,10 @@ export const T = {
     total: 'Total',
     send: 'Send order',
     sending: 'Sending…',
-    payAtBar: 'Pay at the bar',
     soldOut: 'Sold out',
     note: 'Note for the bar',
     promo: 'Promo code',
     pickupCode: 'Pickup code',
-    ready: 'Ready for pickup',
-    newOrder: 'New order',
     save: 'Save',
     sendShort: 'Send',
     add: 'Add',
@@ -292,10 +301,6 @@ export const T = {
 
     payTitle: 'Payment at the bar',
     paySub: 'No online payment. You pay at the counter when you pick up your order.',
-
-    pointBar: 'Bar point',
-    pointTable: 'Table',
-    pointEntrance: 'Entrance',
     ordersClosed: 'Orders are closed for now.',
     allMenuHere: 'The whole menu is ordered here, from your phone.',
     noQueueStrong: 'pick up',
@@ -305,7 +310,7 @@ export const T = {
     step1t: 'You order here',
     step1s: 'The whole menu, no queueing',
     step2t: 'The bar prepares it',
-    step2s: 'You follow it live, you stay where you are',
+    step2s: 'You’re notified the moment it’s ready — stay where you are',
     step3t: 'You collect at the bar',
     step3s: 'With your code, no waiting',
     step4t: 'You pay on the spot',
@@ -329,6 +334,7 @@ export const T = {
     errPostal: 'Postcode required.',
     errBirth: 'Date of birth required.',
     errEmail: 'Invalid email address.',
+    errBirthInvalid: 'Invalid date of birth — check the day, month and year.',
 
     gladToSeeYou: 'Good to see you again',
     backAgain: 'Welcome back',
@@ -338,6 +344,8 @@ export const T = {
     unpaidPast:
       'An order from a previous night was left unpaid. Please settle it with the bar — the team will help you.',
 
+    backHome: 'Back to home',
+    back: 'Back',
     tabMenu: 'Menu',
     tabOrders: 'My orders',
     tabMessages: 'Messages',
@@ -369,6 +377,13 @@ export const T = {
     included: 'included',
     chooseFirst: (name) => `Choose: ${name}`,
 
+    creditsIntroTitle: 'Your credits are ready',
+    creditsIntroYouHave: (n) => `You have ${n} credit${s(n)}`,
+    creditsIntroSoft: '1 credit = 1 soft drink',
+    creditsIntroAlcohol: '2 credits = 1 alcoholic drink',
+    creditsIntroHow:
+      'They come off on their own when you add an item to your cart. Nothing else to do.',
+    creditsIntroCta: 'See the menu',
     myCredits: 'My credits',
     nAvailable: (n) => `${n} available`,
     nCredits: (n) => `${n} credit${s(n)}`,
@@ -402,6 +417,11 @@ export const T = {
 
     clientSpace: 'My account',
     yourInfo: 'Your details',
+    myNights: (n) => `${n} night${s(n)} with us`,
+    firstNight: 'First night with us',
+    myOrdersHere: 'Your orders tonight',
+    noOrdersHere: 'No orders tonight yet.',
+    creditsNone: 'No credits at the moment',
 
     emptyCart: 'Empty cart',
 
@@ -419,6 +439,9 @@ export const T = {
     noMessages: 'No messages yet',
     noMessagesSub: 'Announcements for the night and messages addressed to you will appear here.',
     msgForYou: 'Message for you',
+    msgOrder: 'Order update',
+    msgUrgent: 'Urgent message',
+    newUrgent: (n) => `${n} urgent message${s(n)}`,
     announcement: 'Announcement',
     markRead: 'Mark as read',
 
@@ -491,13 +514,10 @@ export const T = {
     total: 'Total',
     send: 'Enviar pedido',
     sending: 'Enviando…',
-    payAtBar: 'Pagar en la barra',
     soldOut: 'Agotado',
     note: 'Nota para la barra',
     promo: 'Código promocional',
     pickupCode: 'Código de recogida',
-    ready: 'Listo para recoger',
-    newOrder: 'Nuevo pedido',
     save: 'Guardar',
     sendShort: 'Enviar',
     add: 'Añadir',
@@ -513,10 +533,6 @@ export const T = {
 
     payTitle: 'Pago en la barra',
     paySub: 'Sin pago en línea. Pagas en el mostrador al recoger tu pedido.',
-
-    pointBar: 'Punto barra',
-    pointTable: 'Mesa',
-    pointEntrance: 'Entrada',
     ordersClosed: 'Los pedidos están cerrados por ahora.',
     allMenuHere: 'Toda la carta se pide aquí, desde tu móvil.',
     noQueueStrong: 'recoger',
@@ -526,7 +542,7 @@ export const T = {
     step1t: 'Pides aquí',
     step1s: 'Toda la carta, sin hacer cola',
     step2t: 'La barra lo prepara',
-    step2s: 'Lo sigues en directo, sin moverte',
+    step2s: 'Te avisamos en cuanto esté listo — quédate donde estás',
     step3t: 'Recoges en la barra',
     step3s: 'Con tu código, sin esperar',
     step4t: 'Pagas allí mismo',
@@ -550,6 +566,7 @@ export const T = {
     errPostal: 'Código postal obligatorio.',
     errBirth: 'Fecha de nacimiento obligatoria.',
     errEmail: 'Correo electrónico no válido.',
+    errBirthInvalid: 'Fecha de nacimiento no válida — revisa el día, el mes y el año.',
 
     gladToSeeYou: 'Encantados de verte de nuevo',
     backAgain: 'Bienvenido de nuevo',
@@ -559,6 +576,8 @@ export const T = {
     unpaidPast:
       'Un pedido de una noche anterior quedó sin pagar. Regularízalo en la barra — el equipo te ayudará.',
 
+    backHome: 'Volver al inicio',
+    back: 'Volver',
     tabMenu: 'La carta',
     tabOrders: 'Mis pedidos',
     tabMessages: 'Mensajes',
@@ -590,6 +609,13 @@ export const T = {
     included: 'incluido',
     chooseFirst: (name) => `Elige: ${name}`,
 
+    creditsIntroTitle: 'Tus créditos están listos',
+    creditsIntroYouHave: (n) => `Tienes ${n} crédito${s(n)}`,
+    creditsIntroSoft: '1 crédito = 1 refresco',
+    creditsIntroAlcohol: '2 créditos = 1 bebida alcohólica',
+    creditsIntroHow:
+      'Se descuentan solos al añadir un artículo al carrito. No hay nada más que hacer.',
+    creditsIntroCta: 'Ver la carta',
     myCredits: 'Mis créditos',
     nAvailable: (n) => `${n} disponible${s(n)}`,
     nCredits: (n) => `${n} crédito${s(n)}`,
@@ -623,6 +649,11 @@ export const T = {
 
     clientSpace: 'Mi cuenta',
     yourInfo: 'Tus datos',
+    myNights: (n) => `${n} noche${s(n)} con nosotros`,
+    firstNight: 'Primera noche con nosotros',
+    myOrdersHere: 'Tus pedidos de esta noche',
+    noOrdersHere: 'Todavía no hay pedidos esta noche.',
+    creditsNone: 'Sin créditos por ahora',
 
     emptyCart: 'Carrito vacío',
 
@@ -640,6 +671,9 @@ export const T = {
     noMessages: 'Todavía no hay mensajes',
     noMessagesSub: 'Los anuncios de la noche y los mensajes dirigidos a ti aparecerán aquí.',
     msgForYou: 'Mensaje para ti',
+    msgOrder: 'Seguimiento del pedido',
+    msgUrgent: 'Mensaje urgente',
+    newUrgent: (n) => `${n} mensaje${s(n)} urgente${s(n)}`,
     announcement: 'Anuncio de la noche',
     markRead: 'Marcar como leído',
 

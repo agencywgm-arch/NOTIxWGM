@@ -117,6 +117,40 @@ function glide(read, write, to) {
   requestAnimationFrame(step)
 }
 
+// ------------------------------------------------------- Bouton « précédent »
+/**
+ * Retour terrain : depuis la carte, ouvrir l'espace client puis faire
+ * « précédent » faisait SORTIR du site — l'outil n'ayant qu'une seule entrée
+ * d'historique, le navigateur remontait au site visité avant. Insupportable en
+ * pleine soirée : on perdait son panier.
+ *
+ * Chaque couche qui s'ouvre (feuille modale, onglet secondaire) pose donc une
+ * entrée d'historique. « Précédent » la retire et referme la couche ; on ne
+ * quitte le site qu'une fois revenu à l'écran d'explication.
+ *
+ * Si la couche est fermée autrement (croix, tap derrière, validation), on
+ * retire nous-mêmes l'entrée posée pour ne pas laisser d'historique fantôme —
+ * d'où la comparaison du marqueur avant `history.back()`.
+ */
+let backGuardSeq = 0
+
+function useBackGuard(active, onBack) {
+  const cb = useRef(onBack)
+  cb.current = onBack
+
+  useEffect(() => {
+    if (!active || typeof window === 'undefined') return
+    const mark = ++backGuardSeq
+    window.history.pushState({ notiBack: mark }, '')
+    const onPop = () => cb.current?.()
+    window.addEventListener('popstate', onPop)
+    return () => {
+      window.removeEventListener('popstate', onPop)
+      if (window.history.state?.notiBack === mark) window.history.back()
+    }
+  }, [active])
+}
+
 /** Le conteneur qui défile réellement autour de `el` (null = le document). */
 function scrollBoxOf(el) {
   let n = el?.parentElement
@@ -262,14 +296,21 @@ const statusLabel = (st, lang, short = false) =>
   dict(lang)[(short ? ST_SHORT_KEY : ST_KEY)[st]] || ORDER_STATUS[st]?.label || st
 
 /**
- * Erreur affichée au client, dans SA langue. Les messages métier remontés par
- * PostgreSQL sont des clés stables (voir errorKey) ; tout le reste est
- * technique et retombe sur le texte français de frError().
+ * Erreur affichée au client, dans SA langue.
+ *
+ * Retour terrain : « Could not find the function public.upsert_me(...) in the
+ * schema cache » s'est retrouvé affiché tel quel à un client au milieu d'une
+ * soirée. Un message interne de PostgREST ne doit JAMAIS atteindre l'écran :
+ * seules les erreurs métier connues (clés stables, voir errorKey) sont
+ * traduites ; tout le reste devient un message générique, le détail partant
+ * dans la console pour le diagnostic.
  */
 function clientError(e, lang) {
-  const k = errorKey(e)
   const d = dict(lang)
-  return (k && d['err_' + k]) || frError(e)
+  const k = errorKey(e)
+  if (k && d['err_' + k]) return d['err_' + k]
+  console.error('[Noti] erreur non traduite', e)
+  return d.err_generic
 }
 
 const lineUnit = (l) =>
@@ -401,7 +442,9 @@ function useToast() {
   return [toast, show]
 }
 
-function Sheet({ open, onClose, title, children, maxHeight = '88vh' }) {
+function Sheet({ open, onClose, title, children, maxHeight = '88vh', lang = 'fr' }) {
+  // Le « précédent » du navigateur ferme la feuille au lieu de quitter le site.
+  useBackGuard(open, onClose)
   if (!open) return null
   return (
     <div
@@ -432,11 +475,32 @@ function Sheet({ open, onClose, title, children, maxHeight = '88vh' }) {
         }}
       >
         <div
-          style={{ width: 44, height: 4, borderRadius: 2, background: C.lineHi, margin: '0 auto 18px' }}
+          style={{ width: 44, height: 4, borderRadius: 2, background: C.lineHi, margin: '0 auto 14px' }}
         />
-        {title && (
-          <div style={{ ...S.h1, fontSize: 23, marginBottom: 16 }}>{title}</div>
-        )}
+        {/* Flèche de retour explicite : la barre grise ci-dessus n'était pas
+            comprise comme un moyen de fermer, et le tap « derrière » la feuille
+            n'a aucune affordance. */}
+        <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: title ? 16 : 8 }}>
+          <button
+            onClick={onClose}
+            aria-label={dict(lang).back}
+            style={{
+              width: 38,
+              height: 38,
+              flexShrink: 0,
+              borderRadius: 12,
+              border: `1.5px solid ${C.lineHi}`,
+              background: C.paper,
+              color: C.text,
+              fontSize: 19,
+              lineHeight: 1,
+              cursor: 'pointer',
+            }}
+          >
+            ‹
+          </button>
+          {title && <div style={{ ...S.h1, fontSize: 23, flex: 1, minWidth: 0 }}>{title}</div>}
+        </div>
         {children}
       </div>
     </div>
@@ -449,6 +513,172 @@ function Field({ label, children, hint }) {
       <label style={S.label}>{label}</label>
       {children}
       {hint && <div style={{ fontSize: 11.5, color: C.faint, marginTop: 6 }}>{hint}</div>}
+    </div>
+  )
+}
+
+/**
+ * Date de naissance en trois cases JJ / MM / AAAA.
+ *
+ * Retour terrain : « faire défiler jusqu'aux années 90 est long et pénible ».
+ * Le sélecteur natif d'`<input type="date">` s'ouvre sur le mois courant sur
+ * mobile — atteindre 1994 demande des dizaines de gestes. Ici on tape huit
+ * chiffres, la case suivante prend le relais toute seule.
+ *
+ * Les jetons `bday-day` / `bday-month` / `bday-year` sont ceux du standard
+ * HTML : le remplissage automatique du navigateur continue de fonctionner,
+ * comme sur le code postal.
+ *
+ * La valeur circulante reste au format ISO (AAAA-MM-JJ), celui de la base.
+ */
+function BirthdateField({ value, onChange, label }) {
+  // Les trois cases ont leur propre état : une saisie partielle (« 1 » dans le
+  // jour) ne forme pas encore de date, et la remonter au parent effacerait ce
+  // que la personne vient de taper.
+  const split = (v) => {
+    const mt = /^(\d{4})-(\d{2})-(\d{2})$/.exec(v || '')
+    return mt ? { d: mt[3], m: mt[2], y: mt[1] } : { d: '', m: '', y: '' }
+  }
+  const [parts, setParts] = useState(() => split(value))
+
+  // Synchronisation descendante seulement : on ne réécrit les cases que si la
+  // date reçue diffère de celle qu'elles composent (chargement de la fiche,
+  // remplissage automatique du navigateur).
+  const joined =
+    parts.d.length === 2 && parts.m.length === 2 && parts.y.length === 4
+      ? `${parts.y}-${parts.m}-${parts.d}`
+      : ''
+  useEffect(() => {
+    if ((value || '') !== joined) setParts(split(value))
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [value])
+
+  const dayRef = useRef(null)
+  const monthRef = useRef(null)
+  const yearRef = useRef(null)
+
+  const { d, m, y } = parts
+
+  const push = (nd, nm, ny) => {
+    setParts({ d: nd, m: nm, y: ny })
+    if (nd.length === 2 && nm.length === 2 && ny.length === 4) {
+      onChange(`${ny}-${nm}-${nd}`)
+    } else if (value) {
+      // La date était complète et ne l'est plus : le parent doit le savoir,
+      // sinon la validation laisserait passer une saisie tronquée.
+      onChange('')
+    }
+  }
+
+  const digits = (v, max) => v.replace(/\D/g, '').slice(0, max)
+
+  const box = {
+    ...S.input,
+    textAlign: 'center',
+    fontVariantNumeric: 'tabular-nums',
+    letterSpacing: 1,
+  }
+
+  return (
+    <Field label={label}>
+      <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+        <input
+          ref={dayRef}
+          style={{ ...box, width: 62 }}
+          inputMode="numeric"
+          autoComplete="bday-day"
+          placeholder="JJ"
+          maxLength={2}
+          value={d}
+          onChange={(e) => {
+            const v = digits(e.target.value, 2)
+            push(v, m, y)
+            // Deux chiffres saisis : on passe au mois sans que le doigt bouge.
+            if (v.length === 2) monthRef.current?.focus()
+          }}
+        />
+        <span style={{ color: C.faint }}>/</span>
+        <input
+          ref={monthRef}
+          style={{ ...box, width: 62 }}
+          inputMode="numeric"
+          autoComplete="bday-month"
+          placeholder="MM"
+          maxLength={2}
+          value={m}
+          onChange={(e) => {
+            const v = digits(e.target.value, 2)
+            push(d, v, y)
+            if (v.length === 2) yearRef.current?.focus()
+          }}
+          onKeyDown={(e) => {
+            if (e.key === 'Backspace' && !m) dayRef.current?.focus()
+          }}
+        />
+        <span style={{ color: C.faint }}>/</span>
+        <input
+          ref={yearRef}
+          style={{ ...box, flex: 1, minWidth: 84 }}
+          inputMode="numeric"
+          autoComplete="bday-year"
+          placeholder="AAAA"
+          maxLength={4}
+          value={y}
+          onChange={(e) => push(d, m, digits(e.target.value, 4))}
+          onKeyDown={(e) => {
+            if (e.key === 'Backspace' && !y) monthRef.current?.focus()
+          }}
+        />
+      </div>
+    </Field>
+  )
+}
+
+/**
+ * Rappel « complétez votre profil ». Volontairement absent de la carte : il
+ * s'affiche dans Messages et dans l'espace client, où l'on vient déjà pour
+ * gérer sa fiche. `onOpen` absent = on est déjà dans l'espace client, le
+ * rappel n'a plus de lien où renvoyer.
+ */
+function ProfileReminder({ customer, lang, onOpen }) {
+  const t = useT(lang)
+  const missing = [
+    !customer?.postal_code && t.fPostal,
+    !customer?.birthdate && t.fBirth,
+    !customer?.email && t.fEmail,
+    !customer?.instagram && t.fInstagram,
+  ].filter(Boolean)
+  if (!customer || missing.length === 0) return null
+
+  return (
+    <div style={{ marginBottom: 14 }}>
+      <Banner tone="info">
+        <div style={{ lineHeight: 1.55 }}>
+          <strong>{t.completeProfile}</strong>
+          <br />
+          {missing.join(', ')}
+          {onOpen && (
+            <>
+              {' — '}
+              <button
+                onClick={onOpen}
+                style={{
+                  background: 'none',
+                  border: 'none',
+                  padding: 0,
+                  color: C.indigo,
+                  fontWeight: 600,
+                  cursor: 'pointer',
+                  fontSize: 'inherit',
+                  textAlign: 'left',
+                }}
+              >
+                {t.goToAccount}
+              </button>
+            </>
+          )}
+        </div>
+      </Banner>
     </div>
   )
 }
@@ -737,7 +967,11 @@ function ClientApp({ scanPointId, session }) {
   const [customer, setCustomer] = useState(null)
   const [loading, setLoading] = useState(true)
   const [fatal, setFatal] = useState('')
-  const [step, setStep] = useState('welcome') // welcome|identify|hello|app
+  // welcome : premier passage · identify : formulaire · hello : reconnaissance
+  // app : la carte · intro : l'écran d'explication rouvert depuis le logo, sans
+  // ressaisie (retour terrain : « en cas de bug ou de perte de repère, on
+  // clique sur le logo et on repart d'une base saine »).
+  const [step, setStep] = useState('welcome')
   const [lang, setLang] = useState(LS.get('noti:lang', 'fr'))
   const [toast, showToast] = useToast()
 
@@ -833,6 +1067,10 @@ function ClientApp({ scanPointId, session }) {
     }
   }, [loading, fatal, session, customer, step, enterApp, showToast, lang])
 
+  // L'écran d'explication rouvert depuis le logo est une couche : « précédent »
+  // y renvoie à la carte au lieu de quitter le site.
+  useBackGuard(step === 'intro', () => setStep('app'))
+
   if (loading)
     return (
       <div style={S.page}>
@@ -862,6 +1100,12 @@ function ClientApp({ scanPointId, session }) {
     return <WelcomeScreen {...shared} onStart={() => setStep('identify')} />
   }
 
+  // Écran d'explication rouvert depuis le logo : le client est déjà identifié
+  // et déjà compté présent, on le renvoie donc directement dans la carte.
+  // « Précédent » y ramène aussi, plutôt que de quitter le site.
+  if (step === 'intro')
+    return <WelcomeScreen {...shared} onStart={() => setStep('app')} backToMenu />
+
   if (step === 'identify')
     return (
       <IdentifyScreen
@@ -882,14 +1126,19 @@ function ClientApp({ scanPointId, session }) {
 
   return (
     <>
-      <OrderingApp {...shared} customer={customer} onReloadCustomer={loadCustomer} />
+      <OrderingApp
+        {...shared}
+        customer={customer}
+        onReloadCustomer={loadCustomer}
+        onHome={() => setStep('intro')}
+      />
       <Toast toast={toast} />
     </>
   )
 }
 
 // ------------------------------------------------------------------ Accueil
-function WelcomeScreen({ event, venue, scanPoint, lang, setLang, onStart }) {
+function WelcomeScreen({ event, venue, scanPoint, lang, setLang, onStart, backToMenu = false }) {
   const t = useT(lang)
   const closed = event && (!event.is_active || !event.accept_orders)
 
@@ -906,49 +1155,21 @@ function WelcomeScreen({ event, venue, scanPoint, lang, setLang, onStart }) {
     >
       <Keyframes />
 
+      {/* Retour terrain : le nom du lieu au-dessus du logo faisait doublon, et
+          le badge du point de scan (« Entrée », « Point bar ») est une donnée
+          d'exploitation dont le client n'a pas besoin. On garde « Noti
+          Calling », la soirée et son horaire. */}
       <div style={{ textAlign: 'center', marginBottom: 30 }}>
         <div style={{ marginBottom: 22 }}>
           <Logo size={1.5} />
         </div>
-        <div
-          style={{
-            fontFamily: FONT.label,
-            fontSize: 12,
-            letterSpacing: 2.4,
-            textTransform: 'uppercase',
-            color: C.dim,
-          }}
-        >
-          {venue?.name}
-        </div>
-        <h1 style={{ ...S.h1, fontSize: 34, marginTop: 10 }}>{event?.name}</h1>
+        <h1 style={{ ...S.h1, fontSize: 34 }}>{event?.name}</h1>
         {event?.starts_at && (
           <div style={{ color: C.dim, fontSize: 13.5, marginTop: 8 }}>
             {dateFR(event.starts_at)}
             {event.closes_at ? ` → ${timeFR(event.closes_at)}` : ''}
           </div>
         )}
-        <div
-          style={{
-            display: 'inline-block',
-            marginTop: 14,
-            padding: '6px 14px',
-            borderRadius: 999,
-            background: GRADIENT,
-            color: C.navy,
-            fontFamily: FONT.label,
-            fontSize: 11.5,
-            fontWeight: 600,
-            letterSpacing: 1.2,
-            textTransform: 'uppercase',
-          }}
-        >
-          {scanPoint?.kind === 'bar'
-            ? t.pointBar
-            : scanPoint?.kind === 'table'
-              ? scanPoint.label || t.pointTable
-              : t.pointEntrance}
-        </div>
       </div>
 
       {event?.welcome_message && (
@@ -958,7 +1179,16 @@ function WelcomeScreen({ event, venue, scanPoint, lang, setLang, onStart }) {
       )}
 
       {closed ? (
-        <Banner tone="warn">{event?.service_message || t.ordersClosed}</Banner>
+        <>
+          <Banner tone="warn">{event?.service_message || t.ordersClosed}</Banner>
+          {/* Commandes fermées : sans ce bouton, un client venu par le logo
+              resterait bloqué sur cet écran. La carte reste consultable. */}
+          {backToMenu && (
+            <button onClick={onStart} style={{ ...S.btnGhost, marginTop: 16 }}>
+              {t.seeMenu}
+            </button>
+          )}
+        </>
       ) : (
         <>
           {/* Levée d'ambiguïté (retour terrain) : plusieurs personnes ont cru
@@ -975,7 +1205,9 @@ function WelcomeScreen({ event, venue, scanPoint, lang, setLang, onStart }) {
             <div style={{ display: 'grid', gap: 14 }}>
               {[
                 { n: '1', t: t.step1t, s: t.step1s },
-                { n: '2', t: t.step2t, s: t.step2s },
+                // Le vrai bénéfice de l'outil, mis en avant : on ne surveille
+                // plus le bar, c'est le bar qui prévient.
+                { n: '2', t: t.step2t, s: t.step2s, key: true },
                 { n: '3', t: t.step3t, s: t.step3s },
                 { n: '4', t: t.step4t, s: t.step4s },
               ].map((s) => (
@@ -1000,7 +1232,15 @@ function WelcomeScreen({ event, venue, scanPoint, lang, setLang, onStart }) {
                   </div>
                   <div>
                     <div style={{ fontWeight: 500, fontSize: 14.5 }}>{s.t}</div>
-                    <div style={{ fontSize: 12, color: C.dim }}>{s.s}</div>
+                    <div
+                      style={{
+                        fontSize: 12,
+                        color: s.key ? C.terracotta : C.dim,
+                        fontWeight: s.key ? 600 : 400,
+                      }}
+                    >
+                      {s.s}
+                    </div>
                   </div>
                 </div>
               ))}
@@ -1014,7 +1254,7 @@ function WelcomeScreen({ event, venue, scanPoint, lang, setLang, onStart }) {
             }}
             style={S.btn}
           >
-            {t.start}
+            {backToMenu ? t.seeMenu : t.start}
           </button>
         </>
       )}
@@ -1052,6 +1292,20 @@ function WelcomeScreen({ event, venue, scanPoint, lang, setLang, onStart }) {
 // client (voir ClientProfileSheet), avec un rappel s'ils manquent.
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/
 
+/**
+ * Une date saisie à la main peut être absurde (31/02, année 0012, demain).
+ * Le serveur refuse déjà les dates futures ; ici on le dit avant l'aller-retour.
+ */
+function birthdateIsValid(iso) {
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(iso || '')
+  if (!m) return false
+  const [y, mo, d] = [Number(m[1]), Number(m[2]), Number(m[3])]
+  if (y < 1900 || mo < 1 || mo > 12 || d < 1 || d > 31) return false
+  const dt = new Date(Date.UTC(y, mo - 1, d))
+  if (dt.getUTCFullYear() !== y || dt.getUTCMonth() !== mo - 1 || dt.getUTCDate() !== d) return false
+  return dt.getTime() <= Date.now()
+}
+
 function IdentifyScreen({ lang, onVerified }) {
   const t = useT(lang)
   const [firstName, setFirstName] = useState(LS.get('noti:firstName', ''))
@@ -1071,6 +1325,7 @@ function IdentifyScreen({ lang, onVerified }) {
     if (!phone.trim()) return setErr(t.errPhone)
     if (!postalCode.trim()) return setErr(t.errPostal)
     if (!birthdate) return setErr(t.errBirth)
+    if (!birthdateIsValid(birthdate)) return setErr(t.errBirthInvalid)
     if (email.trim() && !EMAIL_RE.test(email.trim())) return setErr(t.errEmail)
     setBusy(true)
     try {
@@ -1166,17 +1421,8 @@ function IdentifyScreen({ lang, onVerified }) {
               />
             </Field>
           </div>
-          <div style={{ flex: 1 }}>
-            <Field label={t.birthdate}>
-              <input
-                style={S.input}
-                type="date"
-                value={birthdate}
-                onChange={(e) => setBirthdate(e.target.value)}
-                autoComplete="bday"
-                max={new Date().toISOString().slice(0, 10)}
-              />
-            </Field>
+          <div style={{ flex: 1.35 }}>
+            <BirthdateField label={t.birthdate} value={birthdate} onChange={setBirthdate} />
           </div>
         </div>
 
@@ -1331,7 +1577,7 @@ function RecognitionScreen({ lang, customer, event, onEnter, showToast }) {
 //  ESPACE COMMANDE CLIENT
 // ============================================================================
 
-function OrderingApp({ event, venue, scanPoint, lang, setLang, customer, showToast, onReloadCustomer }) {
+function OrderingApp({ event, venue, scanPoint, lang, setLang, customer, showToast, onReloadCustomer, onHome }) {
   const t = useT(lang)
   const [products, setProducts] = useState([])
   const [orders, setOrders] = useState([])
@@ -1383,6 +1629,24 @@ function OrderingApp({ event, venue, scanPoint, lang, setLang, customer, showToa
     loadPass()
     loadGifts()
   }, [loadPass, loadGifts])
+
+  // ---- Explication des crédits, une fois par soirée ------------------------
+  // Retour terrain : le barème était expliqué à l'oral, encore et encore. On le
+  // dit une seule fois, au bon moment — à l'arrivée sur la carte, et seulement
+  // si la personne a réellement des crédits (pass ou code cadeau). Le drapeau
+  // reste sur l'appareil : pas de rappel à chaque rechargement de page.
+  const [creditsIntro, setCreditsIntro] = useState(false)
+  const creditsTotal =
+    (pass?.credits_remaining || 0) + gifts.reduce((n, g) => n + (Number(g.remaining) || 0), 0)
+
+  useEffect(() => {
+    if (!event?.id || creditsTotal <= 0) return
+    const seen = LS.get(`noti:creditsIntro:${event.id}`, false)
+    if (!seen) {
+      setCreditsIntro(true)
+      LS.set(`noti:creditsIntro:${event.id}`, true)
+    }
+  }, [event?.id, creditsTotal])
 
   async function convertFoodToken() {
     const { data, error } = await supabase.rpc('convert_food_token', { p_event: event.id })
@@ -1616,6 +1880,10 @@ function OrderingApp({ event, venue, scanPoint, lang, setLang, customer, showToa
     window.scrollTo({ top: 0, behavior: 'auto' })
   }, [view])
 
+  // « Précédent » depuis Mes commandes ou Messages revient à la carte, il ne
+  // quitte pas l'outil.
+  useBackGuard(view !== 'menu', () => setView('menu'))
+
   function goToSubcat(c) {
     // On marque la puce tout de suite : le retour visuel ne dépend plus de
     // l'arrivée effective de la section dans la fenêtre d'observation (une
@@ -1733,6 +2001,7 @@ function OrderingApp({ event, venue, scanPoint, lang, setLang, customer, showToa
     )
 
   const unread = messages.filter((m) => m.kind !== 'status' && !m.read_at)
+  const urgentUnread = unread.filter((m) => m.urgent)
 
   return (
     <div style={{ ...S.page, paddingBottom: 110 }}>
@@ -1757,7 +2026,16 @@ function OrderingApp({ event, venue, scanPoint, lang, setLang, customer, showToa
         }}
       >
         <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-          <Logo size={0.72} />
+          {/* Le logo ramène à l'écran d'explication, sans ressaisie : c'est le
+              réflexe attendu quand on est perdu ou qu'un affichage a déraillé. */}
+          <button
+            onClick={() => onHome?.()}
+            aria-label={t.backHome}
+            title={t.backHome}
+            style={{ background: 'none', border: 'none', padding: 0, cursor: 'pointer' }}
+          >
+            <Logo size={0.72} />
+          </button>
           <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
             {(event?.languages?.length ?? 0) > 1 && (
               <select
@@ -1872,31 +2150,11 @@ function OrderingApp({ event, venue, scanPoint, lang, setLang, customer, showToa
       </div>
 
       <div style={{ padding: 16 }}>
-        {/* Rappel : profil incomplet (champs optionnels, ou champs devenus
-            obligatoires après coup sur une fiche créée avant leur ajout) */}
-        {profileIncomplete && (
-          <div style={{ marginBottom: 14 }}>
-            <Banner tone="info">
-              <strong>{t.completeProfile}</strong> (
-              {[
-                !customer?.postal_code && t.fPostal,
-                !customer?.birthdate && t.fBirth,
-                !customer?.email && t.fEmail,
-                !customer?.instagram && t.fInstagram,
-              ]
-                .filter(Boolean)
-                .join(', ')}
-              ) —{' '}
-              <button
-                onClick={() => setProfileOpen(true)}
-                style={{ background: 'none', border: 'none', padding: 0, color: C.indigo, fontWeight: 600, cursor: 'pointer', fontSize: 'inherit' }}
-              >
-                {t.goToAccount}
-              </button>
-              .
-            </Banner>
-          </div>
-        )}
+        {/* Retour terrain : ce rappel était ici, tout en haut de la carte.
+            Redemander des informations juste au-dessus de l'espace de commande,
+            à quelqu'un qui vient d'en saisir cinq à l'entrée, freinait la
+            commande. Il vit désormais dans Messages et dans l'espace client —
+            là où on vient justement gérer sa fiche. Voir ProfileReminder. */}
 
         {/* Forfait Groupe (pass à crédits) et codes promo */}
         <div style={{ marginBottom: 14 }}>
@@ -1922,7 +2180,9 @@ function OrderingApp({ event, venue, scanPoint, lang, setLang, customer, showToa
           </div>
         )}
 
-        {/* Messages de l'organisateur — pointeur vers le canal dédié (onglet 💬) */}
+        {/* Messages de l'organisateur — pointeur vers le canal dédié.
+            Un message urgent (relance de retrait, incident) passe le bandeau au
+            rouge : le bandeau normal se noyait dans la page. */}
         {unread.length > 0 && view !== 'messages' && (
           <div style={{ marginBottom: 14 }}>
             <button
@@ -1934,15 +2194,33 @@ function OrderingApp({ event, venue, scanPoint, lang, setLang, customer, showToa
                 display: 'flex',
                 alignItems: 'center',
                 gap: 8,
-                border: `1.5px solid ${C.terracotta}55`,
+                border: `1.5px solid ${urgentUnread.length ? C.danger : `${C.terracotta}55`}`,
+                background: urgentUnread.length ? 'rgba(192,57,43,.08)' : C.paper,
                 cursor: 'pointer',
                 color: C.text,
                 textAlign: 'left',
               }}
             >
-              <span style={{ fontSize: 18 }}>💬</span>
-              <span style={{ fontSize: 13.5 }}>{t.newMessages(unread.length)}</span>
-              <span style={{ marginLeft: 'auto', color: C.terracotta, fontSize: 12, fontWeight: 600 }}>
+              <span style={{ fontSize: 18 }}>{urgentUnread.length ? '⚠️' : '💬'}</span>
+              <span
+                style={{
+                  fontSize: 13.5,
+                  fontWeight: urgentUnread.length ? 600 : 400,
+                  color: urgentUnread.length ? C.danger : C.text,
+                }}
+              >
+                {urgentUnread.length
+                  ? t.newUrgent(urgentUnread.length)
+                  : t.newMessages(unread.length)}
+              </span>
+              <span
+                style={{
+                  marginLeft: 'auto',
+                  color: urgentUnread.length ? C.danger : C.terracotta,
+                  fontSize: 12,
+                  fontWeight: 600,
+                }}
+              >
                 {t.see}
               </span>
             </button>
@@ -1954,6 +2232,7 @@ function OrderingApp({ event, venue, scanPoint, lang, setLang, customer, showToa
             lang={lang}
             messages={messages}
             customer={customer}
+            onOpenProfile={() => setProfileOpen(true)}
             onMarkRead={async (m) => {
               await supabase.from('messages').update({ read_at: new Date().toISOString() }).eq('id', m.id)
               loadMessages()
@@ -2155,10 +2434,19 @@ function OrderingApp({ event, venue, scanPoint, lang, setLang, customer, showToa
         }}
       />
 
+      <CreditsIntroSheet
+        open={creditsIntro}
+        lang={lang}
+        credits={creditsTotal}
+        onClose={() => setCreditsIntro(false)}
+      />
+
       <ClientProfileSheet
         lang={lang}
         open={profileOpen}
         customer={customer}
+        credits={creditsTotal}
+        orders={orders}
         onClose={() => setProfileOpen(false)}
         onSaved={async () => {
           await onReloadCustomer?.()
@@ -2331,7 +2619,7 @@ function ProductSheet({ product, lang, onClose, onConfirm }) {
   const missing = groups.filter((g) => g.required && (picked[g.id] || []).length < (g.min ?? 1))
 
   return (
-    <Sheet open={!!product} onClose={onClose} title={info.name}>
+    <Sheet open={!!product} onClose={onClose} title={info.name} lang={lang}>
       {product.image_url && (
         <img
           src={product.image_url}
@@ -2782,13 +3070,69 @@ function PromoCodeCard({ lang, pass, gifts, promoCode, onRedeemCode, onClearCode
   )
 }
 
+/**
+ * Explication du barème des crédits, montrée une seule fois par soirée et
+ * seulement à qui en possède. Remplace l'explication orale répétée au bar.
+ */
+function CreditsIntroSheet({ open, lang, credits, onClose }) {
+  const t = useT(lang)
+  return (
+    <Sheet open={open} onClose={onClose} title={t.creditsIntroTitle} lang={lang}>
+      <div
+        style={{
+          ...S.card,
+          textAlign: 'center',
+          border: `1.5px solid ${C.terracotta}`,
+          marginBottom: 16,
+        }}
+      >
+        <div style={{ fontSize: 34, marginBottom: 6 }}>🎟️</div>
+        <div style={{ ...S.money, fontSize: 22, fontWeight: 600, color: C.terracotta }}>
+          {t.creditsIntroYouHave(credits)}
+        </div>
+      </div>
+
+      <div style={{ display: 'grid', gap: 10, marginBottom: 16 }}>
+        {[
+          { e: '🥤', txt: t.creditsIntroSoft },
+          { e: '🍸', txt: t.creditsIntroAlcohol },
+        ].map((r) => (
+          <div
+            key={r.txt}
+            style={{
+              display: 'flex',
+              alignItems: 'center',
+              gap: 12,
+              padding: '12px 14px',
+              borderRadius: 14,
+              background: C.paper,
+              border: `1px solid ${C.line}`,
+            }}
+          >
+            <span style={{ fontSize: 22 }}>{r.e}</span>
+            <span style={{ fontSize: 15, fontWeight: 500 }}>{r.txt}</span>
+          </div>
+        ))}
+      </div>
+
+      <div style={{ fontSize: 12.5, color: C.dim, lineHeight: 1.55, marginBottom: 16 }}>
+        {t.creditsIntroHow}
+      </div>
+
+      <button onClick={onClose} style={S.btn}>
+        {t.creditsIntroCta}
+      </button>
+    </Sheet>
+  )
+}
+
 // -------------------------------------------------------------- Espace client
 /**
  * Le client y retrouve ses informations obligatoires (lecture seule — saisies
  * une fois à l'identification) et peut compléter e-mail / Instagram quand il
  * le souhaite : c'est le rappel affiché tant qu'ils manquent qui renvoie ici.
  */
-function ClientProfileSheet({ lang, open, customer, onClose, onSaved, showToast }) {
+function ClientProfileSheet({ lang, open, customer, onClose, onSaved, showToast, credits = 0, orders = [] }) {
   const t = useT(lang)
   const [phone, setPhone] = useState('')
   const [postalCode, setPostalCode] = useState('')
@@ -2813,6 +3157,7 @@ function ClientProfileSheet({ lang, open, customer, onClose, onSaved, showToast 
     if (!phone.trim()) return showToast(t.errPhone, 'error')
     if (!postalCode.trim()) return showToast(t.errPostal, 'error')
     if (!birthdate) return showToast(t.errBirth, 'error')
+    if (!birthdateIsValid(birthdate)) return showToast(t.errBirthInvalid, 'error')
     if (email.trim() && !EMAIL_RE.test(email.trim())) return showToast(t.errEmail, 'error')
     setBusy(true)
     try {
@@ -2839,13 +3184,98 @@ function ClientProfileSheet({ lang, open, customer, onClose, onSaved, showToast 
   }
 
   return (
-    <Sheet open={open} onClose={onClose} title={t.clientSpace}>
-      <div style={{ ...S.card, marginBottom: 16 }}>
-        <div style={{ ...S.label, marginBottom: 10 }}>{t.yourInfo}</div>
-        <div style={{ fontSize: 14 }}>
+    <Sheet open={open} onClose={onClose} title={t.clientSpace} lang={lang}>
+      {/* Retour terrain : cet écran n'était qu'un formulaire de collecte. On y
+          met d'abord ce qui appartient au client — son nom, sa fidélité, ses
+          crédits, ses commandes du soir — la saisie vient après. */}
+      <div style={{ ...S.card, marginBottom: 12 }}>
+        <div style={{ ...S.h1, fontSize: 21, marginBottom: 4 }}>
           {customer.first_name} {customer.last_name}
         </div>
+        <div style={{ fontSize: 12.5, color: C.dim }}>
+          {(customer.events_count ?? 0) <= 1 ? t.firstNight : t.myNights(customer.events_count)}
+        </div>
+
+        <div
+          style={{
+            marginTop: 14,
+            paddingTop: 14,
+            borderTop: `1px solid ${C.line}`,
+            display: 'flex',
+            alignItems: 'baseline',
+            justifyContent: 'space-between',
+            gap: 10,
+          }}
+        >
+          <span style={{ ...S.label, marginBottom: 0 }}>🎟️ {t.myCredits}</span>
+          <span
+            style={{
+              ...S.money,
+              fontSize: credits > 0 ? 20 : 13,
+              fontWeight: 600,
+              color: credits > 0 ? C.terracotta : C.faint,
+            }}
+          >
+            {credits > 0 ? t.nCredits(credits) : t.creditsNone}
+          </span>
+        </div>
+        {credits > 0 && (
+          <div style={{ fontSize: 11.5, color: C.dim, marginTop: 4, textAlign: 'right' }}>
+            {creditsAsDrinks(credits, lang)}
+          </div>
+        )}
       </div>
+
+      <div style={{ ...S.card, marginBottom: 16 }}>
+        <div style={{ ...S.label, marginBottom: 10 }}>{t.myOrdersHere}</div>
+        {orders.length === 0 ? (
+          <div style={{ fontSize: 13, color: C.faint }}>{t.noOrdersHere}</div>
+        ) : (
+          <div style={{ display: 'grid', gap: 8 }}>
+            {orders.slice(0, 6).map((o) => (
+              <div
+                key={o.id}
+                style={{
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: 10,
+                  fontSize: 13.5,
+                  paddingBottom: 8,
+                  borderBottom: `1px solid ${C.line}`,
+                }}
+              >
+                <span
+                  style={{
+                    fontFamily: FONT.label,
+                    fontWeight: 600,
+                    letterSpacing: 1,
+                    color: C.navy,
+                  }}
+                >
+                  {o.pickup_code}
+                </span>
+                <span style={{ color: C.dim, fontSize: 12 }}>{timeFR(o.created_at)}</span>
+                <span
+                  style={{
+                    marginLeft: 'auto',
+                    fontSize: 11,
+                    fontFamily: FONT.label,
+                    letterSpacing: 0.6,
+                    color: (ORDER_STATUS[o.status] || ORDER_STATUS.RECEIVED).color,
+                  }}
+                >
+                  {statusLabel(o.status, lang, true).toUpperCase()}
+                </span>
+                <span style={{ ...S.money, fontWeight: 600 }}>{eur(o.total)}</span>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+
+      <ProfileReminder customer={customer} lang={lang} />
+
+      <div style={{ ...S.label, marginBottom: 10 }}>{t.yourInfo}</div>
 
       <Field label={t.phone}>
         <input
@@ -2871,17 +3301,8 @@ function ClientProfileSheet({ lang, open, customer, onClose, onSaved, showToast 
             />
           </Field>
         </div>
-        <div style={{ flex: 1 }}>
-          <Field label={t.birthdate}>
-            <input
-              style={S.input}
-              type="date"
-              value={birthdate}
-              onChange={(e) => setBirthdate(e.target.value)}
-              autoComplete="bday"
-              max={new Date().toISOString().slice(0, 10)}
-            />
-          </Field>
+        <div style={{ flex: 1.35 }}>
+          <BirthdateField label={t.birthdate} value={birthdate} onChange={setBirthdate} />
         </div>
       </div>
 
@@ -2911,7 +3332,7 @@ function ClientProfileSheet({ lang, open, customer, onClose, onSaved, showToast 
 function CartSheet({ open, cart, lang, subtotal, onClose, onQty, onCheckout }) {
   const t = useT(lang)
   return (
-    <Sheet open={open} onClose={onClose} title={t.cart}>
+    <Sheet open={open} onClose={onClose} title={t.cart} lang={lang}>
       {cart.length === 0 && <Empty emoji="🥂" title={t.emptyCart} />}
       <div style={{ display: 'grid', gap: 10 }}>
         {cart.map((l) => {
@@ -3016,7 +3437,7 @@ function CheckoutSheet({ open, lang, event, cart, pass, promoCode, subtotal, pre
   const total = Math.max(0, subtotal - discount)
 
   return (
-    <Sheet open={open} onClose={onClose} title={t.validateOrder}>
+    <Sheet open={open} onClose={onClose} title={t.validateOrder} lang={lang}>
       <Field label={t.note}>
         <textarea
           style={{ ...S.input, minHeight: 76, paddingTop: 12, resize: 'vertical' }}
@@ -3102,11 +3523,14 @@ function CheckoutSheet({ open, lang, event, cart, pass, promoCode, subtotal, pre
  * Historique complet des messages (diffusions + messages individuels),
  * contrairement au bandeau qui ne montrait que les 3 derniers non lus.
  */
-function MessagesView({ lang, messages, customer, onMarkRead, onBackToMenu }) {
+function MessagesView({ lang, messages, customer, onMarkRead, onBackToMenu, onOpenProfile }) {
   const t = useT(lang)
-  if (!messages.length)
+  const shown = messages.filter((m) => m.kind !== 'status' || m.order_id)
+
+  if (!shown.length)
     return (
       <>
+        <ProfileReminder customer={customer} lang={lang} onOpen={onOpenProfile} />
         <Empty emoji="💬" title={t.noMessages} sub={t.noMessagesSub} />
         <button onClick={onBackToMenu} style={S.btnGhost}>
           {t.seeMenu}
@@ -3116,14 +3540,25 @@ function MessagesView({ lang, messages, customer, onMarkRead, onBackToMenu }) {
 
   return (
     <div style={{ display: 'grid', gap: 8 }}>
-      {messages
-        .filter((m) => m.kind !== 'status')
-        .map((m) => (
+      <ProfileReminder customer={customer} lang={lang} onOpen={onOpenProfile} />
+      {shown.map((m) => {
+        // Trois natures de message, lisibles d'un coup d'œil : le suivi de
+        // commande (statut), le message adressé à une personne, l'annonce de la
+        // soirée. Un message urgent passe au rouge, quelle que soit sa nature.
+        const urgent = Boolean(m.urgent)
+        const tone = urgent
+          ? { fg: C.danger, bg: 'rgba(192,57,43,.08)', label: t.msgUrgent }
+          : m.kind === 'status'
+            ? { fg: C.ok, bg: 'rgba(46,125,91,.07)', label: t.msgOrder }
+            : m.kind === 'individual'
+              ? { fg: C.indigo, bg: 'rgba(106,95,214,.10)', label: t.msgForYou }
+              : { fg: C.terracotta, bg: C.paper, label: t.announcement }
+        return (
           <div
             key={m.id}
             style={{
-              background: m.kind === 'individual' ? 'rgba(106,95,214,.10)' : C.paper,
-              border: `1.5px solid ${m.kind === 'individual' ? C.indigo : C.line}`,
+              background: tone.bg,
+              border: `1.5px solid ${urgent || m.kind !== 'broadcast' ? tone.fg : C.line}`,
               borderRadius: 14,
               padding: 14,
             }}
@@ -3137,13 +3572,14 @@ function MessagesView({ lang, messages, customer, onMarkRead, onBackToMenu }) {
                 fontSize: 10.5,
                 letterSpacing: 1.4,
                 textTransform: 'uppercase',
-                color: m.kind === 'individual' ? C.indigo : C.terracotta,
+                color: tone.fg,
                 marginBottom: 5,
               }}
             >
-              {m.kind === 'individual' ? t.msgForYou : t.announcement} · {timeFR(m.created_at)}
+              {urgent && <span aria-hidden>⚠️</span>}
+              {tone.label} · {timeFR(m.created_at)}
               {m.customer_id === customer?.id && !m.read_at && (
-                <span style={{ width: 7, height: 7, borderRadius: 4, background: C.terracotta }} />
+                <span style={{ width: 7, height: 7, borderRadius: 4, background: tone.fg }} />
               )}
             </div>
             <div style={{ fontSize: 14, lineHeight: 1.55 }}>{m.body}</div>
@@ -3156,7 +3592,13 @@ function MessagesView({ lang, messages, customer, onMarkRead, onBackToMenu }) {
               </button>
             )}
           </div>
-        ))}
+        )
+      })}
+
+      {/* La carte reste à un tap, depuis n'importe quel écran secondaire. */}
+      <button onClick={onBackToMenu} style={{ ...S.btnGhost, marginTop: 4 }}>
+        {t.seeMenu}
+      </button>
     </div>
   )
 }
@@ -3428,7 +3870,7 @@ function ReviewSheet({ lang, order, event, customer, onClose, onDone }) {
   if (!order) return null
 
   return (
-    <Sheet open={!!order} onClose={onClose} title={t.yourNight}>
+    <Sheet open={!!order} onClose={onClose} title={t.yourNight} lang={lang}>
       <div style={{ color: C.dim, fontSize: 13.5, marginTop: -8, marginBottom: 18, lineHeight: 1.55 }}>
         {t.howWasService}
       </div>
@@ -4681,6 +5123,17 @@ function BarTab({ event, venue, onEventChange, showToast }) {
     load()
   }
 
+  // Relance de retrait : message urgent adressé au client, horodaté côté base
+  // (voir nudge_pickup dans 0022).
+  const [nudging, setNudging] = useState(null)
+  async function nudge(order) {
+    setNudging(order.id)
+    const { error } = await supabase.rpc('nudge_pickup', { p_order: order.id, p_body: null })
+    setNudging(null)
+    if (error) return showToast(frError(error), 'error')
+    showToast(`Relance envoyée pour ${order.pickup_code}.`, 'ok')
+  }
+
   async function savePrep(v) {
     const val = Math.max(1, Math.min(60, v))
     setPrep(val)
@@ -4754,14 +5207,31 @@ function BarTab({ event, venue, onEventChange, showToast }) {
                     }}
                   >
                     {min} min
-                    {min >= ESCALADE_MIN ? ' · à escalader' : ''}
                   </span>
+                  {/* Relance directe : le message part en rouge sur le téléphone
+                      du client, sans passer par le micro. */}
+                  <button
+                    onClick={() => nudge(o)}
+                    disabled={nudging === o.id}
+                    style={{
+                      ...S.chip,
+                      minHeight: 32,
+                      padding: '4px 10px',
+                      fontSize: 11,
+                      borderColor: C.danger,
+                      color: C.danger,
+                      opacity: nudging === o.id ? 0.5 : 1,
+                    }}
+                  >
+                    {nudging === o.id ? '…' : 'Relancer'}
+                  </button>
                 </div>
               ))}
             </div>
             <div style={{ fontSize: 11.5, color: C.dim, marginTop: 10, lineHeight: 1.5 }}>
-              Appelez le code au micro. Au-delà de {ESCALADE_MIN} min, l’organisateur prend le relais
-              depuis l’onglet Organisation.
+              « Relancer » envoie un message urgent au client. Appelez aussi le code au micro.
+              Au-delà de {ESCALADE_MIN} min, l’organisateur prend le relais depuis l’onglet
+              Organisation.
             </div>
           </div>
         </div>
@@ -6153,8 +6623,41 @@ const BROADCAST_TEMPLATES = [
   'Forfaits : dernière ligne droite pour convertir votre jeton food en conso (crédits), fenêtre fermée à 22h — après quoi il reste un jeton food perdu s’il n’est pas utilisé.',
 ]
 
+/**
+ * Interrupteur « message urgent ». Le client le reçoit en rouge, avec un
+ * bandeau distinct : sans ça, une relance de retrait se noyait dans les
+ * annonces de la soirée.
+ */
+function UrgentToggle({ on, onChange }) {
+  return (
+    <button
+      onClick={() => onChange(!on)}
+      style={{
+        ...S.chip,
+        width: '100%',
+        minHeight: 46,
+        marginBottom: 14,
+        justifyContent: 'flex-start',
+        gap: 10,
+        display: 'flex',
+        alignItems: 'center',
+        whiteSpace: 'normal',
+        textAlign: 'left',
+        borderColor: on ? C.danger : C.lineHi,
+        background: on ? 'rgba(192,57,43,.08)' : 'transparent',
+        color: on ? C.danger : C.dim,
+        fontWeight: on ? 600 : 500,
+      }}
+    >
+      <span style={{ fontSize: 16 }}>{on ? '⚠️' : '○'}</span>
+      Message urgent — bandeau rouge côté client
+    </button>
+  )
+}
+
 function BroadcastSheet({ open, event, onClose, onSent, onChanged, showToast }) {
   const [body, setBody] = useState('')
+  const [urgent, setUrgent] = useState(false)
   const [busy, setBusy] = useState(false)
   const [sent, setSent] = useState([])
   const [loadingSent, setLoadingSent] = useState(false)
@@ -6224,6 +6727,8 @@ function BroadcastSheet({ open, event, onClose, onSent, onChanged, showToast }) 
         />
       </Field>
 
+      <UrgentToggle on={urgent} onChange={setUrgent} />
+
       <button
         disabled={!body.trim() || busy}
         onClick={async () => {
@@ -6233,10 +6738,12 @@ function BroadcastSheet({ open, event, onClose, onSent, onChanged, showToast }) 
             kind: 'broadcast',
             body: body.trim(),
             title: event.name,
+            urgent,
           })
           setBusy(false)
           if (!res) return showToast('Envoi impossible : message non enregistré.', 'error')
           setBody('')
+          setUrgent(false)
           loadSent()
           onSent(res)
         }}
@@ -6269,6 +6776,9 @@ function BroadcastSheet({ open, event, onClose, onSent, onChanged, showToast }) 
                       ? `À ${m.customers?.first_name || 'un client'} ${m.customers?.last_name || ''}`.trim()
                       : 'Diffusion générale'}
                   </span>
+                  {m.urgent && (
+                    <span style={{ fontSize: 10.5, fontWeight: 600, color: C.danger }}>⚠️ URGENT</span>
+                  )}
                   <span style={{ marginLeft: 'auto', fontSize: 10.5, color: C.faint }}>
                     {dateFR(m.created_at)} {timeFR(m.created_at)}
                   </span>
@@ -6713,6 +7223,7 @@ function ClientFicheSheet({ customerId, event, onClose, onMessage, onChanged, sh
 
 function DirectMessageSheet({ target, event, onClose, onSent, showToast }) {
   const [body, setBody] = useState('')
+  const [urgent, setUrgent] = useState(false)
   const [busy, setBusy] = useState(false)
 
   useEffect(() => {
@@ -6733,6 +7244,7 @@ function DirectMessageSheet({ target, event, onClose, onSent, showToast }) {
           onChange={(e) => setBody(e.target.value)}
         />
       </Field>
+      <UrgentToggle on={urgent} onChange={setUrgent} />
       <button
         disabled={!body.trim() || busy}
         onClick={async () => {
@@ -6743,6 +7255,7 @@ function DirectMessageSheet({ target, event, onClose, onSent, showToast }) {
             customerId: target.customer_id,
             body: body.trim(),
             title: event.name,
+            urgent,
           })
           setBusy(false)
           if (!res) return showToast('Envoi impossible : message non enregistré.', 'error')
