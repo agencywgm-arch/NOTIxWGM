@@ -82,6 +82,25 @@ const LS = {
 
 const uid = () => Math.random().toString(36).slice(2, 10)
 
+/**
+ * Oublie tout ce que l'appareil retient du client : identité mise en cache,
+ * code promo de la soirée, explication des crédits déjà vue. La langue est
+ * conservée — c'est un réglage d'appareil, pas une donnée d'identité.
+ *
+ * Sert à la déconnexion : sans ce nettoyage, le formulaire se rouvrirait
+ * pré-rempli et upsertMeFromCache() recréerait la fiche en silence.
+ */
+function forgetMe() {
+  try {
+    const doomed = []
+    for (let i = 0; i < localStorage.length; i++) {
+      const k = localStorage.key(i)
+      if (k && k.startsWith('noti:') && k !== 'noti:lang') doomed.push(k)
+    }
+    doomed.forEach((k) => localStorage.removeItem(k))
+  } catch (_) {}
+}
+
 // ---------------------------------------------------------- Défilement glissé
 /**
  * `scrollIntoView({ behavior: 'smooth' })` ne suffisait pas : un tap sur une
@@ -1071,6 +1090,30 @@ function ClientApp({ scanPointId, session }) {
   // y renvoie à la carte au lieu de quitter le site.
   useBackGuard(step === 'intro', () => setStep('app'))
 
+  // ---- Déconnexion ---------------------------------------------------------
+  // La session anonyme est justement faite pour ne jamais redemander ses
+  // informations. Mais il faut pouvoir repasser par le parcours d'entrée : pour
+  // le tester, ou quand un téléphone change de mains.
+  //
+  // Deux choses à effacer, pas une : la session Supabase ET ce que l'appareil a
+  // mis en cache. Sans le second, upsertMeFromCache() recréerait la fiche à la
+  // première action.
+  //
+  // Rien n'est perdu côté serveur : le téléphone est l'ancre d'identité (voir
+  // upsert_me), donc se réinscrire avec le même numéro reprend la fiche
+  // existante — mêmes commandes, mêmes crédits, même historique.
+  const logout = useCallback(async () => {
+    forgetMe()
+    autoEntered.current = false
+    setCustomer(null)
+    setStep('welcome')
+    try {
+      await supabase.auth.signOut()
+    } catch (e) {
+      console.warn('[Noti] signOut', e)
+    }
+  }, [])
+
   if (loading)
     return (
       <div style={S.page}>
@@ -1131,6 +1174,7 @@ function ClientApp({ scanPointId, session }) {
         customer={customer}
         onReloadCustomer={loadCustomer}
         onHome={() => setStep('intro')}
+        onLogout={logout}
       />
       <Toast toast={toast} />
     </>
@@ -1577,7 +1621,18 @@ function RecognitionScreen({ lang, customer, event, onEnter, showToast }) {
 //  ESPACE COMMANDE CLIENT
 // ============================================================================
 
-function OrderingApp({ event, venue, scanPoint, lang, setLang, customer, showToast, onReloadCustomer, onHome }) {
+function OrderingApp({
+  event,
+  venue,
+  scanPoint,
+  lang,
+  setLang,
+  customer,
+  showToast,
+  onReloadCustomer,
+  onHome,
+  onLogout,
+}) {
   const t = useT(lang)
   const [products, setProducts] = useState([])
   const [orders, setOrders] = useState([])
@@ -2447,6 +2502,7 @@ function OrderingApp({ event, venue, scanPoint, lang, setLang, customer, showToa
         customer={customer}
         credits={creditsTotal}
         orders={orders}
+        onLogout={onLogout}
         onClose={() => setProfileOpen(false)}
         onSaved={async () => {
           await onReloadCustomer?.()
@@ -3132,7 +3188,17 @@ function CreditsIntroSheet({ open, lang, credits, onClose }) {
  * une fois à l'identification) et peut compléter e-mail / Instagram quand il
  * le souhaite : c'est le rappel affiché tant qu'ils manquent qui renvoie ici.
  */
-function ClientProfileSheet({ lang, open, customer, onClose, onSaved, showToast, credits = 0, orders = [] }) {
+function ClientProfileSheet({
+  lang,
+  open,
+  customer,
+  onClose,
+  onSaved,
+  showToast,
+  credits = 0,
+  orders = [],
+  onLogout,
+}) {
   const t = useT(lang)
   const [phone, setPhone] = useState('')
   const [postalCode, setPostalCode] = useState('')
@@ -3140,6 +3206,7 @@ function ClientProfileSheet({ lang, open, customer, onClose, onSaved, showToast,
   const [email, setEmail] = useState('')
   const [instagram, setInstagram] = useState('')
   const [busy, setBusy] = useState(false)
+  const [leaving, setLeaving] = useState(false)
 
   useEffect(() => {
     if (open && customer) {
@@ -3324,6 +3391,36 @@ function ClientProfileSheet({ lang, open, customer, onClose, onSaved, showToast,
       <button disabled={busy} onClick={save} style={{ ...S.btn, opacity: busy ? 0.6 : 1 }}>
         {busy ? '…' : t.save}
       </button>
+
+      {/* Déconnexion : sert à repasser par le parcours d'entrée — pour le
+          tester, ou quand un téléphone change de mains. Reléguée en bas, en
+          discret : c'est une sortie de route, pas une action courante. */}
+      {onLogout && (
+        <div style={{ marginTop: 26, paddingTop: 18, borderTop: `1px solid ${C.line}` }}>
+          <div style={{ fontSize: 11.5, color: C.faint, lineHeight: 1.55, marginBottom: 10 }}>
+            {t.logoutHint}
+          </div>
+          <button
+            disabled={leaving}
+            onClick={async () => {
+              if (!confirm(t.logoutConfirm)) return
+              setLeaving(true)
+              onClose()
+              await onLogout()
+            }}
+            style={{
+              ...S.btnGhost,
+              minHeight: 44,
+              fontSize: 12.5,
+              borderColor: C.danger,
+              color: C.danger,
+              opacity: leaving ? 0.6 : 1,
+            }}
+          >
+            {leaving ? '…' : t.logout}
+          </button>
+        </div>
+      )}
     </Sheet>
   )
 }

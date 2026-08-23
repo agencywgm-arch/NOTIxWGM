@@ -177,6 +177,11 @@ export const T = {
     catSoft: 'Soft',
 
     // Espace client
+    logout: 'Se déconnecter de cet appareil',
+    logoutHint:
+      'Vous repasserez par l’écran d’accueil et le formulaire d’inscription. Rien n’est perdu : en indiquant le même numéro de téléphone, vous retrouvez votre fiche, vos commandes et vos crédits.',
+    logoutConfirm:
+      'Se déconnecter de cet appareil ? Vous devrez ressaisir vos informations pour commander.',
     clientSpace: 'Espace client',
     yourInfo: 'Vos informations',
     myNights: (n) => `${n} soirée${s(n)} avec nous`,
@@ -415,6 +420,11 @@ export const T = {
     catAlcohol: 'Alcoholic drink',
     catSoft: 'Soft drink',
 
+    logout: 'Sign out of this device',
+    logoutHint:
+      'You will go back through the welcome screen and the sign-up form. Nothing is lost: enter the same phone number and you get your record, your orders and your credits back.',
+    logoutConfirm:
+      'Sign out of this device? You will have to enter your details again to order.',
     clientSpace: 'My account',
     yourInfo: 'Your details',
     myNights: (n) => `${n} night${s(n)} with us`,
@@ -647,6 +657,11 @@ export const T = {
     catAlcohol: 'Bebida alcohólica',
     catSoft: 'Refresco',
 
+    logout: 'Cerrar sesión en este dispositivo',
+    logoutHint:
+      'Volverás a pasar por la pantalla de inicio y el formulario de registro. No se pierde nada: con el mismo número de teléfono recuperas tu ficha, tus pedidos y tus créditos.',
+    logoutConfirm:
+      '¿Cerrar sesión en este dispositivo? Tendrás que volver a introducir tus datos para pedir.',
     clientSpace: 'Mi cuenta',
     yourInfo: 'Tus datos',
     myNights: (n) => `${n} noche${s(n)} con nosotros`,
