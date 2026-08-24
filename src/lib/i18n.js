@@ -235,6 +235,20 @@ export const T = {
     notifCta: 'Me prévenir quand c’est prêt',
     showCodeAtBar: 'Présentez ce code au bar et réglez sur place',
     orderedAt: (h) => `Commande de ${h}`,
+
+    // Retard : le compte à rebours est passé et la commande n'est toujours pas
+    // prête. Plutôt qu'un compteur négatif ou un silence, on assume le retard
+    // avec le ton de la maison. La dernière ligne sert aux gros retards.
+    delayNotes: [
+      'T’as le temps d’aller danser 💃 ta commande n’est pas encore prête.',
+      'Le bar est pris d’assaut 🍸 encore un morceau ou deux et c’est à toi.',
+      'Petit retard, grande soif — on accélère, promis.',
+      'On n’a pas oublié ta commande, il y a juste du monde devant 🙃',
+      'Ça prend un peu plus longtemps que prévu. Profites-en pour refaire le monde.',
+      'Le shaker chauffe ! Encore un instant et c’est prêt.',
+    ],
+    delayNoteLate: 'Là, on avoue, ça traîne vraiment 😅 toute l’équipe est dessus.',
+    delayBadge: 'Un peu de retard',
     unpaidOrder:
       'Cette commande n’a pas été réglée en fin de soirée. Elle reste due — merci de vous rapprocher de l’établissement.',
     noteLabel: 'Note :',
@@ -487,6 +501,17 @@ export const T = {
     notifCta: 'Notify me when it’s ready',
     showCodeAtBar: 'Show this code at the bar and pay there',
     orderedAt: (h) => `Ordered at ${h}`,
+
+    delayNotes: [
+      'Time for one more dance 💃 your order isn’t ready yet.',
+      'The bar is packed 🍸 another track or two and it’s yours.',
+      'Running a little late, thanks for the patience — we’re on it.',
+      'We haven’t forgotten you, there’s just a queue ahead 🙃',
+      'Taking a bit longer than expected. Good time to put the world to rights.',
+      'The shaker is working! Just a moment longer.',
+    ],
+    delayNoteLate: 'Alright, this really is taking a while 😅 the whole team is on it.',
+    delayBadge: 'Running late',
     unpaidOrder:
       'This order was not paid at the end of the night. It remains due — please get in touch with the venue.',
     noteLabel: 'Note:',
@@ -737,6 +762,17 @@ export const T = {
     notifCta: 'Avísame cuando esté listo',
     showCodeAtBar: 'Muestra este código en la barra y paga allí',
     orderedAt: (h) => `Pedido de las ${h}`,
+
+    delayNotes: [
+      'Te da tiempo a bailar otra 💃 tu pedido aún no está listo.',
+      'La barra está a tope 🍸 una canción más y es tuyo.',
+      'Un pelín de retraso, mucha sed — vamos a por ello.',
+      'No nos hemos olvidado de ti, es que hay cola 🙃',
+      'Está tardando un poco más de lo previsto. Aprovecha para arreglar el mundo.',
+      '¡La coctelera no para! Un momentito más.',
+    ],
+    delayNoteLate: 'Vale, esto se está alargando de verdad 😅 todo el equipo está en ello.',
+    delayBadge: 'Con algo de retraso',
     unpaidOrder:
       'Este pedido no se pagó al final de la noche. Sigue pendiente — ponte en contacto con el local.',
     noteLabel: 'Nota:',

@@ -318,6 +318,53 @@ const TAG_LABEL = {
   incident: 'Incident',
 }
 
+/**
+ * Segmentations propres à l'établissement, en plus des quatre historiques
+ * (voir 0032). Le stockage n'a pas changé — `customers.tags` acceptait déjà
+ * n'importe quelle valeur ; ce qui manquait, c'était un endroit où les
+ * DÉCLARER pour qu'elles s'affichent partout comme les autres.
+ *
+ * Renvoie aussi `all` : les quatre historiques d'abord, puis les
+ * personnalisées, dans l'ordre où l'équipe les a créées.
+ */
+function useCustomSegments(venueId) {
+  const [segments, setSegments] = useState([])
+
+  const load = useCallback(async () => {
+    if (!venueId) return setSegments([])
+    const { data } = await supabase
+      .from('customer_segments')
+      .select('id, key, label')
+      .eq('venue_id', venueId)
+      .order('created_at')
+    setSegments(data || [])
+  }, [venueId])
+
+  useEffect(() => {
+    load()
+  }, [load])
+
+  const labelOf = useCallback(
+    (key) => TAG_LABEL[key] || segments.find((s) => s.key === key)?.label || key,
+    [segments]
+  )
+
+  const all = useMemo(() => [...ALL_TAGS, ...segments.map((s) => s.key)], [segments])
+
+  return { segments, all, labelOf, reload: load }
+}
+
+/** Une étiquette libre → une clé stable, au format accepté par 0032. */
+function segmentKey(label) {
+  return (label || '')
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/[̀-ͯ]/g, '')
+    .replace(/[^a-z0-9]+/g, '_')
+    .replace(/^_|_$/g, '')
+    .slice(0, 32)
+}
+
 // Retraits en retard — seuils communs au bar et à l'organisation, pour que
 // les deux écrans racontent la même chose au même moment.
 //  · 15 min : la commande est prête mais non retirée → alerte barman + admin.
@@ -4228,6 +4275,25 @@ function OrderCard({ order, event, venue, customer, lang, now, onReview }) {
   const mm = String(Math.floor(etaSec / 60)).padStart(2, '0')
   const ss = String(etaSec % 60).padStart(2, '0')
 
+  // Retard : le compte à rebours est tombé à zéro et rien n'est prêt. Le
+  // compteur figé à 00:00 laissait le client sans nouvelle — on assume le
+  // retard avec une phrase légère, plutôt que par un silence.
+  const pending = order.status === 'RECEIVED' || order.status === 'IN_PREP'
+  const lateMin = order.estimated_ready_at && pending ? Math.floor(-etaMs / 60000) : -1
+  const isLate = lateMin >= 1
+  const delayNote = useMemo(() => {
+    if (!isLate) return null
+    const notes = t.delayNotes || []
+    if (!notes.length) return null
+    if (lateMin >= 10) return t.delayNoteLate || notes[0]
+    // Stable par commande, mais renouvelée toutes les deux minutes : la phrase
+    // ne clignote pas à chaque tic d'horloge et ne se répète pas non plus si
+    // l'attente s'étire.
+    let h = 0
+    for (const ch of String(order.id)) h = (h * 31 + ch.charCodeAt(0)) >>> 0
+    return notes[(h + Math.floor(lateMin / 2)) % notes.length]
+  }, [isLate, lateMin, order.id, t])
+
   const steps = ['RECEIVED', 'IN_PREP', 'READY', 'PICKED_UP', 'PAID']
   const idx = Math.max(0, steps.indexOf(order.status === 'UNPAID' ? 'PICKED_UP' : order.status))
 
@@ -4291,12 +4357,53 @@ function OrderCard({ order, event, venue, customer, lang, now, onReview }) {
           <div style={{ fontFamily: FONT.label, fontWeight: 600, letterSpacing: 1, color: st.color }}>
             {statusLabel(order.status, lang).toUpperCase()}
           </div>
-          {(order.status === 'RECEIVED' || order.status === 'IN_PREP') && etaSec > 0 && (
+          {pending && etaSec > 0 && (
             <div style={{ ...S.money, marginLeft: 'auto', fontSize: 20, fontWeight: 600 }}>
               {mm}:{ss}
             </div>
           )}
+          {isLate && (
+            <div
+              style={{
+                marginLeft: 'auto',
+                fontFamily: FONT.label,
+                fontSize: 10.5,
+                fontWeight: 600,
+                letterSpacing: 0.6,
+                textTransform: 'uppercase',
+                color: C.goldDark,
+                background: `${C.gold}26`,
+                border: `1px solid ${C.gold}`,
+                borderRadius: 999,
+                padding: '3px 9px',
+                whiteSpace: 'nowrap',
+              }}
+            >
+              {t.delayBadge}
+            </div>
+          )}
         </div>
+
+        {delayNote && (
+          <div
+            style={{
+              display: 'flex',
+              gap: 9,
+              alignItems: 'flex-start',
+              padding: '11px 13px',
+              marginBottom: 14,
+              borderRadius: 14,
+              background: `${C.gold}18`,
+              border: `1px solid ${C.gold}66`,
+              fontSize: 13,
+              lineHeight: 1.5,
+              color: C.text,
+            }}
+          >
+            <span aria-hidden="true">⏳</span>
+            <span>{delayNote}</span>
+          </div>
+        )}
 
         {/* Progression */}
         {!['CANCELLED'].includes(order.status) && (
@@ -4680,12 +4787,17 @@ function StaffLogin() {
         })
         if (error) throw error
         setInfo('E-mail envoyé si ce compte existe. Suivez le lien reçu pour choisir un nouveau mot de passe.')
-      } else if (mode === 'signup') {
+      } else if (mode === 'signup' || mode === 'join') {
+        // « Rejoindre une équipe » : même création de compte, mais on retient
+        // l'intention. Sans elle, un invité dont l'invitation n'est pas encore
+        // enregistrée tombait sur l'écran « Premier lieu » et créait un lieu
+        // fantôme au lieu d'attendre son rattachement (voir StaffApp).
+        LS.set('noti:joinIntent', mode === 'join')
         const { data, error } = await supabase.auth.signUp({ email: email.trim(), password })
         if (error) throw error
         if (data.user && Array.isArray(data.user.identities) && data.user.identities.length === 0) {
           setMode('login')
-          setErr('Cet e-mail est déjà utilisé. Connectez-vous ci-dessous.')
+          setErr('Cet e-mail a déjà un compte. Connectez-vous ci-dessous — votre invitation sera prise en compte automatiquement.')
           return
         }
         if (data.session) return
@@ -4723,10 +4835,14 @@ function StaffLogin() {
         </div>
 
         <form onSubmit={submit} style={S.card}>
-          <div style={{ display: 'flex', gap: 8, marginBottom: 18 }}>
+          {/* Trois portes d'entrée distinctes. Avant, l'équipe invitée devait
+              deviner qu'il fallait passer par « Créer un compte » — le libellé
+              suggérait de créer un établissement, pas de rejoindre le sien. */}
+          <div style={{ display: 'flex', gap: 6, marginBottom: 16 }}>
             {[
               ['login', 'Connexion'],
-              ['signup', 'Créer un compte'],
+              ['join', 'Rejoindre'],
+              ['signup', 'Nouveau lieu'],
             ].map(([k, label]) => (
               <button
                 key={k}
@@ -4743,9 +4859,9 @@ function StaffLogin() {
                   border: 'none',
                   cursor: 'pointer',
                   fontFamily: FONT.label,
-                  fontSize: 12.5,
+                  fontSize: 11.5,
                   fontWeight: 600,
-                  letterSpacing: 0.8,
+                  letterSpacing: 0.5,
                   textTransform: 'uppercase',
                   background: mode === k ? C.navy : 'rgba(28,42,74,.06)',
                   color: mode === k ? '#fff' : C.dim,
@@ -4755,6 +4871,26 @@ function StaffLogin() {
               </button>
             ))}
           </div>
+
+          {mode === 'join' && (
+            <div style={{ marginBottom: 14 }}>
+              <Banner tone="info">
+                Vous rejoignez l’équipe d’un établissement existant. Utilisez{' '}
+                <strong>l’adresse e-mail exacte</strong> à laquelle l’organisateur vous a invité :
+                le rattachement à la soirée est automatique dès votre première connexion. Vous
+                pourrez suivre le même événement en même temps que le reste de l’équipe.
+              </Banner>
+            </div>
+          )}
+          {mode === 'signup' && (
+            <div style={{ marginBottom: 14 }}>
+              <Banner tone="info">
+                Cette option crée un <strong>nouvel établissement</strong> dont vous serez
+                propriétaire. Si vous avez été invité dans une équipe existante, passez plutôt par
+                l’onglet <strong>Rejoindre</strong>.
+              </Banner>
+            </div>
+          )}
 
           <Field label="E-mail">
             <input
@@ -4838,7 +4974,9 @@ function StaffLogin() {
                 ? 'Envoyer le lien'
                 : mode === 'login'
                   ? 'Se connecter'
-                  : 'Créer mon compte'}
+                  : mode === 'join'
+                    ? 'Rejoindre l’équipe'
+                    : 'Créer mon établissement'}
           </button>
         </form>
 
@@ -4926,6 +5064,10 @@ function StaffApp({ session }) {
     const byVenue = Object.fromEntries((memberships || []).map((m) => [m.venue_id, m.role]))
     for (const v of mine || []) byVenue[v.id] = 'owner'
 
+    // Rattachement effectif : l'attente est finie, le drapeau n'a plus lieu
+    // d'être (sinon il ressortirait au prochain lieu retiré à cette personne).
+    if (all.length > 0) LS.set('noti:joinIntent', false)
+
     setRoles(byVenue)
     setVenues(all)
     setVenueId((cur) => (all.find((v) => v.id === cur) ? cur : all[0]?.id ?? null))
@@ -4984,6 +5126,13 @@ function StaffApp({ session }) {
         </div>
       </div>
     )
+  }
+
+  // Invité dont l'invitation n'est pas encore enregistrée : l'écran de
+  // création de lieu lui ferait créer un établissement fantôme. On l'attend
+  // ici, avec de quoi vérifier à nouveau — et une sortie s'il s'est trompé.
+  if (venues.length === 0 && LS.get('noti:joinIntent', false)) {
+    return <StaffInvitePending session={session} onRetry={loadVenues} />
   }
 
   if (venues.length === 0) return <StaffOnboarding session={session} onDone={loadVenues} />
@@ -5211,6 +5360,77 @@ function NoEvent({ venue, onCreated, showToast }) {
       >
         {busy ? '…' : 'Créer la soirée'}
       </button>
+    </div>
+  )
+}
+
+/**
+ * Salle d'attente de l'invité : le compte existe, l'invitation n'est pas
+ * encore enregistrée (ou l'adresse ne correspond pas). Un simple bouton
+ * relance `accept_my_staff_invites()` via loadVenues, sans avoir à se
+ * déconnecter ni à recharger la page.
+ */
+function StaffInvitePending({ session, onRetry }) {
+  const [busy, setBusy] = useState(false)
+  const [checked, setChecked] = useState(false)
+
+  return (
+    <div style={{ ...S.page, padding: 22, display: 'flex', alignItems: 'center' }}>
+      <Keyframes />
+      <div style={{ width: '100%', maxWidth: 440, margin: '0 auto' }}>
+        <div style={{ textAlign: 'center', marginBottom: 24 }}>
+          <Logo size={1.2} />
+          <h1 style={{ ...S.h1, fontSize: 23, marginTop: 20 }}>En attente d’invitation</h1>
+        </div>
+
+        <div style={{ marginBottom: 14 }}>
+          <Banner tone="info">
+            Votre compte est créé, mais aucune équipe ne vous a encore ajouté. Demandez à
+            l’organisateur de vous inviter à l’adresse exacte{' '}
+            <strong>{session.user.email}</strong> (Réglages → Équipe, de son côté), puis
+            revérifiez ici.
+          </Banner>
+        </div>
+
+        {checked && (
+          <div style={{ marginBottom: 14 }}>
+            <Banner tone="danger">
+              Toujours aucune invitation à cette adresse. Vérifiez avec l’organisateur qu’il a
+              bien saisi <strong>{session.user.email}</strong>, sans faute de frappe.
+            </Banner>
+          </div>
+        )}
+
+        <div style={{ display: 'grid', gap: 8 }}>
+          <button
+            disabled={busy}
+            onClick={async () => {
+              setBusy(true)
+              await onRetry()
+              setBusy(false)
+              setChecked(true)
+            }}
+            style={{ ...S.btn, opacity: busy ? 0.6 : 1 }}
+          >
+            {busy ? 'Vérification…' : 'Vérifier mon invitation'}
+          </button>
+
+          <button
+            onClick={() => {
+              if (!confirm('Créer votre propre établissement ? À ne faire que si vous n’attendez aucune invitation.')) return
+              LS.set('noti:joinIntent', false)
+              onRetry()
+            }}
+            style={S.btnGhost}
+          >
+            Je n’attends pas d’invitation : créer mon établissement
+          </button>
+
+          <button onClick={() => supabase.auth.signOut()} style={{ ...S.btnGhost, borderColor: C.lineHi, color: C.dim }}>
+            Se déconnecter
+          </button>
+        </div>
+      </div>
     </div>
   )
 }
@@ -5598,6 +5818,9 @@ function BarTab({ event, venue, onEventChange, showToast }) {
   const [ficheFor, setFicheFor] = useState(null)
   const [soldOutOpen, setSoldOutOpen] = useState(false)
   const [staffPush, setStaffPush] = useState(false)
+  // Même recherche qu'en Caisse et en Clients : au comptoir, on a le ticket
+  // sous les yeux, pas le nom. Filtre les quatre colonnes d'un coup.
+  const [q, setQ] = useState('')
   const [ack, setAck] = useState(() => new Set(LS.get(`noti:ack:${event.id}`, [])))
   // Sonnerie choisie par l'établissement, mémorisée sur la tablette du bar :
   // c'est un réglage de poste, pas une donnée de soirée.
@@ -5640,10 +5863,23 @@ function BarTab({ event, venue, onEventChange, showToast }) {
     }
   }, [event.id, load])
 
+  // La recherche ne filtre QUE l'affichage des colonnes : l'alarme et les
+  // retards continuent de porter sur toutes les commandes, sinon chercher un
+  // ticket ferait taire la sonnerie d'une commande non vue.
+  const needle = q.trim().toLowerCase()
+  const matches = (o) => {
+    if (!needle) return true
+    const identity = `${o.customers?.first_name || ''} ${o.customers?.last_name || ''} ${o.customers?.phone || ''} ${o.pickup_code || ''}`
+    return identity.toLowerCase().includes(needle)
+  }
+  const shown = orders.filter(matches)
+
   const received = orders.filter((o) => o.status === 'RECEIVED')
-  const inPrep = orders.filter((o) => o.status === 'IN_PREP')
+  const inPrep = shown.filter((o) => o.status === 'IN_PREP')
   const ready = orders.filter((o) => o.status === 'READY')
-  const pickedUp = orders.filter((o) => o.status === 'PICKED_UP')
+  const pickedUp = shown.filter((o) => o.status === 'PICKED_UP')
+  const receivedShown = shown.filter((o) => o.status === 'RECEIVED')
+  const readyShown = shown.filter((o) => o.status === 'READY')
 
   // Retraits en retard : deux paliers, alignés sur l'affichage admin.
   //  · RELANCE_MIN  → la commande passe en alerte ici et côté organisation.
@@ -5924,14 +6160,54 @@ function BarTab({ event, venue, onEventChange, showToast }) {
         )}
       </div>
 
+      <div style={{ position: 'relative', marginBottom: 14 }} className="no-print">
+        <input
+          style={{ ...S.input, paddingRight: needle ? 40 : undefined }}
+          value={q}
+          onChange={(e) => setQ(e.target.value)}
+          placeholder="Nom, prénom, téléphone ou code de retrait…"
+        />
+        {needle && (
+          <button
+            onClick={() => setQ('')}
+            aria-label="Effacer la recherche"
+            style={{
+              position: 'absolute',
+              right: 6,
+              top: '50%',
+              transform: 'translateY(-50%)',
+              width: 30,
+              height: 30,
+              borderRadius: 15,
+              border: 'none',
+              background: 'rgba(28,42,74,.07)',
+              color: C.dim,
+              cursor: 'pointer',
+              fontSize: 15,
+              lineHeight: 1,
+            }}
+          >
+            ×
+          </button>
+        )}
+      </div>
+
+      {needle && shown.length === 0 && (
+        <div style={{ marginBottom: 14 }}>
+          <Banner tone="info">
+            Aucune commande ne correspond à « {q.trim()} » sur cette soirée.
+          </Banner>
+        </div>
+      )}
+
       <div style={{ display: 'flex', gap: 12, overflowX: 'auto', paddingBottom: 8 }}>
         {[
           // `prev` : un tap de trop sur « Prête » notifiait le client, qui
           // venait attendre devant le bar — exactement ce que l'outil est censé
           // éviter. Mieux vaut pouvoir revenir en arrière et ne pas s'en servir.
-          { title: 'Reçues', list: received, color: C.indigo, action: 'En préparation', next: 'IN_PREP', prev: null },
+          { title: 'Reçues', list: receivedShown, color: C.indigo, action: 'En préparation', next: 'IN_PREP', prev: null },
           { title: 'En préparation', list: inPrep, color: C.warn, action: 'Prête', next: 'READY', prev: 'RECEIVED' },
-          { title: 'Prêtes', list: ready, color: C.terracotta, action: 'Retirée', next: 'PICKED_UP', prev: 'IN_PREP' },
+          { title: 'Prêtes', list: readyShown, color: C.terracotta, action: 'Retirée', next: 'PICKED_UP', prev: 'IN_PREP' },
           { title: 'Retirées', list: pickedUp, color: C.ok, action: 'Réglée', next: 'PAID', prev: 'READY' },
         ].map((col) => (
           <div key={col.title} style={{ minWidth: 268, flex: '1 0 268px' }}>
@@ -6767,31 +7043,51 @@ function AffluenceCard({ pulse, slots }) {
   const toneLabel =
     pct == null ? null : pct >= 90 ? 'Salle pleine' : pct >= 70 ? 'Bien remplie' : 'De la place'
 
-  // Courbe cumulée depuis le début de la soirée (une tranche de 15 min, y
-  // compris celles sans arrivée : sans ça, une accalmie disparaîtrait de la
-  // courbe au lieu de s'y voir). Retour terrain : « la jauge d'entrée en
-  // courbe statistique » — le total qui monte au fil de la soirée, pas
-  // seulement le rythme des 3 dernières heures.
+  // Courbe cumulée sur LA SOIRÉE EN COURS (tranches de 15 min, creux compris :
+  // sans les tranches vides, une accalmie disparaîtrait au lieu de se voir).
+  //
+  // Le cadrage est le point délicat. `v_event_affluence` renvoie toutes les
+  // tranches de l'événement depuis sa création — sur une soirée testée dans la
+  // journée, la courbe s'étalait de 07:00 à 00:45 et restait plate sur 90 % de
+  // sa largeur. On cadre donc sur la séquence d'arrivées en cours : on part de
+  // la première arrivée qui suit la dernière longue interruption (2 h sans
+  // personne = la soirée d'avant), et ce qui précède est conservé comme socle
+  // du cumul, pas jeté.
   const cumBars = useMemo(() => {
     if (!slots || slots.length === 0) return []
     const step = 15 * 60 * 1000
-    const now = Date.now()
-    const currentSlot = Math.floor(now / step) * step
-    const bySlot = Object.fromEntries(
-      (slots || []).map((s) => [Math.floor(new Date(s.slot).getTime() / step) * step, Number(s.people) || 0])
-    )
-    const firstSlot = Math.min(...Object.keys(bySlot).map(Number))
-    // Plafonné à 18h de soirée : au-delà, une courbe reste lisible sans
-    // afficher des centaines de points inutiles.
-    const maxSpan = 72
-    const start = Math.max(firstSlot, currentSlot - (maxSpan - 1) * step)
-    let cum = 0
-    for (const t of Object.keys(bySlot).map(Number)) {
-      if (t < start) cum += bySlot[t]
+    const gap = 8 // 8 tranches = 2 h sans une seule arrivée
+    const maxSpan = 48 // 12 h : au-delà la courbe cesse d'être lisible
+    const currentSlot = Math.floor(Date.now() / step) * step
+
+    const bySlot = new Map()
+    for (const s of slots) {
+      const t = Math.floor(new Date(s.slot).getTime() / step) * step
+      bySlot.set(t, (bySlot.get(t) || 0) + (Number(s.people) || 0))
     }
+
+    const active = [...bySlot.entries()]
+      .filter(([, people]) => people > 0)
+      .map(([t]) => t)
+      .sort((a, b) => a - b)
+    if (active.length === 0) return []
+
+    // Remonter tant que les arrivées se suivent sans trou de 2 h.
+    let start = active[active.length - 1]
+    for (let i = active.length - 1; i > 0; i--) {
+      if (active[i] - active[i - 1] > gap * step) break
+      start = active[i - 1]
+    }
+    start = Math.max(start - step, currentSlot - (maxSpan - 1) * step)
+
+    // Tout ce qui précède la fenêtre reste compté : le cumul affiché est le
+    // total réel de la soirée, pas seulement celui de la portion visible.
+    let cum = 0
+    for (const [t, people] of bySlot) if (t < start) cum += people
+
     const out = []
     for (let t = start; t <= currentSlot; t += step) {
-      cum += bySlot[t] || 0
+      cum += bySlot.get(t) || 0
       out.push({ t, cum })
     }
     return out
@@ -6863,90 +7159,170 @@ function AffluenceCard({ pulse, slots }) {
         </div>
       </div>
 
-      <div style={{ ...S.label, marginBottom: 8 }}>Entrées cumulées</div>
+      <div style={{ display: 'flex', alignItems: 'baseline', gap: 8, marginBottom: 8 }}>
+        <div style={{ ...S.label, marginBottom: 0 }}>Entrées cumulées</div>
+        {cumBars.length > 1 && (
+          <div style={{ marginLeft: 'auto', fontSize: 11, color: C.faint }}>
+            {timeFR(new Date(cumBars[0].t).toISOString())} →{' '}
+            {timeFR(new Date(cumBars[cumBars.length - 1].t).toISOString())}
+          </div>
+        )}
+      </div>
       <AffluenceCurveChart bars={cumBars} capacity={capacity} />
     </div>
   )
 }
 
-/** Courbe lisse des entrées cumulées depuis le début de la soirée (SVG, sans lib). */
+/**
+ * Plafond d'axe lisible, juste au-dessus de la valeur atteinte, et toujours
+ * divisible par deux — la graduation du milieu doit tomber sur un entier.
+ * Un simple `ceil` à la puissance de dix supérieure gâchait la moitié du
+ * graphique (113 personnes affichaient un axe à 200).
+ */
+function niceCeil(v) {
+  if (v <= 10) return [2, 4, 6, 8, 10].find((n) => v <= n) ?? 10
+  const mag = Math.pow(10, Math.floor(Math.log10(v)))
+  for (const s of [1, 1.2, 1.6, 2, 2.4, 3, 4, 5, 6, 8, 10]) {
+    const c = s * mag
+    if (v <= c && Number.isInteger(c / 2)) return c
+  }
+  return 10 * mag
+}
+
+/**
+ * Courbe lisse des entrées cumulées sur la soirée (SVG, sans bibliothèque).
+ *
+ * Le rendu tient à deux détails :
+ *  · `preserveAspectRatio` reste au défaut (« meet »). La version précédente
+ *    utilisait « none » avec une hauteur fixe : le SVG était étiré
+ *    horizontalement, ce qui épaississait le trait de façon irrégulière et
+ *    déformait les heures en bas de l'axe.
+ *  · l'échelle verticale suit les entrées, pas la capacité. Une salle de 300
+ *    places écrasait la courbe sur la ligne du bas tant que les 40 premières
+ *    personnes arrivaient ; la capacité n'est tracée que si elle reste dans
+ *    l'ordre de grandeur du cumul, et rappelée en texte sinon.
+ */
 function AffluenceCurveChart({ bars, capacity }) {
-  const W = 300
-  const H = 92
-  const padTop = 10
-  const padBottom = 18
+  const W = 640
+  const H = 190
+  const padL = 30
+  const padR = 14
+  const padTop = 16
+  const padBottom = 26
+  const plotW = W - padL - padR
   const plotH = H - padTop - padBottom
 
   if (!bars || bars.length < 2) {
     return (
-      <div style={{ height: H, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-        <span style={{ fontSize: 11.5, color: C.faint }}>Pas encore assez de données pour la courbe.</span>
+      <div
+        style={{
+          height: 110,
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+          borderRadius: 12,
+          background: C.paper,
+          border: `1px solid ${C.line}`,
+        }}
+      >
+        <span style={{ fontSize: 11.5, color: C.faint }}>
+          La courbe apparaîtra dès les premières arrivées.
+        </span>
       </div>
     )
   }
 
-  const maxVal = Math.max(capacity || 0, ...bars.map((b) => b.cum), 1)
-  const x = (i) => (i / (bars.length - 1)) * W
-  const y = (v) => padTop + plotH - (v / maxVal) * plotH
+  const peak = Math.max(...bars.map((b) => b.cum), 1)
+  const showCapacity = capacity > 0 && capacity <= peak * 1.6
+  const niceMax = niceCeil(Math.max(peak, showCapacity ? capacity : 0))
 
-  // Lissage Catmull-Rom → Bézier cubique : une courbe qui passe par chaque
-  // point, sans les segments droits d'une simple polyligne.
+  const x = (i) => padL + (i / (bars.length - 1)) * plotW
+  const y = (v) => padTop + plotH - (v / niceMax) * plotH
+
+  // Lissage Catmull-Rom → Bézier cubique : la courbe passe par chaque point,
+  // sans les cassures d'une simple polyligne. Les tangentes verticales sont
+  // bornées pour qu'un pic d'arrivées ne fasse pas dépasser la courbe
+  // au-dessus de son propre maximum.
   const pts = bars.map((b, i) => [x(i), y(b.cum)])
-  let line = `M ${pts[0][0]} ${pts[0][1]}`
+  let line = `M ${pts[0][0].toFixed(2)} ${pts[0][1].toFixed(2)}`
   for (let i = 0; i < pts.length - 1; i++) {
     const p0 = pts[i - 1] || pts[i]
     const p1 = pts[i]
     const p2 = pts[i + 1]
     const p3 = pts[i + 2] || p2
     const c1x = p1[0] + (p2[0] - p0[0]) / 6
-    const c1y = p1[1] + (p2[1] - p0[1]) / 6
     const c2x = p2[0] - (p3[0] - p1[0]) / 6
-    const c2y = p2[1] - (p3[1] - p1[1]) / 6
-    line += ` C ${c1x} ${c1y}, ${c2x} ${c2y}, ${p2[0]} ${p2[1]}`
+    const lo = Math.min(p1[1], p2[1])
+    const hi = Math.max(p1[1], p2[1])
+    const c1y = Math.min(hi, Math.max(lo, p1[1] + (p2[1] - p0[1]) / 6))
+    const c2y = Math.min(hi, Math.max(lo, p2[1] - (p3[1] - p1[1]) / 6))
+    line += ` C ${c1x.toFixed(2)} ${c1y.toFixed(2)}, ${c2x.toFixed(2)} ${c2y.toFixed(2)}, ${p2[0].toFixed(2)} ${p2[1].toFixed(2)}`
   }
-  const area = `${line} L ${pts[pts.length - 1][0]} ${padTop + plotH} L ${pts[0][0]} ${padTop + plotH} Z`
+  const baseY = padTop + plotH
+  const area = `${line} L ${pts[pts.length - 1][0].toFixed(2)} ${baseY} L ${pts[0][0].toFixed(2)} ${baseY} Z`
 
   const last = bars[bars.length - 1]
-  const step = Math.max(1, Math.floor(bars.length / 4))
+  const lastPt = pts[pts.length - 1]
+  const ticks = [0, 0.5, 1]
+  // Heures réparties régulièrement, premières et dernières comprises. Un
+  // simple « une sur N » laissait la dernière étiquette coller à sa voisine
+  // dès que la division ne tombait pas juste.
+  const nLabels = Math.min(5, bars.length)
+  const labelIdx = new Set(
+    Array.from({ length: nLabels }, (_, k) => Math.round((k * (bars.length - 1)) / (nLabels - 1 || 1)))
+  )
 
   return (
-    <svg viewBox={`0 0 ${W} ${H}`} width="100%" height={H} preserveAspectRatio="none" style={{ overflow: 'visible' }}>
-      <defs>
-        <linearGradient id="affluenceFill" x1="0" y1="0" x2="0" y2="1">
-          <stop offset="0%" stopColor={C.indigo} stopOpacity="0.22" />
-          <stop offset="100%" stopColor={C.indigo} stopOpacity="0" />
-        </linearGradient>
-      </defs>
+    <div style={{ borderRadius: 12, background: C.paper, border: `1px solid ${C.line}`, padding: '6px 4px 2px' }}>
+      <svg viewBox={`0 0 ${W} ${H}`} width="100%" role="img" style={{ display: 'block' }}
+        aria-label={`Entrées cumulées : ${last.cum} personnes`}>
+        <defs>
+          <linearGradient id="affluenceFill" x1="0" y1="0" x2="0" y2="1">
+            <stop offset="0%" stopColor={C.indigo} stopOpacity="0.26" />
+            <stop offset="100%" stopColor={C.indigo} stopOpacity="0.02" />
+          </linearGradient>
+        </defs>
 
-      {[0.25, 0.5, 0.75].map((f) => (
-        <line key={f} x1={0} x2={W} y1={padTop + plotH * (1 - f)} y2={padTop + plotH * (1 - f)}
-          stroke="rgba(28,42,74,.08)" strokeWidth={1} />
-      ))}
+        {ticks.map((f) => {
+          const gy = padTop + plotH * (1 - f)
+          return (
+            <g key={f}>
+              <line x1={padL} x2={W - padR} y1={gy} y2={gy}
+                stroke={f === 0 ? 'rgba(28,42,74,.20)' : 'rgba(28,42,74,.09)'} strokeWidth={1} />
+              <text x={padL - 7} y={gy + 3.5} fontSize={10} fill={C.faint} textAnchor="end">
+                {Math.round(niceMax * f)}
+              </text>
+            </g>
+          )
+        })}
 
-      {capacity > 0 && (
-        <line x1={0} x2={W} y1={y(capacity)} y2={y(capacity)} stroke={C.terracotta} strokeWidth={1}
-          strokeDasharray="3 3" opacity={0.6} />
-      )}
+        {showCapacity && (
+          <>
+            <line x1={padL} x2={W - padR} y1={y(capacity)} y2={y(capacity)}
+              stroke={C.terracotta} strokeWidth={1.5} strokeDasharray="5 4" opacity={0.75} />
+            <text x={W - padR} y={y(capacity) - 5} fontSize={9.5} fill={C.terracotta} textAnchor="end">
+              capacité {capacity}
+            </text>
+          </>
+        )}
 
-      <path d={area} fill="url(#affluenceFill)" stroke="none" />
-      <path d={line} fill="none" stroke={C.indigo} strokeWidth={2} strokeLinecap="round" strokeLinejoin="round" />
+        <path d={area} fill="url(#affluenceFill)" stroke="none" />
+        <path d={line} fill="none" stroke={C.indigo} strokeWidth={2.5}
+          strokeLinecap="round" strokeLinejoin="round" />
 
-      <circle cx={pts[pts.length - 1][0]} cy={pts[pts.length - 1][1]} r={3.5} fill={C.indigo} />
+        <circle cx={lastPt[0]} cy={lastPt[1]} r={5} fill={C.indigo} opacity={0.18} />
+        <circle cx={lastPt[0]} cy={lastPt[1]} r={3} fill={C.indigo} stroke={C.paper} strokeWidth={1.5} />
 
-      {bars.map((b, i) =>
-        i % step === 0 || i === bars.length - 1 ? (
-          <text key={b.t} x={Math.min(Math.max(x(i), 12), W - 12)} y={H - 3} fontSize={8.5}
-            fill={C.faint} textAnchor="middle">
-            {timeFR(new Date(b.t).toISOString())}
-          </text>
-        ) : null
-      )}
-
-      <text x={pts[pts.length - 1][0]} y={Math.max(10, pts[pts.length - 1][1] - 8)} fontSize={10.5}
-        fontWeight={600} fill={C.indigo} textAnchor="end">
-        {last.cum}
-      </text>
-    </svg>
+        {bars.map((b, i) =>
+          labelIdx.has(i) ? (
+            <text key={b.t} x={x(i)} y={H - 8} fontSize={10} fill={C.faint}
+              textAnchor={i === 0 ? 'start' : i === bars.length - 1 ? 'end' : 'middle'}>
+              {timeFR(new Date(b.t).toISOString())}
+            </text>
+          ) : null
+        )}
+      </svg>
+    </div>
   )
 }
 
@@ -7788,6 +8164,9 @@ function ClientFicheSheet({ customerId, event, onClose, onMessage, onChanged, sh
   const [attendance, setAttendance] = useState(null)
   const [wallet, setWallet] = useState(null)
   const [loading, setLoading] = useState(false)
+  const { segments, all: allSegments, labelOf, reload: reloadSegments } = useCustomSegments(event?.venue_id)
+  const [newSegment, setNewSegment] = useState('')
+  const [segmentBusy, setSegmentBusy] = useState(false)
 
   useEffect(() => {
     if (!customerId) {
@@ -7883,6 +8262,43 @@ function ClientFicheSheet({ customerId, event, onClose, onMessage, onChanged, sh
     onChanged?.()
   }
 
+  async function createSegment() {
+    const label = newSegment.trim()
+    if (!label || segmentBusy) return
+    if (!event?.venue_id) return showToast?.('Sélectionnez une soirée d’abord.', 'error')
+    const key = segmentKey(label)
+    // Le format est contraint côté base (0032) : on prévient ici plutôt que de
+    // laisser remonter une violation de contrainte.
+    if (key.length < 2) return showToast?.('Étiquette trop courte.', 'error')
+    if (TAG_LABEL[key]) return showToast?.('Cette étiquette existe déjà.', 'error')
+    if (segments.some((s) => s.key === key)) return showToast?.('Cette étiquette existe déjà.', 'error')
+
+    setSegmentBusy(true)
+    const { error } = await supabase
+      .from('customer_segments')
+      .insert({ venue_id: event.venue_id, key, label })
+    setSegmentBusy(false)
+    if (error) return showToast?.(frError(error), 'error')
+    setNewSegment('')
+    await reloadSegments()
+    showToast?.(`Étiquette « ${label} » créée.`, 'ok')
+  }
+
+  async function deleteSegment(key) {
+    const seg = segments.find((s) => s.key === key)
+    if (!seg) return
+    if (!confirm(`Supprimer l’étiquette « ${seg.label} » ? Les fiches qui la portent la perdront.`))
+      return
+    const { error } = await supabase.from('customer_segments').delete().eq('id', seg.id)
+    if (error) return showToast?.(frError(error), 'error')
+    // L'étiquette disparaît de la liste, mais elle reste écrite dans
+    // customers.tags : sans ce nettoyage sur la fiche ouverte, la puce
+    // resterait cochée sans plus rien pour la décocher.
+    if ((cust?.tags || []).includes(key)) await toggleTag(key)
+    await reloadSegments()
+    showToast?.('Étiquette supprimée.', 'ok')
+  }
+
   return (
     <Sheet open={!!customerId} onClose={onClose} title="Fiche client">
       {loading || !cust ? (
@@ -7906,7 +8322,7 @@ function ClientFicheSheet({ customerId, event, onClose, onMessage, onChanged, sh
                       borderColor: tg === 'incident' ? C.danger : C.indigo,
                     }}
                   >
-                    {TAG_LABEL[tg] || tg}
+                    {labelOf(tg)}
                   </span>
                 ))}
               </div>
@@ -8011,29 +8427,79 @@ function ClientFicheSheet({ customerId, event, onClose, onMessage, onChanged, sh
             </div>
           </div>
 
-          {/* Segmentation — modifiable directement depuis la fiche */}
+          {/* Segmentation — modifiable directement depuis la fiche, et
+              extensible : l'équipe crée ses propres étiquettes (voir 0032). */}
           <div>
             <div style={{ ...S.label, marginBottom: 6 }}>Segmentation</div>
             <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
-              {ALL_TAGS.map((t) => {
+              {allSegments.map((t) => {
                 const on = (cust.tags || []).includes(t)
+                const custom = !TAG_LABEL[t]
                 return (
                   <button
                     key={t}
                     onClick={() => toggleTag(t)}
+                    // Une étiquette personnalisée se supprime par un appui long
+                    // (ou un clic droit) : le geste est volontaire, et retirer
+                    // une étiquette de la liste est bien plus lourd que la
+                    // décocher sur une fiche.
+                    onContextMenu={
+                      custom
+                        ? (e) => {
+                            e.preventDefault()
+                            deleteSegment(t)
+                          }
+                        : undefined
+                    }
+                    title={custom ? 'Clic droit pour supprimer cette étiquette' : undefined}
                     style={{
                       ...S.chip,
                       minHeight: 40,
                       borderColor: on ? C.terracotta : C.lineHi,
                       color: on ? C.terracotta : C.dim,
                       background: on ? 'rgba(185,106,76,.08)' : 'transparent',
+                      borderStyle: custom ? 'dashed' : 'solid',
                     }}
                   >
                     {on ? '✓ ' : ''}
-                    {TAG_LABEL[t]}
+                    {labelOf(t)}
                   </button>
                 )
               })}
+            </div>
+
+            <div style={{ display: 'flex', gap: 6, marginTop: 8 }}>
+              <input
+                value={newSegment}
+                onChange={(e) => setNewSegment(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter') {
+                    e.preventDefault()
+                    createSegment()
+                  }
+                }}
+                placeholder="Nouvelle étiquette (ex. Anniversaire)"
+                maxLength={32}
+                style={{ ...S.input, flex: 1, minHeight: 40, fontSize: 13 }}
+              />
+              <button
+                onClick={createSegment}
+                disabled={!newSegment.trim() || segmentBusy}
+                style={{
+                  ...S.btnGhost,
+                  width: 'auto',
+                  minHeight: 40,
+                  padding: '0 16px',
+                  fontSize: 12.5,
+                  opacity: !newSegment.trim() || segmentBusy ? 0.5 : 1,
+                }}
+              >
+                Créer
+              </button>
+            </div>
+            <div style={{ fontSize: 10.5, color: C.faint, marginTop: 5, lineHeight: 1.5 }}>
+              Les étiquettes que vous créez sont disponibles sur toutes les fiches de
+              l’établissement. Clic droit sur une étiquette pointillée pour la supprimer.
             </div>
           </div>
 
@@ -9522,6 +9988,7 @@ function ClientsTab({ event, showToast }) {
   const [filter, setFilter] = useState(null)
   const [ficheFor, setFicheFor] = useState(null)
   const [dmFor, setDmFor] = useState(null)
+  const { all: allSegments, labelOf } = useCustomSegments(event?.venue_id)
 
   // Codes de retrait de la soirée, par client : au bar on a le ticket sous les
   // yeux, pas le nom. Retour terrain : « pouvoir retrouver un client à partir
@@ -9599,17 +10066,19 @@ function ClientsTab({ event, showToast }) {
         >
           Tous
         </button>
-        {ALL_TAGS.map((t) => (
+        {allSegments.map((t) => (
           <button
             key={t}
             onClick={() => setFilter(filter === t ? null : t)}
             style={{
               ...S.chip,
+              whiteSpace: 'nowrap',
               borderColor: filter === t ? C.terracotta : C.lineHi,
               color: filter === t ? C.terracotta : C.dim,
+              borderStyle: TAG_LABEL[t] ? 'solid' : 'dashed',
             }}
           >
-            {TAG_LABEL[t]}
+            {labelOf(t)}
           </button>
         ))}
       </div>
@@ -9665,7 +10134,7 @@ function ClientsTab({ event, showToast }) {
                         border: `1px solid ${t === 'incident' ? C.danger : C.indigo}44`,
                       }}
                     >
-                      {(TAG_LABEL[t] || t).toUpperCase()}
+                      {labelOf(t).toUpperCase()}
                     </span>
                   ))}
                 </div>
@@ -9954,8 +10423,9 @@ function TeamCard({ venue, session, showToast }) {
     <div style={{ ...S.card, marginBottom: 14 }}>
       <div style={{ ...S.h2, marginBottom: 6 }}>Équipe</div>
       <div style={{ fontSize: 12, color: C.dim, marginBottom: 14, lineHeight: 1.55 }}>
-        Invitez par e-mail. La personne crée son compte avec cette adresse depuis l’écran
-        « Espace équipe » et rejoint automatiquement ce lieu — aucun code à transmettre.
+        Invitez par e-mail. La personne ouvre l’<strong>Espace équipe</strong>, choisit l’onglet
+        <strong> Rejoindre</strong>, crée son compte avec cette adresse exacte — et se retrouve sur
+        cette soirée, en même temps que vous. Aucun code à transmettre.
       </div>
 
       {loading ? (
