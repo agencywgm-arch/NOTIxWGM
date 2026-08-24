@@ -12,8 +12,9 @@
 
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import QRCode from 'qrcode'
-import { supabase, isConfigured, frError, BASE_PATH, scanUrl } from './lib/supabase.js'
-import { C, S, FONT, GRADIENT, eur, timeFR, dateFR, phoneFR } from './lib/theme.js'
+import { supabase, isConfigured, frError, errorKey, BASE_PATH, scanUrl } from './lib/supabase.js'
+import { C, S, FONT, GRADIENT, eur, timeFR, dateFR, phoneFR, normalizePhoneFR } from './lib/theme.js'
+import { dict, useT, trProduct, LANG_LABEL } from './lib/i18n.js'
 import {
   canvasesToPdfBlob,
   shareOrDownload,
@@ -24,7 +25,15 @@ import {
   loadImage,
   canvasToPng,
 } from './lib/pdf.js'
-import { Alarm, chime, tick, unlockAudio } from './lib/sound.js'
+import {
+  Alarm,
+  chime,
+  tick,
+  unlockAudio,
+  RINGTONES,
+  DEFAULT_RINGTONE,
+  previewRingtone,
+} from './lib/sound.js'
 import { pushSupported, registerServiceWorker, subscribePush, notify, vibrate } from './lib/push.js'
 
 // ----------------------------------------------------------------------------
@@ -81,6 +90,198 @@ const LS = {
 
 const uid = () => Math.random().toString(36).slice(2, 10)
 
+/**
+ * Oublie tout ce que l'appareil retient du client : identité mise en cache,
+ * code promo de la soirée, explication des crédits déjà vue. La langue est
+ * conservée — c'est un réglage d'appareil, pas une donnée d'identité.
+ *
+ * Sert à la déconnexion : sans ce nettoyage, le formulaire se rouvrirait
+ * pré-rempli et upsertMeFromCache() recréerait la fiche en silence.
+ */
+function forgetMe() {
+  try {
+    const doomed = []
+    for (let i = 0; i < localStorage.length; i++) {
+      const k = localStorage.key(i)
+      if (k && k.startsWith('noti:') && k !== 'noti:lang') doomed.push(k)
+    }
+    doomed.forEach((k) => localStorage.removeItem(k))
+  } catch (_) {}
+}
+
+// ---------------------------------------------------------- Défilement glissé
+/**
+ * `scrollIntoView({ behavior: 'smooth' })` ne suffisait pas : un tap sur une
+ * puce de catégorie lançait DEUX défilements lisses à la suite — la page vers
+ * la section, puis la barre de puces pour recentrer la puce active. Or le
+ * second `scrollIntoView` remonte aussi jusqu'au document et annule le premier
+ * en cours : la page arrivait d'un coup, d'où l'impression de saut brusque.
+ *
+ * On anime donc nous-mêmes, sur un seul axe à la fois, avec une courbe douce
+ * et une durée proportionnelle à la distance (la « glissade »).
+ */
+function glide(read, write, to) {
+  const from = read()
+  const dist = to - from
+  if (Math.abs(dist) < 1) return
+  let reduce = false
+  try {
+    reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches
+  } catch (_) {}
+  if (reduce || typeof requestAnimationFrame === 'undefined') {
+    write(to)
+    return
+  }
+  const dur = Math.min(900, Math.max(340, Math.abs(dist) * 0.55))
+  const t0 = performance.now()
+  // easeInOutCubic : départ et arrivée amortis, vitesse au milieu.
+  const ease = (t) => (t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2)
+  const step = (now) => {
+    const t = Math.min(1, (now - t0) / dur)
+    write(from + dist * ease(t))
+    if (t < 1) requestAnimationFrame(step)
+  }
+  requestAnimationFrame(step)
+}
+
+// ------------------------------------------------------- Bouton « précédent »
+/**
+ * Retour terrain : depuis la carte, ouvrir l'espace client puis faire
+ * « précédent » faisait SORTIR du site — l'outil n'ayant qu'une seule entrée
+ * d'historique, le navigateur remontait au site visité avant. Insupportable en
+ * pleine soirée : on perdait son panier.
+ *
+ * MÉCANIQUE. Les couches ouvertes (feuille modale, onglet secondaire) sont
+ * empilées ici, et UNE SEULE entrée d'historique est posée tant que la pile
+ * n'est pas vide. « Précédent » retire cette entrée, ferme la couche du
+ * dessus, et une nouvelle entrée est reposée s'il en reste dessous.
+ *
+ * Pourquoi une seule entrée, et pas une par couche : avec une entrée par
+ * couche, l'enchaînement « Panier → Continuer → Commande » cassait. Les deux
+ * feuilles changent d'état dans le même clic ; la fermeture du panier appelait
+ * history.back(), dont le popstate est différé, et il arrivait APRÈS que
+ * l'écran de commande avait posé son écouteur — qui le prenait pour un
+ * « précédent » de l'utilisateur et refermait l'écran aussitôt. Résultat : on
+ * retombait sur la carte, impossible de commander. Ici, fermer une couche et
+ * en ouvrir une autre dans le même rendu ne touche pas du tout à l'historique.
+ *
+ * La synchronisation est différée d'une micro-tâche pour cette raison : les
+ * démontages et montages d'un même rendu sont ainsi comptés ensemble.
+ */
+const backLayers = []
+let backArmed = false // une entrée d'historique est posée
+let backSelfPop = false // le prochain popstate vient de nous, pas de l'utilisateur
+let backScheduled = false
+let backListening = false
+
+function backSync() {
+  if (backScheduled || typeof window === 'undefined') return
+  backScheduled = true
+  queueMicrotask(() => {
+    backScheduled = false
+    if (backLayers.length > 0 && !backArmed) {
+      backArmed = true
+      window.history.pushState({ notiLayer: true }, '')
+    } else if (backLayers.length === 0 && backArmed) {
+      // Plus rien d'ouvert : on retire l'entrée qu'on avait posée, sinon elle
+      // resterait dans l'historique et le premier « précédent » ne ferait rien.
+      backArmed = false
+      backSelfPop = true
+      window.history.back()
+    }
+  })
+}
+
+function backOnPop() {
+  if (backSelfPop) {
+    backSelfPop = false
+    return
+  }
+  if (!backArmed) return
+  backArmed = false
+  const top = backLayers[backLayers.length - 1]
+  // La fermeture démonte la couche ; c'est son nettoyage qui rappellera
+  // backSync(), lequel reposera une entrée s'il reste des couches dessous.
+  if (top) top()
+}
+
+function useBackGuard(active, onBack) {
+  const cb = useRef(onBack)
+  cb.current = onBack
+
+  useEffect(() => {
+    if (!active || typeof window === 'undefined') return
+    if (!backListening) {
+      backListening = true
+      window.addEventListener('popstate', backOnPop)
+    }
+    const layer = () => cb.current?.()
+    backLayers.push(layer)
+    backSync()
+    return () => {
+      const i = backLayers.lastIndexOf(layer)
+      if (i >= 0) backLayers.splice(i, 1)
+      backSync()
+    }
+  }, [active])
+}
+
+/** Le conteneur qui défile réellement autour de `el` (null = le document). */
+function scrollBoxOf(el) {
+  let n = el?.parentElement
+  while (n && n !== document.body && n !== document.documentElement) {
+    const s = getComputedStyle(n)
+    if (/(auto|scroll|overlay)/.test(s.overflowY) && n.scrollHeight - n.clientHeight > 2) return n
+    n = n.parentElement
+  }
+  return null
+}
+
+/**
+ * Amène `el` en haut de la zone visible, en réservant `offset` pixels pour les
+ * en-têtes collants. Fonctionne aussi bien dans la page que dans une feuille
+ * (aperçu carte côté staff), d'où la détection du conteneur.
+ */
+function glideIntoView(el, offset = 0) {
+  if (!el) return
+  const box = scrollBoxOf(el)
+  if (box) {
+    const to = box.scrollTop + el.getBoundingClientRect().top - box.getBoundingClientRect().top - offset
+    const max = Math.max(0, box.scrollHeight - box.clientHeight)
+    glide(
+      () => box.scrollTop,
+      (v) => {
+        box.scrollTop = v
+      },
+      Math.max(0, Math.min(max, to))
+    )
+  } else {
+    const to = window.scrollY + el.getBoundingClientRect().top - offset
+    const max = Math.max(0, document.documentElement.scrollHeight - window.innerHeight)
+    glide(
+      () => window.scrollY,
+      (v) => window.scrollTo(0, v),
+      Math.max(0, Math.min(max, to))
+    )
+  }
+}
+
+/** Recentre une puce dans sa barre horizontale — sans toucher au défilement de la page. */
+function glideChipIntoView(chip) {
+  const box = chip?.parentElement
+  if (!box) return
+  const max = Math.max(0, box.scrollWidth - box.clientWidth)
+  if (max < 2) return
+  const to = chip.offsetLeft - (box.clientWidth - chip.offsetWidth) / 2
+  glide(
+    () => box.scrollLeft,
+    (v) => {
+      box.scrollLeft = v
+    },
+    Math.max(0, Math.min(max, to))
+  )
+}
+
 /** Réappelle upsert_me() depuis le profil mis en cache sur l'appareil (auto-guérison). */
 function upsertMeFromCache() {
   return supabase.rpc('upsert_me', {
@@ -132,17 +333,14 @@ const ESCALADE_MIN = 20
  * (1 alcool = 2 crédits, 1 soft = 1 crédit) — c'est juste plus parlant que
  * « 6 crédits » quand on regarde son écran au bar.
  */
-function creditsAsDrinks(credits) {
+function creditsAsDrinks(credits, lang = 'fr') {
   const n = Number(credits) || 0
-  if (n <= 0) return 'Crédits épuisés'
+  const d = dict(lang)
+  if (n <= 0) return d.creditsEmpty
   const alcools = Math.floor(n / 2)
-  if (alcools === 0) return `${n} soft${n > 1 ? 's' : ''}`
+  if (alcools === 0) return d.nSofts(n)
   const reste = n % 2
-  return (
-    `${alcools} alcool${alcools > 1 ? 's' : ''}` +
-    (reste ? ' + 1 soft' : '') +
-    `, ou ${n} soft${n > 1 ? 's' : ''}`
-  )
+  return d.nAlcohols(alcools) + (reste ? d.plusOneSoft : '') + d.orNSofts(n)
 }
 
 function waitingMin(order, now = Date.now()) {
@@ -151,71 +349,43 @@ function waitingMin(order, now = Date.now()) {
   return Math.max(0, Math.floor((now - new Date(from).getTime()) / 60000))
 }
 
-// Multilingue FR / EN / ES (feuille de route §04 — pas de RTL)
-const T = {
-  fr: {
-    welcome: 'Bienvenue',
-    start: 'Commander',
-    identify: 'Faisons connaissance',
-    firstName: 'Prénom',
-    backAgain: 'Bon retour parmi nous',
-    order: 'Commander',
-    cart: 'Panier',
-    total: 'Total',
-    send: 'Envoyer la commande',
-    payAtBar: 'À régler au bar',
-    soldOut: 'Épuisé',
-    note: 'Note pour le bar',
-    promo: 'Code promo',
-    pickupCode: 'Code de retrait',
-    ready: 'Prête à retirer',
-    newOrder: 'Nouvelle commande',
-  },
-  en: {
-    welcome: 'Welcome',
-    start: 'Order',
-    identify: 'Let’s get to know you',
-    firstName: 'First name',
-    backAgain: 'Welcome back',
-    order: 'Order',
-    cart: 'Cart',
-    total: 'Total',
-    send: 'Send order',
-    payAtBar: 'Pay at the bar',
-    soldOut: 'Sold out',
-    note: 'Note for the bar',
-    promo: 'Promo code',
-    pickupCode: 'Pickup code',
-    ready: 'Ready for pickup',
-    newOrder: 'New order',
-  },
-  es: {
-    welcome: 'Bienvenido',
-    start: 'Pedir',
-    identify: 'Vamos a conocernos',
-    firstName: 'Nombre',
-    backAgain: 'Bienvenido de nuevo',
-    order: 'Pedir',
-    cart: 'Carrito',
-    total: 'Total',
-    send: 'Enviar pedido',
-    payAtBar: 'Pagar en la barra',
-    soldOut: 'Agotado',
-    note: 'Nota para la barra',
-    promo: 'Código promocional',
-    pickupCode: 'Código de recogida',
-    ready: 'Listo para recoger',
-    newOrder: 'Nuevo pedido',
-  },
+// Multilingue FR / EN / ES — le dictionnaire complet du parcours client vit
+// dans src/lib/i18n.js (voir useT / dict / trProduct).
+
+const tr = trProduct
+
+// Libellés de statut côté client : mêmes étapes que ORDER_STATUS (qui reste en
+// français pour l'espace staff), traduites via le dictionnaire.
+const ST_KEY = {
+  RECEIVED: 'stReceived',
+  IN_PREP: 'stInPrep',
+  READY: 'stReady',
+  PICKED_UP: 'stPickedUp',
+  PAID: 'stPaid',
+  UNPAID: 'stUnpaid',
+  CANCELLED: 'stCancelled',
 }
+const ST_SHORT_KEY = { ...ST_KEY, IN_PREP: 'stInPrepShort', READY: 'stReadyShort' }
 
-const useT = (lang) => T[lang] || T.fr
+const statusLabel = (st, lang, short = false) =>
+  dict(lang)[(short ? ST_SHORT_KEY : ST_KEY)[st]] || ORDER_STATUS[st]?.label || st
 
-/** Traduction d'un produit selon la langue choisie. */
-function tr(p, lang) {
-  if (!lang || lang === 'fr') return { name: p.name, description: p.description }
-  const t = p.translations?.[lang]
-  return { name: t?.name || p.name, description: t?.description || p.description }
+/**
+ * Erreur affichée au client, dans SA langue.
+ *
+ * Retour terrain : « Could not find the function public.upsert_me(...) in the
+ * schema cache » s'est retrouvé affiché tel quel à un client au milieu d'une
+ * soirée. Un message interne de PostgREST ne doit JAMAIS atteindre l'écran :
+ * seules les erreurs métier connues (clés stables, voir errorKey) sont
+ * traduites ; tout le reste devient un message générique, le détail partant
+ * dans la console pour le diagnostic.
+ */
+function clientError(e, lang) {
+  const d = dict(lang)
+  const k = errorKey(e)
+  if (k && d['err_' + k]) return d['err_' + k]
+  console.error('[Noti] erreur non traduite', e)
+  return d.err_generic
 }
 
 const lineUnit = (l) =>
@@ -347,7 +517,9 @@ function useToast() {
   return [toast, show]
 }
 
-function Sheet({ open, onClose, title, children, maxHeight = '88vh' }) {
+function Sheet({ open, onClose, title, children, maxHeight = '88vh', lang = 'fr' }) {
+  // Le « précédent » du navigateur ferme la feuille au lieu de quitter le site.
+  useBackGuard(open, onClose)
   if (!open) return null
   return (
     <div
@@ -378,11 +550,32 @@ function Sheet({ open, onClose, title, children, maxHeight = '88vh' }) {
         }}
       >
         <div
-          style={{ width: 44, height: 4, borderRadius: 2, background: C.lineHi, margin: '0 auto 18px' }}
+          style={{ width: 44, height: 4, borderRadius: 2, background: C.lineHi, margin: '0 auto 14px' }}
         />
-        {title && (
-          <div style={{ ...S.h1, fontSize: 23, marginBottom: 16 }}>{title}</div>
-        )}
+        {/* Flèche de retour explicite : la barre grise ci-dessus n'était pas
+            comprise comme un moyen de fermer, et le tap « derrière » la feuille
+            n'a aucune affordance. */}
+        <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: title ? 16 : 8 }}>
+          <button
+            onClick={onClose}
+            aria-label={dict(lang).back}
+            style={{
+              width: 38,
+              height: 38,
+              flexShrink: 0,
+              borderRadius: 12,
+              border: `1.5px solid ${C.lineHi}`,
+              background: C.paper,
+              color: C.text,
+              fontSize: 19,
+              lineHeight: 1,
+              cursor: 'pointer',
+            }}
+          >
+            ‹
+          </button>
+          {title && <div style={{ ...S.h1, fontSize: 23, flex: 1, minWidth: 0 }}>{title}</div>}
+        </div>
         {children}
       </div>
     </div>
@@ -395,6 +588,220 @@ function Field({ label, children, hint }) {
       <label style={S.label}>{label}</label>
       {children}
       {hint && <div style={{ fontSize: 11.5, color: C.faint, marginTop: 6 }}>{hint}</div>}
+    </div>
+  )
+}
+
+/**
+ * Date de naissance en trois cases JJ / MM / AAAA.
+ *
+ * Retour terrain : « faire défiler jusqu'aux années 90 est long et pénible ».
+ * Le sélecteur natif d'`<input type="date">` s'ouvre sur le mois courant sur
+ * mobile — atteindre 1994 demande des dizaines de gestes. Ici on tape huit
+ * chiffres, la case suivante prend le relais toute seule.
+ *
+ * Les jetons `bday-day` / `bday-month` / `bday-year` sont ceux du standard
+ * HTML : le remplissage automatique du navigateur continue de fonctionner,
+ * comme sur le code postal.
+ *
+ * La valeur circulante reste au format ISO (AAAA-MM-JJ), celui de la base.
+ */
+function BirthdateField({ value, onChange, label }) {
+  // Les trois cases ont leur propre état : une saisie partielle (« 1 » dans le
+  // jour) ne forme pas encore de date, et la remonter au parent effacerait ce
+  // que la personne vient de taper.
+  const split = (v) => {
+    const mt = /^(\d{4})-(\d{2})-(\d{2})$/.exec(v || '')
+    return mt ? { d: mt[3], m: mt[2], y: mt[1] } : { d: '', m: '', y: '' }
+  }
+  const [parts, setParts] = useState(() => split(value))
+
+  // Synchronisation descendante seulement : on ne réécrit les cases que si la
+  // date reçue diffère de celle qu'elles composent (chargement de la fiche,
+  // remplissage automatique du navigateur).
+  const joined =
+    parts.d.length === 2 && parts.m.length === 2 && parts.y.length === 4
+      ? `${parts.y}-${parts.m}-${parts.d}`
+      : ''
+  useEffect(() => {
+    if ((value || '') !== joined) setParts(split(value))
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [value])
+
+  const dayRef = useRef(null)
+  const monthRef = useRef(null)
+  const yearRef = useRef(null)
+
+  const { d, m, y } = parts
+
+  const push = (nd, nm, ny) => {
+    setParts({ d: nd, m: nm, y: ny })
+    if (nd.length === 2 && nm.length === 2 && ny.length === 4) {
+      onChange(`${ny}-${nm}-${nd}`)
+    } else if (value) {
+      // La date était complète et ne l'est plus : le parent doit le savoir,
+      // sinon la validation laisserait passer une saisie tronquée.
+      onChange('')
+    }
+  }
+
+  const digits = (v, max) => v.replace(/\D/g, '').slice(0, max)
+
+  const box = {
+    ...S.input,
+    textAlign: 'center',
+    fontVariantNumeric: 'tabular-nums',
+    letterSpacing: 1,
+  }
+
+  return (
+    <Field label={label}>
+      <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+        <input
+          ref={dayRef}
+          style={{ ...box, width: 62 }}
+          inputMode="numeric"
+          autoComplete="bday-day"
+          placeholder="JJ"
+          maxLength={2}
+          value={d}
+          onChange={(e) => {
+            const v = digits(e.target.value, 2)
+            push(v, m, y)
+            // Deux chiffres saisis : on passe au mois sans que le doigt bouge.
+            if (v.length === 2) monthRef.current?.focus()
+          }}
+        />
+        <span style={{ color: C.faint }}>/</span>
+        <input
+          ref={monthRef}
+          style={{ ...box, width: 62 }}
+          inputMode="numeric"
+          autoComplete="bday-month"
+          placeholder="MM"
+          maxLength={2}
+          value={m}
+          onChange={(e) => {
+            const v = digits(e.target.value, 2)
+            push(d, v, y)
+            if (v.length === 2) yearRef.current?.focus()
+          }}
+          onKeyDown={(e) => {
+            if (e.key === 'Backspace' && !m) dayRef.current?.focus()
+          }}
+        />
+        <span style={{ color: C.faint }}>/</span>
+        <input
+          ref={yearRef}
+          style={{ ...box, flex: 1, minWidth: 84 }}
+          inputMode="numeric"
+          autoComplete="bday-year"
+          placeholder="AAAA"
+          maxLength={4}
+          value={y}
+          onChange={(e) => push(d, m, digits(e.target.value, 4))}
+          onKeyDown={(e) => {
+            if (e.key === 'Backspace' && !y) monthRef.current?.focus()
+          }}
+        />
+      </div>
+    </Field>
+  )
+}
+
+/**
+ * Rappel « complétez votre profil ». Volontairement absent de la carte : il
+ * s'affiche dans Messages et dans l'espace client, où l'on vient déjà pour
+ * gérer sa fiche. `onOpen` absent = on est déjà dans l'espace client, le
+ * rappel n'a plus de lien où renvoyer.
+ */
+function ProfileReminder({ customer, lang, onOpen }) {
+  const t = useT(lang)
+  const missing = [
+    !customer?.postal_code && t.fPostal,
+    !customer?.birthdate && t.fBirth,
+    !customer?.email && t.fEmail,
+    !customer?.instagram && t.fInstagram,
+  ].filter(Boolean)
+  if (!customer || missing.length === 0) return null
+
+  // Mise en page en blocs plutôt qu'un bouton posé au fil du texte : en ligne,
+  // il ne s'alignait pas sur la ligne de base et la bulle paraissait de
+  // travers. Ici chaque élément occupe sa propre ligne, calée à gauche.
+  return (
+    <div style={{ marginBottom: 14 }}>
+      <Banner tone="info">
+        <div style={{ display: 'grid', gap: 6, textAlign: 'left' }}>
+          <strong style={{ fontWeight: 600 }}>{t.completeProfile}</strong>
+          <span style={{ fontWeight: 400, opacity: 0.9 }}>{missing.join(' · ')}</span>
+          {onOpen && (
+            <button
+              onClick={onOpen}
+              style={{
+                justifySelf: 'start',
+                background: 'none',
+                border: 'none',
+                padding: 0,
+                marginTop: 2,
+                color: 'inherit',
+                fontWeight: 600,
+                fontSize: 'inherit',
+                textDecoration: 'underline',
+                cursor: 'pointer',
+              }}
+            >
+              {t.goToAccount} ›
+            </button>
+          )}
+        </div>
+      </Banner>
+    </div>
+  )
+}
+
+/**
+ * Mot de passe avec œil de relecture.
+ *
+ * Retour terrain : « lors de ma première connexion, j'avais copié-collé depuis
+ * le message reçu et le collage avait embarqué le préfixe. Impossible de voir
+ * ce que j'avais saisi — que des points. J'ai bloqué un bon moment sur un
+ * problème trivial. » Le collage d'un mot de passe est le cas normal, pas
+ * l'exception : il faut pouvoir relire.
+ */
+function PasswordInput({ value, onChange, autoComplete = 'current-password', autoFocus = false }) {
+  const [shown, setShown] = useState(false)
+  return (
+    <div style={{ position: 'relative' }}>
+      <input
+        style={{ ...S.input, paddingRight: 46 }}
+        type={shown ? 'text' : 'password'}
+        required
+        minLength={6}
+        autoComplete={autoComplete}
+        value={value}
+        onChange={onChange}
+        autoFocus={autoFocus}
+      />
+      <button
+        type="button"
+        onClick={() => setShown((v) => !v)}
+        aria-label={shown ? 'Masquer le mot de passe' : 'Afficher le mot de passe'}
+        title={shown ? 'Masquer' : 'Afficher'}
+        style={{
+          position: 'absolute',
+          right: 6,
+          top: 6,
+          width: 38,
+          height: 38,
+          border: 'none',
+          background: 'transparent',
+          cursor: 'pointer',
+          fontSize: 16,
+          color: C.dim,
+        }}
+      >
+        {shown ? '🙈' : '👁️'}
+      </button>
     </div>
   )
 }
@@ -435,7 +842,8 @@ function Banner({ tone = 'info', children }) {
 }
 
 /** Bandeau de rappel : la plateforme n'encaisse jamais. */
-function PayAtBar({ compact = false }) {
+function PayAtBar({ compact = false, lang = 'fr' }) {
+  const t = useT(lang)
   return (
     <div
       style={{
@@ -456,12 +864,10 @@ function PayAtBar({ compact = false }) {
           color: C.terracotta,
         }}
       >
-        Règlement au bar
+        {t.payTitle}
       </div>
       {!compact && (
-        <div style={{ fontSize: 12.5, color: C.dim, marginTop: 5, lineHeight: 1.5 }}>
-          Aucun paiement en ligne. Vous réglez au comptoir en retirant votre commande.
-        </div>
+        <div style={{ fontSize: 12.5, color: C.dim, marginTop: 5, lineHeight: 1.5 }}>{t.paySub}</div>
       )}
     </div>
   )
@@ -611,26 +1017,18 @@ function ResetPasswordScreen({ onDone }) {
           ) : (
             <form onSubmit={submit}>
               <Field label="Nouveau mot de passe">
-                <input
-                  style={S.input}
-                  type="password"
-                  required
-                  minLength={6}
-                  autoComplete="new-password"
+                <PasswordInput
                   value={password}
                   onChange={(e) => setPassword(e.target.value)}
+                  autoComplete="new-password"
                   autoFocus
                 />
               </Field>
               <Field label="Confirmer le mot de passe">
-                <input
-                  style={S.input}
-                  type="password"
-                  required
-                  minLength={6}
-                  autoComplete="new-password"
+                <PasswordInput
                   value={confirm}
                   onChange={(e) => setConfirm(e.target.value)}
+                  autoComplete="new-password"
                 />
               </Field>
 
@@ -684,7 +1082,11 @@ function ClientApp({ scanPointId, session }) {
   const [customer, setCustomer] = useState(null)
   const [loading, setLoading] = useState(true)
   const [fatal, setFatal] = useState('')
-  const [step, setStep] = useState('welcome') // welcome|identify|hello|app
+  // welcome : premier passage · identify : formulaire · hello : reconnaissance
+  // app : la carte · intro : l'écran d'explication rouvert depuis le logo, sans
+  // ressaisie (retour terrain : « en cas de bug ou de perte de repère, on
+  // clique sur le logo et on repart d'une base saine »).
+  const [step, setStep] = useState('welcome')
   const [lang, setLang] = useState(LS.get('noti:lang', 'fr'))
   const [toast, showToast] = useToast()
 
@@ -710,7 +1112,7 @@ function ClientApp({ scanPointId, session }) {
           setLang(sp.events.languages[0])
         }
       } catch (e) {
-        if (!dead) setFatal(frError(e))
+        if (!dead) setFatal(clientError(e, lang))
       } finally {
         if (!dead) setLoading(false)
       }
@@ -775,15 +1177,43 @@ function ClientApp({ scanPointId, session }) {
       autoEntered.current = true
       enterApp().catch((e) => {
         autoEntered.current = false
-        showToast(frError(e), 'error')
+        showToast(clientError(e, lang), 'error')
       })
     }
-  }, [loading, fatal, session, customer, step, enterApp, showToast])
+  }, [loading, fatal, session, customer, step, enterApp, showToast, lang])
+
+  // L'écran d'explication rouvert depuis le logo est une couche : « précédent »
+  // y renvoie à la carte au lieu de quitter le site.
+  useBackGuard(step === 'intro', () => setStep('app'))
+
+  // ---- Déconnexion ---------------------------------------------------------
+  // La session anonyme est justement faite pour ne jamais redemander ses
+  // informations. Mais il faut pouvoir repasser par le parcours d'entrée : pour
+  // le tester, ou quand un téléphone change de mains.
+  //
+  // Deux choses à effacer, pas une : la session Supabase ET ce que l'appareil a
+  // mis en cache. Sans le second, upsertMeFromCache() recréerait la fiche à la
+  // première action.
+  //
+  // Rien n'est perdu côté serveur : le téléphone est l'ancre d'identité (voir
+  // upsert_me), donc se réinscrire avec le même numéro reprend la fiche
+  // existante — mêmes commandes, mêmes crédits, même historique.
+  const logout = useCallback(async () => {
+    forgetMe()
+    autoEntered.current = false
+    setCustomer(null)
+    setStep('welcome')
+    try {
+      await supabase.auth.signOut()
+    } catch (e) {
+      console.warn('[Noti] signOut', e)
+    }
+  }, [])
 
   if (loading)
     return (
       <div style={S.page}>
-        <Spinner label="Ouverture…" />
+        <Spinner label={dict(lang).opening} />
       </div>
     )
 
@@ -791,7 +1221,7 @@ function ClientApp({ scanPointId, session }) {
     return (
       <div style={{ ...S.page, padding: 24 }}>
         <Keyframes />
-        <Empty emoji="🚫" title="QR code inconnu" sub={fatal} />
+        <Empty emoji="🚫" title={dict(lang).unknownQr} sub={fatal} />
       </div>
     )
 
@@ -803,11 +1233,17 @@ function ClientApp({ scanPointId, session }) {
     if (session?.user && customer)
       return (
         <div style={S.page}>
-          <Spinner label="Bon retour parmi nous…" />
+          <Spinner label={dict(lang).backSoon} />
         </div>
       )
     return <WelcomeScreen {...shared} onStart={() => setStep('identify')} />
   }
+
+  // Écran d'explication rouvert depuis le logo : le client est déjà identifié
+  // et déjà compté présent, on le renvoie donc directement dans la carte.
+  // « Précédent » y ramène aussi, plutôt que de quitter le site.
+  if (step === 'intro')
+    return <WelcomeScreen {...shared} onStart={() => setStep('app')} backToMenu />
 
   if (step === 'identify')
     return (
@@ -829,14 +1265,20 @@ function ClientApp({ scanPointId, session }) {
 
   return (
     <>
-      <OrderingApp {...shared} customer={customer} onReloadCustomer={loadCustomer} />
+      <OrderingApp
+        {...shared}
+        customer={customer}
+        onReloadCustomer={loadCustomer}
+        onHome={() => setStep('intro')}
+        onLogout={logout}
+      />
       <Toast toast={toast} />
     </>
   )
 }
 
 // ------------------------------------------------------------------ Accueil
-function WelcomeScreen({ event, venue, scanPoint, lang, setLang, onStart }) {
+function WelcomeScreen({ event, venue, scanPoint, lang, setLang, onStart, backToMenu = false }) {
   const t = useT(lang)
   const closed = event && (!event.is_active || !event.accept_orders)
 
@@ -853,45 +1295,21 @@ function WelcomeScreen({ event, venue, scanPoint, lang, setLang, onStart }) {
     >
       <Keyframes />
 
+      {/* Retour terrain : le nom du lieu au-dessus du logo faisait doublon, et
+          le badge du point de scan (« Entrée », « Point bar ») est une donnée
+          d'exploitation dont le client n'a pas besoin. On garde « Noti
+          Calling », la soirée et son horaire. */}
       <div style={{ textAlign: 'center', marginBottom: 30 }}>
         <div style={{ marginBottom: 22 }}>
           <Logo size={1.5} />
         </div>
-        <div
-          style={{
-            fontFamily: FONT.label,
-            fontSize: 12,
-            letterSpacing: 2.4,
-            textTransform: 'uppercase',
-            color: C.dim,
-          }}
-        >
-          {venue?.name}
-        </div>
-        <h1 style={{ ...S.h1, fontSize: 34, marginTop: 10 }}>{event?.name}</h1>
+        <h1 style={{ ...S.h1, fontSize: 34 }}>{event?.name}</h1>
         {event?.starts_at && (
           <div style={{ color: C.dim, fontSize: 13.5, marginTop: 8 }}>
             {dateFR(event.starts_at)}
             {event.closes_at ? ` → ${timeFR(event.closes_at)}` : ''}
           </div>
         )}
-        <div
-          style={{
-            display: 'inline-block',
-            marginTop: 14,
-            padding: '6px 14px',
-            borderRadius: 999,
-            background: GRADIENT,
-            color: C.navy,
-            fontFamily: FONT.label,
-            fontSize: 11.5,
-            fontWeight: 600,
-            letterSpacing: 1.2,
-            textTransform: 'uppercase',
-          }}
-        >
-          {scanPoint?.kind === 'bar' ? 'Point bar' : scanPoint?.kind === 'table' ? scanPoint.label || 'Table' : 'Entrée'}
-        </div>
       </div>
 
       {event?.welcome_message && (
@@ -901,9 +1319,15 @@ function WelcomeScreen({ event, venue, scanPoint, lang, setLang, onStart }) {
       )}
 
       {closed ? (
-        <Banner tone="warn">
-          {event?.service_message || 'Les commandes sont fermées pour le moment.'}
-        </Banner>
+        <>
+          <Banner tone="warn">{event?.service_message || t.ordersClosed}</Banner>
+          {/* Commandes fermées : on entre quand même. C'est par l'application
+              que l'organisateur continue de parler à la salle — « on ferme dans
+              30 minutes » — et sans ce bouton on restait coincé ici. */}
+          <button onClick={onStart} style={{ ...S.btnGhost, marginTop: 16 }}>
+            {t.seeMenu}
+          </button>
+        </>
       ) : (
         <>
           {/* Levée d'ambiguïté (retour terrain) : plusieurs personnes ont cru
@@ -911,19 +1335,20 @@ function WelcomeScreen({ event, venue, scanPoint, lang, setLang, onStart }) {
               bouteilles à table — et faisaient malgré tout la queue au bar. */}
           <div style={{ marginBottom: 16 }}>
             <Banner tone="info">
-              <strong>Toute la carte se commande ici, depuis votre téléphone.</strong> Plus besoin de
-              faire la queue : vous ne passez au bar que pour <strong>récupérer</strong> votre
-              commande, et pour les <strong>bouteilles</strong> (servies immédiatement).
+              <strong>{t.allMenuHere}</strong>{' '}
+              {t.noQueue(t.noQueueStrong, t.noQueueBottles)}
             </Banner>
           </div>
 
           <div style={{ ...S.card, marginBottom: 16 }}>
             <div style={{ display: 'grid', gap: 14 }}>
               {[
-                { n: '1', t: 'Vous commandez ici', s: 'Toute la carte, sans faire la queue' },
-                { n: '2', t: 'Le bar prépare', s: 'Vous suivez en direct, vous restez où vous êtes' },
-                { n: '3', t: 'Vous retirez au bar', s: 'Avec votre code, sans attendre' },
-                { n: '4', t: 'Vous réglez sur place', s: 'Au comptoir, comme d’habitude' },
+                { n: '1', t: t.step1t, s: t.step1s },
+                // Le vrai bénéfice de l'outil, mis en avant : on ne surveille
+                // plus le bar, c'est le bar qui prévient.
+                { n: '2', t: t.step2t, s: t.step2s, key: true },
+                { n: '3', t: t.step3t, s: t.step3s },
+                { n: '4', t: t.step4t, s: t.step4s },
               ].map((s) => (
                 <div key={s.n} style={{ display: 'flex', gap: 14, alignItems: 'center' }}>
                   <div
@@ -946,7 +1371,15 @@ function WelcomeScreen({ event, venue, scanPoint, lang, setLang, onStart }) {
                   </div>
                   <div>
                     <div style={{ fontWeight: 500, fontSize: 14.5 }}>{s.t}</div>
-                    <div style={{ fontSize: 12, color: C.dim }}>{s.s}</div>
+                    <div
+                      style={{
+                        fontSize: 12,
+                        color: s.key ? C.terracotta : C.dim,
+                        fontWeight: s.key ? 600 : 400,
+                      }}
+                    >
+                      {s.s}
+                    </div>
                   </div>
                 </div>
               ))}
@@ -960,7 +1393,7 @@ function WelcomeScreen({ event, venue, scanPoint, lang, setLang, onStart }) {
             }}
             style={S.btn}
           >
-            {t.start}
+            {backToMenu ? t.seeMenu : t.start}
           </button>
         </>
       )}
@@ -977,14 +1410,14 @@ function WelcomeScreen({ event, venue, scanPoint, lang, setLang, onStart }) {
                 color: lang === l ? C.terracotta : C.dim,
               }}
             >
-              {l.toUpperCase()}
+              {LANG_LABEL[l] || l.toUpperCase()}
             </button>
           ))}
         </div>
       )}
 
       <div style={{ marginTop: 22 }}>
-        <PayAtBar />
+        <PayAtBar lang={lang} />
       </div>
     </div>
   )
@@ -997,6 +1430,20 @@ function WelcomeScreen({ event, venue, scanPoint, lang, setLang, onStart }) {
 // optionnels : le client peut les compléter plus tard depuis son espace
 // client (voir ClientProfileSheet), avec un rappel s'ils manquent.
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/
+
+/**
+ * Une date saisie à la main peut être absurde (31/02, année 0012, demain).
+ * Le serveur refuse déjà les dates futures ; ici on le dit avant l'aller-retour.
+ */
+function birthdateIsValid(iso) {
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(iso || '')
+  if (!m) return false
+  const [y, mo, d] = [Number(m[1]), Number(m[2]), Number(m[3])]
+  if (y < 1900 || mo < 1 || mo > 12 || d < 1 || d > 31) return false
+  const dt = new Date(Date.UTC(y, mo - 1, d))
+  if (dt.getUTCFullYear() !== y || dt.getUTCMonth() !== mo - 1 || dt.getUTCDate() !== d) return false
+  return dt.getTime() <= Date.now()
+}
 
 function IdentifyScreen({ lang, onVerified }) {
   const t = useT(lang)
@@ -1013,11 +1460,12 @@ function IdentifyScreen({ lang, onVerified }) {
 
   async function submit() {
     setErr('')
-    if (!firstName.trim() || !lastName.trim()) return setErr('Prénom et nom sont obligatoires.')
-    if (!phone.trim()) return setErr('Numéro de téléphone obligatoire.')
-    if (!postalCode.trim()) return setErr('Code postal obligatoire.')
-    if (!birthdate) return setErr('Date de naissance obligatoire.')
-    if (email.trim() && !EMAIL_RE.test(email.trim())) return setErr('Adresse e-mail invalide.')
+    if (!firstName.trim() || !lastName.trim()) return setErr(t.errNames)
+    if (!phone.trim()) return setErr(t.errPhone)
+    if (!postalCode.trim()) return setErr(t.errPostal)
+    if (!birthdate) return setErr(t.errBirth)
+    if (!birthdateIsValid(birthdate)) return setErr(t.errBirthInvalid)
+    if (email.trim() && !EMAIL_RE.test(email.trim())) return setErr(t.errEmail)
     setBusy(true)
     try {
       const { data } = await supabase.auth.getSession()
@@ -1028,7 +1476,7 @@ function IdentifyScreen({ lang, onVerified }) {
       const { error: e2 } = await supabase.rpc('upsert_me', {
         p_first_name: firstName.trim(),
         p_last_name: lastName.trim(),
-        p_phone: phone.trim(),
+        p_phone: normalizePhoneFR(phone) || phone.trim(),
         p_postal_code: postalCode.trim(),
         p_birthdate: birthdate,
         p_email: email.trim() || null,
@@ -1044,7 +1492,7 @@ function IdentifyScreen({ lang, onVerified }) {
       LS.set('noti:instagram', instagram)
       await onVerified()
     } catch (e) {
-      setErr(frError(e))
+      setErr(clientError(e, lang))
     } finally {
       setBusy(false)
     }
@@ -1057,7 +1505,7 @@ function IdentifyScreen({ lang, onVerified }) {
         <Logo />
         <h1 style={{ ...S.h1, fontSize: 26, marginTop: 20 }}>{t.identify}</h1>
         <div style={{ color: C.dim, fontSize: 13.5, marginTop: 8, lineHeight: 1.6 }}>
-          Pour commander : vos coordonnées, pour vous appeler au retrait et vous tenir informé·e.
+          {t.identifySub}
         </div>
       </div>
 
@@ -1076,7 +1524,7 @@ function IdentifyScreen({ lang, onVerified }) {
             </Field>
           </div>
           <div style={{ flex: 1 }}>
-            <Field label="Nom">
+            <Field label={t.lastName}>
               <input
                 style={S.input}
                 value={lastName}
@@ -1088,12 +1536,13 @@ function IdentifyScreen({ lang, onVerified }) {
           </div>
         </div>
 
-        <Field label="Téléphone">
+        <Field label={t.phone}>
           <input
             style={S.input}
             type="tel"
             value={phone}
             onChange={(e) => setPhone(e.target.value)}
+            onBlur={() => setPhone((v) => normalizePhoneFR(v) || v)}
             autoComplete="tel"
             placeholder="06 12 34 56 78"
           />
@@ -1101,7 +1550,7 @@ function IdentifyScreen({ lang, onVerified }) {
 
         <div style={{ display: 'flex', gap: 10 }}>
           <div style={{ flex: 1 }}>
-            <Field label="Code postal">
+            <Field label={t.postalCode}>
               <input
                 style={S.input}
                 inputMode="numeric"
@@ -1112,23 +1561,14 @@ function IdentifyScreen({ lang, onVerified }) {
               />
             </Field>
           </div>
-          <div style={{ flex: 1 }}>
-            <Field label="Date de naissance">
-              <input
-                style={S.input}
-                type="date"
-                value={birthdate}
-                onChange={(e) => setBirthdate(e.target.value)}
-                autoComplete="bday"
-                max={new Date().toISOString().slice(0, 10)}
-              />
-            </Field>
+          <div style={{ flex: 1.35 }}>
+            <BirthdateField label={t.birthdate} value={birthdate} onChange={setBirthdate} />
           </div>
         </div>
 
         {showOptional ? (
           <>
-            <Field label="E-mail" hint="Optionnel">
+            <Field label={t.email} hint={t.optional}>
               <input
                 style={S.input}
                 type="email"
@@ -1139,7 +1579,7 @@ function IdentifyScreen({ lang, onVerified }) {
                 placeholder="alex@exemple.fr"
               />
             </Field>
-            <Field label="Instagram" hint="Optionnel">
+            <Field label={t.instagram} hint={t.optional}>
               <input
                 style={S.input}
                 value={instagram}
@@ -1163,7 +1603,7 @@ function IdentifyScreen({ lang, onVerified }) {
               fontWeight: 600,
             }}
           >
-            + E-mail / Instagram (optionnel — complétable plus tard)
+            {t.addOptional}
           </button>
         )}
 
@@ -1179,9 +1619,9 @@ function IdentifyScreen({ lang, onVerified }) {
       </div>
 
       <div style={{ textAlign: 'center', color: C.faint, fontSize: 11.5, marginTop: 20, lineHeight: 1.7 }}>
-        En commandant, vous acceptez nos CGU — retrait et règlement au bar obligatoires.
+        {t.cgu}
         <br />
-        Données hébergées dans l’Union européenne. Aucun paiement en ligne.
+        {t.dataEu}
       </div>
     </div>
   )
@@ -1211,16 +1651,14 @@ function RecognitionScreen({ lang, customer, event, onEnter, showToast }) {
         <div style={{ fontSize: 46, marginBottom: 12 }}>{incident ? '🤝' : vip ? '⭐' : returning ? '🥂' : '👋'}</div>
         <h1 style={{ ...S.h1, fontSize: 30 }}>
           {incident
-            ? 'Ravi de vous revoir'
+            ? t.gladToSeeYou
             : returning
               ? t.backAgain
               : `${t.welcome}, ${customer?.first_name || ''}`}
         </h1>
         {returning && !incident && (
           <div style={{ color: C.dim, fontSize: 14, marginTop: 10, lineHeight: 1.6 }}>
-            {customer.events_count === 1
-              ? 'Deuxième soirée avec nous — content de vous retrouver.'
-              : `${customer.events_count} soirées passées avec nous. Merci de votre fidélité.`}
+            {customer.events_count === 1 ? t.secondNight : t.nNights(customer.events_count)}
           </div>
         )}
         {vip && (
@@ -1237,7 +1675,7 @@ function RecognitionScreen({ lang, customer, event, onEnter, showToast }) {
                 letterSpacing: 1.4,
               }}
             >
-              STATUT VIP
+              {t.vipStatus}
             </span>
           </div>
         )}
@@ -1245,10 +1683,7 @@ function RecognitionScreen({ lang, customer, event, onEnter, showToast }) {
 
       {incident && (
         <div style={{ marginBottom: 16 }}>
-          <Banner tone="warn">
-            Une commande d’une soirée précédente est restée impayée. Merci de régulariser auprès du
-            bar — l’équipe vous accompagnera.
-          </Banner>
+          <Banner tone="warn">{t.unpaidPast}</Banner>
         </div>
       )}
 
@@ -1265,7 +1700,7 @@ function RecognitionScreen({ lang, customer, event, onEnter, showToast }) {
           try {
             await onEnter()
           } catch (e) {
-            showToast?.(frError(e), 'error')
+            showToast?.(clientError(e, lang), 'error')
           } finally {
             setBusy(false)
           }
@@ -1282,7 +1717,18 @@ function RecognitionScreen({ lang, customer, event, onEnter, showToast }) {
 //  ESPACE COMMANDE CLIENT
 // ============================================================================
 
-function OrderingApp({ event, venue, scanPoint, lang, setLang, customer, showToast, onReloadCustomer }) {
+function OrderingApp({
+  event,
+  venue,
+  scanPoint,
+  lang,
+  setLang,
+  customer,
+  showToast,
+  onReloadCustomer,
+  onHome,
+  onLogout,
+}) {
   const t = useT(lang)
   const [products, setProducts] = useState([])
   const [orders, setOrders] = useState([])
@@ -1301,6 +1747,7 @@ function OrderingApp({ event, venue, scanPoint, lang, setLang, customer, showToa
   const profileIncomplete =
     !customer?.email || !customer?.instagram || !customer?.postal_code || !customer?.birthdate
   const [pass, setPass] = useState(null)
+  const [gifts, setGifts] = useState([])
   // Code % / montant classique — saisi une seule fois (même emplacement que
   // le forfait), réappliqué automatiquement à chaque commande tant qu'il
   // n'est pas retiré. Persisté par soirée : survit à un rechargement de page.
@@ -1322,9 +1769,38 @@ function OrderingApp({ event, venue, scanPoint, lang, setLang, customer, showToa
     setPass(data || null)
   }, [event?.id, customer?.id])
 
+  // Cadeaux qu'il reste au client sur cette soirée (« 1 boisson offerte »).
+  const loadGifts = useCallback(async () => {
+    if (!event?.id || !customer?.id) return
+    const { data } = await supabase.rpc('my_gift_summary', { p_event: event.id })
+    setGifts(Array.isArray(data) ? data : [])
+  }, [event?.id, customer?.id])
+
   useEffect(() => {
     loadPass()
-  }, [loadPass])
+    loadGifts()
+  }, [loadPass, loadGifts])
+
+  // ---- Explication des crédits, une fois par soirée ------------------------
+  // Retour terrain : le barème était expliqué à l'oral, encore et encore. On le
+  // dit une seule fois, au bon moment — à l'arrivée sur la carte, et seulement
+  // si la personne a réellement des crédits (pass ou code cadeau). Le drapeau
+  // reste sur l'appareil : pas de rappel à chaque rechargement de page.
+  // Commande sur laquelle ouvrir « Mes commandes » quand on arrive depuis un
+  // message de suivi.
+  const [focusOrder, setFocusOrder] = useState(null)
+  const [creditsIntro, setCreditsIntro] = useState(false)
+  const creditsTotal =
+    (pass?.credits_remaining || 0) + gifts.reduce((n, g) => n + (Number(g.remaining) || 0), 0)
+
+  useEffect(() => {
+    if (!event?.id || creditsTotal <= 0) return
+    const seen = LS.get(`noti:creditsIntro:${event.id}`, false)
+    if (!seen) {
+      setCreditsIntro(true)
+      LS.set(`noti:creditsIntro:${event.id}`, true)
+    }
+  }, [event?.id, creditsTotal])
 
   async function convertFoodToken() {
     const { data, error } = await supabase.rpc('convert_food_token', { p_event: event.id })
@@ -1333,12 +1809,20 @@ function OrderingApp({ event, venue, scanPoint, lang, setLang, customer, showToa
   }
 
   /**
-   * Saisie unifiée : un seul champ pour un code forfait (crédits) ou un code
-   * promo classique (% / montant). On tente d'abord le forfait (redeem_pass) ;
-   * s'il ne s'agit pas de ce type de code, on bascule sur la validation
-   * classique et on retient le code pour les prochaines commandes.
+   * Saisie unifiée : un seul champ pour un code cadeau (article offert), un
+   * code forfait (crédits) ou un code promo classique (% / montant). On essaie
+   * chaque type dans l'ordre ; le client n'a pas à savoir lequel il détient.
    */
   async function redeemCode(code) {
+    // 1. Code cadeau — « une boisson alcoolisée offerte »
+    const gift = await supabase.rpc('redeem_gift_code', { p_event: event.id, p_code: code })
+    if (!gift.error) {
+      await loadGifts()
+      return { kind: 'gift', info: gift.data }
+    }
+    if (!String(gift.error.message || '').includes('invalid_gift_code')) throw gift.error
+
+    // 2. Forfait de groupe à crédits
     const { data, error } = await supabase.rpc('redeem_pass', { p_event: event.id, p_code: code })
     if (!error) {
       setPass(data)
@@ -1409,7 +1893,17 @@ function OrderingApp({ event, venue, scanPoint, lang, setLang, customer, showToa
     }
   }, [venue?.id, loadProducts, loadOrders, loadMessages])
 
-  // ---- Temps réel (WebSocket) + repli en polling doux ---------------------
+  // ---- Temps réel (WebSocket) + repli en polling ---------------------------
+  // Retour terrain 5.5 : « un message diffusé n'apparaît pas côté client tant
+  // qu'il n'a pas rechargé — rédhibitoire, personne ne recharge en soirée. »
+  // Le canal WebSocket existait déjà, avec un repli en polling à 20 s — trop
+  // lent pour une annonce ("le bar ferme dans 5 min") qui doit être vue tout
+  // de suite. Le repli passe à 6 s pour les messages, et surtout : si le canal
+  // WebSocket échoue à s'établir (Wi-Fi de salle capricieux, proxy qui bloque
+  // les WebSockets), on ne le découvrait jamais — on double la fréquence du
+  // repli dès que ce cas est détecté, pour que « pas de push » ne veuille
+  // jamais dire « pas de mise à jour ».
+  const [realtimeDown, setRealtimeDown] = useState(false)
   useEffect(() => {
     if (!customer?.id || !event?.id) return
     const ch = supabase
@@ -1432,13 +1926,15 @@ function OrderingApp({ event, venue, scanPoint, lang, setLang, customer, showToa
         { event: 'UPDATE', schema: 'public', table: 'products', filter: `venue_id=eq.${venue?.id}` },
         () => loadProducts()
       )
-      .subscribe()
+      .subscribe((status) => {
+        setRealtimeDown(status === 'CHANNEL_ERROR' || status === 'TIMED_OUT' || status === 'CLOSED')
+      })
 
-    const poll = setInterval(() => {
+    const msgPoll = setInterval(() => loadMessages(), 6000)
+    const restPoll = setInterval(() => {
       loadOrders()
-      loadMessages()
       loadProducts()
-    }, 20000)
+    }, realtimeDown ? 6000 : 20000)
 
     const onSw = (e) => {
       if (e.data?.type === 'NOTI_PUSH') loadOrders()
@@ -1447,10 +1943,11 @@ function OrderingApp({ event, venue, scanPoint, lang, setLang, customer, showToa
 
     return () => {
       supabase.removeChannel(ch)
-      clearInterval(poll)
+      clearInterval(msgPoll)
+      clearInterval(restPoll)
       navigator.serviceWorker?.removeEventListener('message', onSw)
     }
-  }, [customer?.id, event?.id, venue?.id, loadOrders, loadMessages, loadProducts])
+  }, [customer?.id, event?.id, venue?.id, loadOrders, loadMessages, loadProducts, realtimeDown])
 
   // ---- Sonnerie douce quand une commande passe à « prête » ----------------
   useEffect(() => {
@@ -1465,7 +1962,11 @@ function OrderingApp({ event, venue, scanPoint, lang, setLang, customer, showToa
 
   // ---- Discipline de la file (§06) ---------------------------------------
   const readyOrder = orders.find((o) => o.status === 'READY')
-  const blocked = Boolean(readyOrder)
+  // Retour terrain : quand le bar ferme, le client doit garder l'accès à
+  // l'application — c'est par là qu'on lui diffuse « on ferme dans 30 minutes,
+  // dirigez-vous vers le vestiaire ». Seul l'ajout au panier est coupé.
+  const ordersClosed = Boolean(event) && (!event.is_active || !event.accept_orders)
+  const blocked = Boolean(readyOrder) || ordersClosed
   const activeOrders = orders.filter((o) => ['RECEIVED', 'IN_PREP', 'READY'].includes(o.status))
   const pendingPayment = orders.filter((o) => ['PICKED_UP', 'UNPAID'].includes(o.status))
 
@@ -1499,6 +2000,27 @@ function OrderingApp({ event, venue, scanPoint, lang, setLang, customer, showToa
   // celle-ci restait bloquée sur la catégorie précédente.
   const scrollLock = useRef(0)
 
+  // Hauteur réelle des bandeaux collants (en-tête + barre de puces) : elle sert
+  // à poser la section juste sous eux. Mesurée plutôt que codée en dur, sinon
+  // le titre de section finissait caché derrière l'en-tête.
+  const headerRef = useRef(null)
+  const chipsBarRef = useRef(null)
+  const [headerH, setHeaderH] = useState(64)
+
+  useEffect(() => {
+    const el = headerRef.current
+    if (!el) return
+    const measure = () => setHeaderH(el.offsetHeight || 64)
+    measure()
+    const ro = typeof ResizeObserver !== 'undefined' ? new ResizeObserver(measure) : null
+    ro?.observe(el)
+    window.addEventListener('resize', measure)
+    return () => {
+      ro?.disconnect()
+      window.removeEventListener('resize', measure)
+    }
+  }, [])
+
   useEffect(() => {
     const els = subcats.map((c) => sectionRefs.current[c]).filter(Boolean)
     if (!els.length) return
@@ -1511,25 +2033,55 @@ function OrderingApp({ event, venue, scanPoint, lang, setLang, customer, showToa
           setSubcat(top.target.dataset.subcat)
         }
       },
-      { rootMargin: '-96px 0px -75% 0px', threshold: 0 }
+      { rootMargin: `-${headerH + 56}px 0px -75% 0px`, threshold: 0 }
     )
     els.forEach((el) => io.observe(el))
     return () => io.disconnect()
-  }, [subcats])
+  }, [subcats, headerH])
 
   // La puce active est ramenée dans la zone visible de la barre horizontale.
   useEffect(() => {
     if (!subcat) return
-    chipRefs.current[subcat]?.scrollIntoView({ behavior: 'smooth', block: 'nearest', inline: 'center' })
+    glideChipIntoView(chipRefs.current[subcat])
   }, [subcat])
+
+  // Changer d'onglet ramène en haut : sinon on arrivait au milieu de la page,
+  // à la hauteur où l'on avait laissé la carte.
+  useEffect(() => {
+    window.scrollTo({ top: 0, behavior: 'auto' })
+  }, [view])
+
+  // Retour terrain 7.2 : cliquer sur une catégorie en fin de carte (Digestifs)
+  // envoie tout en bas ; retrouver la barre de catégories demandait alors de
+  // tout re-remonter à la main. Un bouton flottant réapparaît passé un
+  // certain défilement.
+  const [showTop, setShowTop] = useState(false)
+  useEffect(() => {
+    let ticking = false
+    const onScroll = () => {
+      if (ticking) return
+      ticking = true
+      requestAnimationFrame(() => {
+        setShowTop(window.scrollY > 480)
+        ticking = false
+      })
+    }
+    window.addEventListener('scroll', onScroll, { passive: true })
+    return () => window.removeEventListener('scroll', onScroll)
+  }, [])
+
+  // « Précédent » depuis Mes commandes ou Messages revient à la carte, il ne
+  // quitte pas l'outil.
+  useBackGuard(view !== 'menu', () => setView('menu'))
 
   function goToSubcat(c) {
     // On marque la puce tout de suite : le retour visuel ne dépend plus de
     // l'arrivée effective de la section dans la fenêtre d'observation (une
     // section courte en fin de carte pouvait ne jamais l'atteindre).
-    scrollLock.current = Date.now() + 900
+    scrollLock.current = Date.now() + 1100
     setSubcat(c)
-    sectionRefs.current[c]?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+    const stuck = headerH + (chipsBarRef.current?.offsetHeight || 52)
+    glideIntoView(sectionRefs.current[c], stuck + 10)
   }
 
   const subtotal = cart.reduce((s, l) => s + lineTotal(l), 0)
@@ -1595,7 +2147,7 @@ function OrderingApp({ event, venue, scanPoint, lang, setLang, customer, showToa
     // data.promo_code n'est renseigné par place_order() QUE si le code % /
     // montant a réellement été reconnu et appliqué (indépendant du forfait).
     if (promoCode && !data?.promo_code) {
-      showToast('Commande envoyée, mais le code n’a pas été appliqué (invalide, expiré ou conditions non remplies).', 'error')
+      showToast(t.codeNotApplied, 'error')
     }
 
     setCart([])
@@ -1603,6 +2155,8 @@ function OrderingApp({ event, venue, scanPoint, lang, setLang, customer, showToa
     setCartOpen(false)
     setView('orders')
     await loadOrders()
+
+    await loadGifts()
 
     if (pass) {
       const hadCredits = pass.credits_remaining > 0
@@ -1613,7 +2167,7 @@ function OrderingApp({ event, venue, scanPoint, lang, setLang, customer, showToa
         .maybeSingle()
       setPass(fresh || pass)
       if (hadCredits && fresh && fresh.credits_remaining === 0) {
-        showToast('Crédits épuisés — prochaine conso au prix carte, à régler lors du retrait de la commande.', 'error')
+        showToast(t.creditsExhausted, 'error')
       }
     }
 
@@ -1623,8 +2177,8 @@ function OrderingApp({ event, venue, scanPoint, lang, setLang, customer, showToa
       kind: 'status',
       customerId: customer?.id,
       orderId: data?.id,
-      title: 'Commande reçue',
-      body: `Votre commande ${data?.pickup_code} est bien arrivée au bar. Vous serez prévenu dès qu’elle est prête.`,
+      title: t.notifReceivedTitle,
+      body: t.notifReceivedBody(data?.pickup_code),
     })
     return data
   }
@@ -1632,18 +2186,33 @@ function OrderingApp({ event, venue, scanPoint, lang, setLang, customer, showToa
   if (loading)
     return (
       <div style={S.page}>
-        <Spinner label="Chargement de la carte…" />
+        <Spinner label={t.loadingMenu} />
       </div>
     )
 
   const unread = messages.filter((m) => m.kind !== 'status' && !m.read_at)
+  const urgentUnread = unread.filter((m) => m.urgent)
+
+  // Retour terrain : « une fois la commande retirée, la notification doit
+  // disparaître, pour éviter la surcharge de la messagerie au fil de la
+  // soirée ». On masque le suivi des commandes abouties — les annonces et les
+  // messages personnels, eux, restent.
+  const doneOrders = new Set(
+    orders.filter((o) => o.status === 'PICKED_UP' || o.status === 'PAID').map((o) => o.id)
+  )
 
   return (
     <div style={{ ...S.page, paddingBottom: 110 }}>
       <Keyframes />
 
-      {/* En-tête */}
+      {/* En-tête : le logo et l'espace client sur la première ligne, la
+          navigation sur la seconde. Avant, un seul bouton basculait entre
+          « La carte » et « Mes commandes » : depuis les annonces, il affichait
+          « Mes commandes » et il fallait deux taps pour revenir à la carte.
+          Les trois destinations sont désormais toujours visibles, et celle où
+          l'on se trouve est marquée. */}
       <div
+        ref={headerRef}
         style={{
           position: 'sticky',
           top: 0,
@@ -1651,11 +2220,20 @@ function OrderingApp({ event, venue, scanPoint, lang, setLang, customer, showToa
           background: `${C.cream}f2`,
           backdropFilter: 'blur(10px)',
           borderBottom: `1px solid ${C.line}`,
-          padding: '12px 16px',
+          padding: '12px 16px 10px',
         }}
       >
         <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-          <Logo size={0.72} />
+          {/* Le logo ramène à l'écran d'explication, sans ressaisie : c'est le
+              réflexe attendu quand on est perdu ou qu'un affichage a déraillé. */}
+          <button
+            onClick={() => onHome?.()}
+            aria-label={t.backHome}
+            title={t.backHome}
+            style={{ background: 'none', border: 'none', padding: 0, cursor: 'pointer' }}
+          >
+            <Logo size={0.72} />
+          </button>
           <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
             {(event?.languages?.length ?? 0) > 1 && (
               <select
@@ -1678,82 +2256,8 @@ function OrderingApp({ event, venue, scanPoint, lang, setLang, customer, showToa
               </select>
             )}
             <button
-              onClick={() => setView(view === 'orders' ? 'menu' : 'orders')}
-              style={{
-                ...S.chip,
-                position: 'relative',
-                borderColor: view === 'orders' ? C.terracotta : C.lineHi,
-                color: view === 'orders' ? C.terracotta : C.dim,
-              }}
-            >
-              {view === 'orders' ? 'La carte' : 'Mes commandes'}
-              {activeOrders.length > 0 && view !== 'orders' && (
-                <span
-                  style={{
-                    position: 'absolute',
-                    top: -5,
-                    right: -5,
-                    width: 18,
-                    height: 18,
-                    borderRadius: 9,
-                    background: C.terracotta,
-                    color: '#fff',
-                    fontSize: 10,
-                    fontWeight: 700,
-                    display: 'flex',
-                    alignItems: 'center',
-                    justifyContent: 'center',
-                  }}
-                >
-                  {activeOrders.length}
-                </span>
-              )}
-            </button>
-            <button
-              onClick={() => setView(view === 'messages' ? 'menu' : 'messages')}
-              title="Messages"
-              style={{
-                ...S.chip,
-                width: 40,
-                minHeight: 0,
-                height: 40,
-                padding: 0,
-                display: 'flex',
-                alignItems: 'center',
-                justifyContent: 'center',
-                fontSize: 16,
-                position: 'relative',
-                borderColor: view === 'messages' ? C.terracotta : C.lineHi,
-                color: view === 'messages' ? C.terracotta : C.dim,
-              }}
-            >
-              💬
-              {unread.length > 0 && view !== 'messages' && (
-                <span
-                  style={{
-                    position: 'absolute',
-                    top: -3,
-                    right: -3,
-                    width: 16,
-                    height: 16,
-                    borderRadius: 8,
-                    background: C.terracotta,
-                    color: '#fff',
-                    fontSize: 9,
-                    fontWeight: 700,
-                    display: 'flex',
-                    alignItems: 'center',
-                    justifyContent: 'center',
-                    border: `2px solid ${C.cream}`,
-                  }}
-                >
-                  {unread.length}
-                </span>
-              )}
-            </button>
-            <button
               onClick={() => setProfileOpen(true)}
-              title="Mon espace client"
+              title={t.myAccount}
               style={{
                 ...S.chip,
                 width: 40,
@@ -1786,39 +2290,76 @@ function OrderingApp({ event, venue, scanPoint, lang, setLang, customer, showToa
             </button>
           </div>
         </div>
+
+        <div style={{ display: 'flex', gap: 6, marginTop: 10 }}>
+          {[
+            { k: 'menu', label: t.tabMenu, badge: 0 },
+            { k: 'orders', label: t.tabOrders, badge: activeOrders.length },
+            { k: 'messages', label: t.tabMessages, badge: unread.length },
+          ].map((tab) => {
+            const on = view === tab.k
+            return (
+              <button
+                key={tab.k}
+                onClick={() => setView(tab.k)}
+                aria-current={on ? 'page' : undefined}
+                style={{
+                  ...S.chip,
+                  flex: 1,
+                  position: 'relative',
+                  padding: '9px 4px',
+                  fontSize: 11.5,
+                  letterSpacing: 0.3,
+                  textTransform: 'uppercase',
+                  fontWeight: on ? 700 : 500,
+                  borderColor: on ? C.terracotta : C.lineHi,
+                  color: on ? C.terracotta : C.dim,
+                  background: on ? 'rgba(185,106,76,.09)' : 'transparent',
+                }}
+              >
+                {tab.label}
+                {tab.badge > 0 && !on && (
+                  <span
+                    style={{
+                      position: 'absolute',
+                      top: -5,
+                      right: -3,
+                      minWidth: 17,
+                      height: 17,
+                      borderRadius: 9,
+                      padding: '0 4px',
+                      background: C.terracotta,
+                      color: '#fff',
+                      fontSize: 10,
+                      fontWeight: 700,
+                      display: 'flex',
+                      alignItems: 'center',
+                      justifyContent: 'center',
+                      border: `2px solid ${C.cream}`,
+                    }}
+                  >
+                    {tab.badge}
+                  </span>
+                )}
+              </button>
+            )
+          })}
+        </div>
       </div>
 
       <div style={{ padding: 16 }}>
-        {/* Rappel : profil incomplet (champs optionnels, ou champs devenus
-            obligatoires après coup sur une fiche créée avant leur ajout) */}
-        {profileIncomplete && (
-          <div style={{ marginBottom: 14 }}>
-            <Banner tone="info">
-              <strong>Complétez votre profil</strong> (
-              {[
-                !customer?.postal_code && 'code postal',
-                !customer?.birthdate && 'date de naissance',
-                !customer?.email && 'e-mail',
-                !customer?.instagram && 'Instagram',
-              ]
-                .filter(Boolean)
-                .join(', ')}
-              ) —{' '}
-              <button
-                onClick={() => setProfileOpen(true)}
-                style={{ background: 'none', border: 'none', padding: 0, color: C.indigo, fontWeight: 600, cursor: 'pointer', fontSize: 'inherit' }}
-              >
-                à faire dans votre espace client
-              </button>
-              .
-            </Banner>
-          </div>
-        )}
+        {/* Retour terrain : ce rappel était ici, tout en haut de la carte.
+            Redemander des informations juste au-dessus de l'espace de commande,
+            à quelqu'un qui vient d'en saisir cinq à l'entrée, freinait la
+            commande. Il vit désormais dans Messages et dans l'espace client —
+            là où on vient justement gérer sa fiche. Voir ProfileReminder. */}
 
         {/* Forfait Groupe (pass à crédits) et codes promo */}
         <div style={{ marginBottom: 14 }}>
           <PromoCodeCard
+            lang={lang}
             pass={pass}
+            gifts={gifts}
             promoCode={promoCode}
             onRedeemCode={redeemCode}
             onClearCode={clearCode}
@@ -1827,18 +2368,29 @@ function OrderingApp({ event, venue, scanPoint, lang, setLang, customer, showToa
           />
         </div>
 
-        {/* Message de blocage de file */}
-        {blocked && (
+        {/* Commandes fermées : la carte reste consultable, le panier est coupé. */}
+        {ordersClosed && (
           <div style={{ marginBottom: 14 }}>
             <Banner tone="warn">
-              <strong>Vous avez une commande prête à retirer.</strong> Récupérez-la d’abord au bar
-              avant de pouvoir passer une nouvelle commande — code{' '}
+              <strong>{event?.service_message || t.ordersClosed}</strong>
+              <div style={{ fontSize: 12.5, marginTop: 4 }}>{t.closedStillHere}</div>
+            </Banner>
+          </div>
+        )}
+
+        {/* Message de blocage de file */}
+        {readyOrder && !ordersClosed && (
+          <div style={{ marginBottom: 14 }}>
+            <Banner tone="warn">
+              <strong>{t.blockedStrong}</strong> {t.blockedRest}{' '}
               <strong>{readyOrder.pickup_code}</strong>.
             </Banner>
           </div>
         )}
 
-        {/* Messages de l'organisateur — pointeur vers le canal dédié (onglet 💬) */}
+        {/* Messages de l'organisateur — pointeur vers le canal dédié.
+            Un message urgent (relance de retrait, incident) passe le bandeau au
+            rouge : le bandeau normal se noyait dans la page. */}
         {unread.length > 0 && view !== 'messages' && (
           <div style={{ marginBottom: 14 }}>
             <button
@@ -1850,34 +2402,61 @@ function OrderingApp({ event, venue, scanPoint, lang, setLang, customer, showToa
                 display: 'flex',
                 alignItems: 'center',
                 gap: 8,
-                border: `1.5px solid ${C.terracotta}55`,
+                border: `1.5px solid ${urgentUnread.length ? C.danger : `${C.terracotta}55`}`,
+                background: urgentUnread.length ? 'rgba(192,57,43,.08)' : C.paper,
                 cursor: 'pointer',
                 color: C.text,
                 textAlign: 'left',
               }}
             >
-              <span style={{ fontSize: 18 }}>💬</span>
-              <span style={{ fontSize: 13.5 }}>
-                {unread.length} nouveau{unread.length > 1 ? 'x' : ''} message{unread.length > 1 ? 's' : ''} de l’équipe
+              <span style={{ fontSize: 18 }}>{urgentUnread.length ? '⚠️' : '💬'}</span>
+              <span
+                style={{
+                  fontSize: 13.5,
+                  fontWeight: urgentUnread.length ? 600 : 400,
+                  color: urgentUnread.length ? C.danger : C.text,
+                }}
+              >
+                {urgentUnread.length
+                  ? t.newUrgent(urgentUnread.length)
+                  : t.newMessages(unread.length)}
               </span>
-              <span style={{ marginLeft: 'auto', color: C.terracotta, fontSize: 12, fontWeight: 600 }}>Voir</span>
+              <span
+                style={{
+                  marginLeft: 'auto',
+                  color: urgentUnread.length ? C.danger : C.terracotta,
+                  fontSize: 12,
+                  fontWeight: 600,
+                }}
+              >
+                {t.see}
+              </span>
             </button>
           </div>
         )}
 
         {view === 'messages' ? (
           <MessagesView
+            lang={lang}
             messages={messages}
+            doneOrders={doneOrders}
             customer={customer}
+            onOpenProfile={() => setProfileOpen(true)}
             onMarkRead={async (m) => {
               await supabase.from('messages').update({ read_at: new Date().toISOString() }).eq('id', m.id)
               loadMessages()
+            }}
+            onOpenOrder={(orderId) => {
+              setFocusOrder(orderId)
+              setView('orders')
             }}
             onBackToMenu={() => setView('menu')}
           />
         ) : view === 'orders' ? (
           <MyOrders
             orders={orders}
+            focusOrder={focusOrder}
+            onFocusDone={() => setFocusOrder(null)}
             event={event}
             venue={venue}
             customer={customer}
@@ -1890,10 +2469,7 @@ function OrderingApp({ event, venue, scanPoint, lang, setLang, customer, showToa
                 role: 'customer',
               })
               setPushOn(ok)
-              showToast(
-                ok ? 'Vous serez prévenu même écran verrouillé.' : 'Notifications refusées.',
-                ok ? 'ok' : 'error'
-              )
+              showToast(ok ? t.pushOk : t.pushKo, ok ? 'ok' : 'error')
             }}
             onReview={(o) => setReviewFor(o)}
             onBackToMenu={() => setView('menu')}
@@ -1933,7 +2509,8 @@ function OrderingApp({ event, venue, scanPoint, lang, setLang, customer, showToa
                 en test, plusieurs personnes ne voyaient pas la suite. */}
             <ScrollHint
               sticky
-              top={60}
+              top={headerH}
+              barRef={chipsBarRef}
               style={{ marginBottom: 14, marginLeft: -16, marginRight: -16, paddingLeft: 16, paddingRight: 16 }}
             >
               {subcats.map((c) => (
@@ -1963,7 +2540,7 @@ function OrderingApp({ event, venue, scanPoint, lang, setLang, customer, showToa
                   sectionRefs.current[c] = el
                 }}
                 data-subcat={c}
-                style={{ marginBottom: 26, scrollMarginTop: 108 }}
+                style={{ marginBottom: 26, scrollMarginTop: headerH + 62 }}
               >
                 <div style={{ ...S.h2, marginBottom: 10, fontSize: 13 }}>{c}</div>
                 <div style={{ display: 'grid', gap: 10 }}>
@@ -1975,6 +2552,7 @@ function OrderingApp({ event, venue, scanPoint, lang, setLang, customer, showToa
                         product={p}
                         lang={lang}
                         disabled={blocked}
+                        creditEligible={creditsTotal > 0 && isCreditEligible(p, gifts, pass)}
                         onAdd={() => {
                           const needsChoice =
                             (p.variants || []).length > 0 || (p.option_groups || []).length > 0
@@ -1986,10 +2564,42 @@ function OrderingApp({ event, venue, scanPoint, lang, setLang, customer, showToa
                 </div>
               </div>
             ))}
-            {subcats.length === 0 && <Empty emoji="🍸" title="Rien dans cette sélection" />}
+            {subcats.length === 0 && <Empty emoji="🍸" title={t.nothingHere} />}
           </>
         )}
       </div>
+
+      {/* Retour en haut : réapparaît passé un certain défilement, seulement
+          sur la carte (les autres onglets sont courts). Décalé au-dessus du
+          panier flottant quand il est visible, pour ne jamais le recouvrir. */}
+      {showTop && view === 'menu' && (
+        <button
+          onClick={() => glide(() => window.scrollY, (v) => window.scrollTo(0, v), 0)}
+          aria-label={t.backToTop}
+          title={t.backToTop}
+          style={{
+            position: 'fixed',
+            right: 14,
+            bottom:
+              cartCount > 0
+                ? 'calc(env(safe-area-inset-bottom) + 82px)'
+                : 'calc(env(safe-area-inset-bottom) + 14px)',
+            zIndex: 60,
+            width: 46,
+            height: 46,
+            borderRadius: 23,
+            border: 'none',
+            background: C.paper,
+            color: C.terracotta,
+            fontSize: 18,
+            boxShadow: '0 6px 20px rgba(28,42,74,.22)',
+            cursor: 'pointer',
+            transition: 'bottom .2s',
+          }}
+        >
+          ↑
+        </button>
+      )}
 
       {/* Panier flottant */}
       {cartCount > 0 && view === 'menu' && (
@@ -2061,36 +2671,49 @@ function OrderingApp({ event, venue, scanPoint, lang, setLang, customer, showToa
         pass={pass}
         promoCode={promoCode}
         subtotal={subtotal}
+        creditsTotal={creditsTotal}
         prepMin={event.default_prep_min ?? 1}
         onClose={() => setCartCheckout(false)}
         onSubmit={async (payload) => {
           try {
             await submitOrder(payload)
           } catch (e) {
-            showToast(frError(e), 'error')
+            showToast(clientError(e, lang), 'error')
           }
         }}
       />
 
+      <CreditsIntroSheet
+        open={creditsIntro}
+        lang={lang}
+        credits={creditsTotal}
+        onClose={() => setCreditsIntro(false)}
+      />
+
       <ClientProfileSheet
+        lang={lang}
         open={profileOpen}
         customer={customer}
+        credits={creditsTotal}
+        orders={orders}
+        onLogout={onLogout}
         onClose={() => setProfileOpen(false)}
         onSaved={async () => {
           await onReloadCustomer?.()
-          showToast('Profil mis à jour.', 'ok')
+          showToast(t.profileSaved, 'ok')
         }}
         showToast={showToast}
       />
 
       <ReviewSheet
+        lang={lang}
         order={reviewFor}
         event={event}
         customer={customer}
         onClose={() => setReviewFor(null)}
         onDone={() => {
           setReviewFor(null)
-          showToast('Merci pour votre retour !', 'ok')
+          showToast(t.reviewThanks, 'ok')
         }}
       />
     </div>
@@ -2098,7 +2721,7 @@ function OrderingApp({ event, venue, scanPoint, lang, setLang, customer, showToa
 }
 
 // ------------------------------------------------------------ Carte produit
-function ProductCard({ product, lang, disabled, onAdd }) {
+function ProductCard({ product, lang, disabled, onAdd, creditEligible = false }) {
   const t = useT(lang)
   const info = tr(product, lang)
   const out = product.sold_out
@@ -2142,7 +2765,7 @@ function ProductCard({ product, lang, disabled, onAdd }) {
                 padding: '2px 8px',
               }}
             >
-              POPULAIRE
+              {t.popular}
             </span>
           )}
           {out && (
@@ -2169,15 +2792,39 @@ function ProductCard({ product, lang, disabled, onAdd }) {
           </div>
         )}
 
-        <div style={{ ...S.money, fontSize: 15, fontWeight: 600, color: C.terracotta, marginTop: 6 }}>
-          {(product.variants || []).length > 0 ? `dès ${eur(priceFrom)}` : eur(product.price)}
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 6 }}>
+          <div style={{ ...S.money, fontSize: 15, fontWeight: 600, color: C.terracotta }}>
+            {(product.variants || []).length > 0 ? t.priceFrom(eur(priceFrom)) : eur(product.price)}
+          </div>
+          {/* Marquage éphémère : n'existe QUE quand le client a des crédits et
+              que CET article en particulier est couvert. Il disparaît tout
+              seul dès que l'un ou l'autre cesse d'être vrai — jamais de
+              mention qui traîne une fois les crédits épuisés. */}
+          {creditEligible && !out && (
+            <span
+              style={{
+                fontFamily: FONT.label,
+                fontSize: 9.5,
+                fontWeight: 700,
+                letterSpacing: 0.6,
+                color: C.goldDark,
+                background: `${C.gold}22`,
+                border: `1px solid ${C.gold}88`,
+                borderRadius: 999,
+                padding: '2px 8px',
+                whiteSpace: 'nowrap',
+              }}
+            >
+              🎟️ {t.creditBadge}
+            </span>
+          )}
         </div>
       </div>
 
       <button
         disabled={out || disabled}
         onClick={onAdd}
-        title={disabled ? 'Retirez d’abord votre commande prête' : undefined}
+        title={disabled ? t.pickupFirst : undefined}
         style={{
           width: 46,
           height: 46,
@@ -2199,6 +2846,7 @@ function ProductCard({ product, lang, disabled, onAdd }) {
 
 // ------------------------------------- Tunnel de choix (format + options)
 function ProductSheet({ product, lang, onClose, onConfirm }) {
+  const t = useT(lang)
   const [variantId, setVariantId] = useState(null)
   const [picked, setPicked] = useState({})
   const [qty, setQty] = useState(1)
@@ -2245,7 +2893,7 @@ function ProductSheet({ product, lang, onClose, onConfirm }) {
   const missing = groups.filter((g) => g.required && (picked[g.id] || []).length < (g.min ?? 1))
 
   return (
-    <Sheet open={!!product} onClose={onClose} title={info.name}>
+    <Sheet open={!!product} onClose={onClose} title={info.name} lang={lang}>
       {product.image_url && (
         <img
           src={product.image_url}
@@ -2269,7 +2917,7 @@ function ProductSheet({ product, lang, onClose, onConfirm }) {
 
       {variants.length > 0 && (
         <div style={{ marginBottom: 18 }}>
-          <div style={S.label}>Format</div>
+          <div style={S.label}>{t.format}</div>
           <div style={{ display: 'grid', gap: 8 }}>
             {variants.map((v) => (
               <button
@@ -2309,8 +2957,8 @@ function ProductSheet({ product, lang, onClose, onConfirm }) {
                 color: g.required ? C.terracotta : C.faint,
               }}
             >
-              {g.required ? 'OBLIGATOIRE' : 'OPTIONNEL'}
-              {g.max > 1 ? ` · MAX ${g.max}` : ''}
+              {g.required ? t.requiredCaps : t.optionalCaps}
+              {g.max > 1 ? ` · ${t.maxCaps} ${g.max}` : ''}
             </div>
           </div>
           <div style={{ display: 'grid', gap: 8 }}>
@@ -2336,7 +2984,7 @@ function ProductSheet({ product, lang, onClose, onConfirm }) {
                 >
                   <span>{on ? '✓ ' : ''}{o.name}</span>
                   <span style={{ ...S.money, fontSize: 13, color: Number(o.price) ? C.indigo : C.faint }}>
-                    {Number(o.price) ? `+${eur(o.price)}` : 'inclus'}
+                    {Number(o.price) ? `+${eur(o.price)}` : t.included}
                   </span>
                 </button>
               )
@@ -2377,7 +3025,7 @@ function ProductSheet({ product, lang, onClose, onConfirm }) {
         onClick={() => onConfirm(variant, chosen, qty)}
         style={{ ...S.btn, opacity: missing.length ? 0.5 : 1 }}
       >
-        {missing.length ? `Choisissez : ${missing[0].name}` : 'Ajouter'}
+        {missing.length ? t.chooseFirst(missing[0].name) : t.add}
       </button>
     </Sheet>
   )
@@ -2399,7 +3047,7 @@ const stepBtn = {
  * Un voile dégradé + une flèche apparaissent du côté où il reste à défiler,
  * et disparaissent en fin de course.
  */
-function ScrollHint({ children, sticky = false, top = 0, style }) {
+function ScrollHint({ children, sticky = false, top = 0, style, barRef }) {
   const ref = useRef(null)
   const [edges, setEdges] = useState({ left: false, right: false })
 
@@ -2446,6 +3094,7 @@ function ScrollHint({ children, sticky = false, top = 0, style }) {
 
   return (
     <div
+      ref={barRef}
       style={{
         position: sticky ? 'sticky' : 'relative',
         top: sticky ? top : undefined,
@@ -2482,67 +3131,96 @@ function ScrollHint({ children, sticky = false, top = 0, style }) {
  * envoi, la source de vérité reste le serveur.
  */
 /**
- * Miroir du calcul de place_order() : 1 alcool éligible = 2 crédits, 1 soft =
- * 1 crédit, plus le jeton food. Le serveur reste seul juge — ceci ne sert qu'à
- * afficher l'effet du forfait avant de valider.
+ * Un article est-il actuellement couvert par au moins un crédit du client —
+ * qu'il vienne d'un code cadeau ou du forfait groupe ?
+ *
+ * Retour terrain, décision majeure du point équipe (2.3) : le badge doit
+ * apparaître à côté du prix pour les articles que les crédits couvrent, et
+ * disparaître ENTIÈREMENT dès que le client n'a plus de crédit — d'où l'appel
+ * `creditsTotal > 0` fait par l'appelant avant même d'invoquer cette
+ * fonction. Ce test-ci ne sert qu'à savoir SI un article est concerné ; il ne
+ * calcule ni prix ni plafond — ces données restent strictement internes (le
+ * plafond en euros n'est même plus renvoyé par my_gift_summary depuis 0024).
+ * Le total exact, lui, vient du serveur (preview_order) au moment de valider.
  */
-function estimateWalletDiscount(cart, pass) {
-  if (!pass) return { discount: 0, creditsRemaining: 0, foodAvailable: false }
-  let creditsRemaining = pass.credits_remaining
-  let richardUsed = pass.richard_used
-  let foodAvailable = pass.food_token_available
-  let discount = 0
-  for (const l of cart) {
-    const p = l.product
-    const unit = Number(l.basePrice) + (l.options || []).reduce((s, o) => s + Number(o.price || 0), 0)
-    if (p.credit_once && !richardUsed) {
-      const cost = p.credit_kind === 'alcohol' ? 2 : 1
-      if (creditsRemaining >= cost) {
-        creditsRemaining -= cost
-        richardUsed = true
-        discount += unit
-      }
-    } else if (p.credit_kind === 'alcohol' || p.credit_kind === 'soft') {
-      const cost = p.credit_kind === 'alcohol' ? 2 : 1
-      const units = Math.min(l.quantity, Math.floor(creditsRemaining / cost))
-      if (units > 0) {
-        creditsRemaining -= units * cost
-        discount += units * unit
-      }
-    } else if (p.universe === 'food' && foodAvailable) {
-      foodAvailable = false
-      discount += unit
-    }
+function isCreditEligible(product, gifts, pass) {
+  const cat = product.universe === 'food' ? 'food' : product.universe === 'bottles' ? 'bottle' : 'drink'
+  const cost = product.universe === 'drinks' && product.is_alcohol ? 2 : 1
+  if (
+    (gifts || []).some((g) =>
+      g.mode === 'product'
+        ? g.product_id === product.id && Number(g.remaining) >= 1
+        : g.category === cat && Number(g.remaining) >= cost
+    )
+  ) {
+    return true
   }
-  return { discount, creditsRemaining, foodAvailable }
+  if (pass) {
+    if (product.credit_once && !pass.richard_used) return true
+    if (product.credit_kind === 'alcohol' && pass.credits_remaining >= 2) return true
+    if (product.credit_kind === 'soft' && pass.credits_remaining >= 1) return true
+    if (product.universe === 'food' && pass.food_token_available) return true
+  }
+  return false
 }
+
+
 
 /**
  * Saisie unique pour TOUT code (réduction % / montant, ou forfait de groupe à
  * crédits) — le client n'a pas à savoir de quel type il s'agit, ni à chercher
  * deux emplacements différents.
  */
-function PromoCodeCard({ pass, promoCode, onRedeemCode, onClearCode, onConvert, showToast }) {
+function PromoCodeCard({ lang, pass, gifts, promoCode, onRedeemCode, onClearCode, onConvert, showToast }) {
+  const t = useT(lang)
   const [code, setCode] = useState('')
   const [busy, setBusy] = useState(false)
   const [open, setOpen] = useState(false)
 
+  const giftList = Array.isArray(gifts) ? gifts : []
+  const hasGift = giftList.length > 0
   const hasPass = Boolean(pass)
   const hasPromo = Boolean(promoCode) && !hasPass
 
-  if (!hasPass && !hasPromo) {
+  // Du point de vue du client, il possède des CRÉDITS. Chaque crédit donne un
+  // article sur la carte (ce que le staff a paramétré) — on l'exprime donc en
+  // « N crédit(s) », pas en « article offert ».
+  const giftTotal = giftList.reduce((s, g) => s + (Number(g.remaining) || 0), 0)
+  const giftCard = hasGift && (
+    <div style={{ ...S.card, padding: 14, border: `1.5px solid ${C.terracotta}`, marginBottom: 10 }}>
+      <div style={{ ...S.label, marginBottom: 6 }}>
+        💳 {t.myCredits} — {t.nAvailable(giftTotal)}
+      </div>
+      <div style={{ display: 'grid', gap: 5 }}>
+        {giftList.map((g, i) => (
+          <div key={i} style={{ fontSize: 14.5, fontWeight: 500, color: C.terracotta }}>
+            {giftCatEmoji(g.category)} {t.nCredits(g.remaining)}
+            <span style={{ color: C.dim, fontWeight: 400, fontSize: 12 }}>
+              {' — '}
+              {g.mode === 'product'
+                ? g.product_name || t.menuItem
+                : t.ofChoice(giftCatLabel(g.category, lang).toLowerCase())}
+            </span>
+          </div>
+        ))}
+      </div>
+      <div style={{ fontSize: 11.5, color: C.dim, marginTop: 6, lineHeight: 1.5 }}>{t.creditAuto}</div>
+    </div>
+  )
+
+  if (!hasGift && !hasPass && !hasPromo) {
     return (
       <div style={{ ...S.card, padding: 14 }}>
         {open ? (
           <>
-            <div style={{ ...S.label, marginBottom: 8 }}>Code promo</div>
+            <div style={{ ...S.label, marginBottom: 8 }}>{t.promo}</div>
             <div style={{ display: 'flex', gap: 8 }}>
               <input
                 style={{ ...S.input, textTransform: 'uppercase', flex: 1 }}
                 value={code}
                 onChange={(e) => setCode(e.target.value)}
                 onKeyDown={(e) => e.key === 'Enter' && code.trim() && document.activeElement.blur()}
-                placeholder="Réduction ou forfait de groupe"
+                placeholder={t.promoPlaceholder}
                 autoFocus
               />
               <button
@@ -2553,9 +3231,16 @@ function PromoCodeCard({ pass, promoCode, onRedeemCode, onClearCode, onConvert, 
                     const res = await onRedeemCode(code.trim())
                     setCode('')
                     setOpen(false)
-                    showToast(res.kind === 'credits' ? 'Forfait activé !' : 'Code activé !', 'ok')
+                    showToast(
+                      res.kind === 'gift'
+                        ? t.creditsAdded
+                        : res.kind === 'credits'
+                          ? t.passActivated
+                          : t.codeActivated,
+                      'ok'
+                    )
                   } catch (e) {
-                    showToast(frError(e), 'error')
+                    showToast(clientError(e, lang), 'error')
                   } finally {
                     setBusy(false)
                   }
@@ -2568,7 +3253,7 @@ function PromoCodeCard({ pass, promoCode, onRedeemCode, onClearCode, onConvert, 
                   opacity: !code.trim() || busy ? 0.5 : 1,
                 }}
               >
-                {busy ? '…' : 'Activer'}
+                {busy ? '…' : t.activate}
               </button>
             </div>
           </>
@@ -2577,7 +3262,7 @@ function PromoCodeCard({ pass, promoCode, onRedeemCode, onClearCode, onConvert, 
             onClick={() => setOpen(true)}
             style={{ background: 'none', border: 'none', padding: 0, cursor: 'pointer', color: C.indigo, fontSize: 13, fontWeight: 600 }}
           >
-            🎟️ Un code promo ou un forfait de groupe ? Activez-le ici
+            {t.promoCta}
           </button>
         )}
       </div>
@@ -2586,42 +3271,50 @@ function PromoCodeCard({ pass, promoCode, onRedeemCode, onClearCode, onConvert, 
 
   if (hasPromo) {
     return (
+      <>
+      {giftCard}
       <div style={{ ...S.card, padding: 14, display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
         <div>
-          <div style={{ ...S.label, marginBottom: 2 }}>Code actif</div>
+          <div style={{ ...S.label, marginBottom: 2 }}>{t.activeCode}</div>
           <div style={{ fontFamily: FONT.label, fontWeight: 600, letterSpacing: 1, fontSize: 15 }}>{promoCode}</div>
         </div>
         <button
           onClick={onClearCode}
           style={{ ...S.btnGhost, width: 'auto', minHeight: 'auto', padding: '8px 14px', fontSize: 12 }}
         >
-          Retirer
+          {t.removeCode}
         </button>
       </div>
+      </>
     )
   }
+
+  // Cadeau seul, sans forfait ni code promo : la carte cadeau suffit.
+  if (!hasPass) return giftCard
 
   const canConvert =
     pass.food_token_available && new Date().toLocaleTimeString('fr-FR', { timeZone: 'Europe/Paris', hour12: false }) < '22:00:00'
 
   return (
+    <>
+    {giftCard}
     <div style={{ ...S.card, padding: 14, border: `1.5px solid ${C.terracotta}55` }}>
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
         <div>
-          <div style={{ ...S.label, marginBottom: 2 }}>🎟️ Forfait actif</div>
+          <div style={{ ...S.label, marginBottom: 2 }}>{t.activePass}</div>
           <div style={{ ...S.money, fontSize: 20, fontWeight: 600, color: C.terracotta }}>
-            {pass.credits_remaining} crédit{pass.credits_remaining > 1 ? 's' : ''} restant{pass.credits_remaining > 1 ? 's' : ''}
+            {t.creditsLeft(pass.credits_remaining)}
           </div>
           <div style={{ fontSize: 11.5, color: C.dim, marginTop: 3 }}>
-            {creditsAsDrinks(pass.credits_remaining)}
+            {creditsAsDrinks(pass.credits_remaining, lang)}
           </div>
         </div>
         {pass.food_token_total > 0 && (
           <div style={{ textAlign: 'right', fontSize: 12, color: C.dim }}>
-            Jeton food
+            {t.foodToken}
             <br />
             <strong style={{ color: pass.food_token_available ? C.ok : C.faint }}>
-              {pass.food_token_available ? 'disponible' : 'utilisé'}
+              {pass.food_token_available ? t.tokenAvailable : t.tokenUsed}
             </strong>
           </div>
         )}
@@ -2633,19 +3326,76 @@ function PromoCodeCard({ pass, promoCode, onRedeemCode, onClearCode, onConvert, 
             setBusy(true)
             try {
               await onConvert()
-              showToast('Jeton food converti en 2 crédits.', 'ok')
+              showToast(t.tokenConverted, 'ok')
             } catch (e) {
-              showToast(frError(e), 'error')
+              showToast(clientError(e, lang), 'error')
             } finally {
               setBusy(false)
             }
           }}
           style={{ ...S.btnGhost, marginTop: 10, minHeight: 40, fontSize: 12.5, opacity: busy ? 0.6 : 1 }}
         >
-          {busy ? '…' : 'Convertir mon jeton food en 2 crédits (1 alcool ou 2 softs)'}
+          {busy ? '…' : t.convertToken}
         </button>
       )}
     </div>
+    </>
+  )
+}
+
+/**
+ * Explication du barème des crédits, montrée une seule fois par soirée et
+ * seulement à qui en possède. Remplace l'explication orale répétée au bar.
+ */
+function CreditsIntroSheet({ open, lang, credits, onClose }) {
+  const t = useT(lang)
+  return (
+    <Sheet open={open} onClose={onClose} title={t.creditsIntroTitle} lang={lang}>
+      <div
+        style={{
+          ...S.card,
+          textAlign: 'center',
+          border: `1.5px solid ${C.terracotta}`,
+          marginBottom: 16,
+        }}
+      >
+        <div style={{ fontSize: 34, marginBottom: 6 }}>🎟️</div>
+        <div style={{ ...S.money, fontSize: 22, fontWeight: 600, color: C.terracotta }}>
+          {t.creditsIntroYouHave(credits)}
+        </div>
+      </div>
+
+      <div style={{ display: 'grid', gap: 10, marginBottom: 16 }}>
+        {[
+          { e: '🥤', txt: t.creditsIntroSoft },
+          { e: '🍸', txt: t.creditsIntroAlcohol },
+        ].map((r) => (
+          <div
+            key={r.txt}
+            style={{
+              display: 'flex',
+              alignItems: 'center',
+              gap: 12,
+              padding: '12px 14px',
+              borderRadius: 14,
+              background: C.paper,
+              border: `1px solid ${C.line}`,
+            }}
+          >
+            <span style={{ fontSize: 22 }}>{r.e}</span>
+            <span style={{ fontSize: 15, fontWeight: 500 }}>{r.txt}</span>
+          </div>
+        ))}
+      </div>
+
+      <div style={{ fontSize: 12.5, color: C.dim, lineHeight: 1.55, marginBottom: 16 }}>
+        {t.creditsIntroHow}
+      </div>
+
+      <button onClick={onClose} style={S.btn}>
+        {t.creditsIntroCta}
+      </button>
+    </Sheet>
   )
 }
 
@@ -2655,13 +3405,25 @@ function PromoCodeCard({ pass, promoCode, onRedeemCode, onClearCode, onConvert, 
  * une fois à l'identification) et peut compléter e-mail / Instagram quand il
  * le souhaite : c'est le rappel affiché tant qu'ils manquent qui renvoie ici.
  */
-function ClientProfileSheet({ open, customer, onClose, onSaved, showToast }) {
+function ClientProfileSheet({
+  lang,
+  open,
+  customer,
+  onClose,
+  onSaved,
+  showToast,
+  credits = 0,
+  orders = [],
+  onLogout,
+}) {
+  const t = useT(lang)
   const [phone, setPhone] = useState('')
   const [postalCode, setPostalCode] = useState('')
   const [birthdate, setBirthdate] = useState('')
   const [email, setEmail] = useState('')
   const [instagram, setInstagram] = useState('')
   const [busy, setBusy] = useState(false)
+  const [leaving, setLeaving] = useState(false)
 
   useEffect(() => {
     if (open && customer) {
@@ -2676,14 +3438,15 @@ function ClientProfileSheet({ open, customer, onClose, onSaved, showToast }) {
   if (!customer) return null
 
   async function save() {
-    if (!phone.trim()) return showToast('Numéro de téléphone obligatoire.', 'error')
-    if (!postalCode.trim()) return showToast('Code postal obligatoire.', 'error')
-    if (!birthdate) return showToast('Date de naissance obligatoire.', 'error')
-    if (email.trim() && !EMAIL_RE.test(email.trim())) return showToast('Adresse e-mail invalide.', 'error')
+    if (!phone.trim()) return showToast(t.errPhone, 'error')
+    if (!postalCode.trim()) return showToast(t.errPostal, 'error')
+    if (!birthdate) return showToast(t.errBirth, 'error')
+    if (!birthdateIsValid(birthdate)) return showToast(t.errBirthInvalid, 'error')
+    if (email.trim() && !EMAIL_RE.test(email.trim())) return showToast(t.errEmail, 'error')
     setBusy(true)
     try {
       const { error } = await supabase.rpc('update_my_optional_profile', {
-        p_phone: phone.trim(),
+        p_phone: normalizePhoneFR(phone) || phone.trim(),
         p_postal_code: postalCode.trim(),
         p_birthdate: birthdate,
         p_email: email.trim() || '',
@@ -2698,60 +3461,135 @@ function ClientProfileSheet({ open, customer, onClose, onSaved, showToast }) {
       onClose()
       await onSaved?.()
     } catch (e) {
-      showToast(frError(e), 'error')
+      showToast(clientError(e, lang), 'error')
     } finally {
       setBusy(false)
     }
   }
 
   return (
-    <Sheet open={open} onClose={onClose} title="Espace client">
-      <div style={{ ...S.card, marginBottom: 16 }}>
-        <div style={{ ...S.label, marginBottom: 10 }}>Vos informations</div>
-        <div style={{ fontSize: 14 }}>
+    <Sheet open={open} onClose={onClose} title={t.clientSpace} lang={lang}>
+      {/* Retour terrain : cet écran n'était qu'un formulaire de collecte. On y
+          met d'abord ce qui appartient au client — son nom, sa fidélité, ses
+          crédits, ses commandes du soir — la saisie vient après. */}
+      <div style={{ ...S.card, marginBottom: 12 }}>
+        <div style={{ ...S.h1, fontSize: 21, marginBottom: 4 }}>
           {customer.first_name} {customer.last_name}
         </div>
+        <div style={{ fontSize: 12.5, color: C.dim }}>
+          {(customer.events_count ?? 0) <= 1 ? t.firstNight : t.myNights(customer.events_count)}
+        </div>
+
+        <div
+          style={{
+            marginTop: 14,
+            paddingTop: 14,
+            borderTop: `1px solid ${C.line}`,
+            display: 'flex',
+            alignItems: 'baseline',
+            justifyContent: 'space-between',
+            gap: 10,
+          }}
+        >
+          <span style={{ ...S.label, marginBottom: 0 }}>🎟️ {t.myCredits}</span>
+          <span
+            style={{
+              ...S.money,
+              fontSize: credits > 0 ? 20 : 13,
+              fontWeight: 600,
+              color: credits > 0 ? C.terracotta : C.faint,
+            }}
+          >
+            {credits > 0 ? t.nCredits(credits) : t.creditsNone}
+          </span>
+        </div>
+        {credits > 0 && (
+          <div style={{ fontSize: 11.5, color: C.dim, marginTop: 4, textAlign: 'right' }}>
+            {creditsAsDrinks(credits, lang)}
+          </div>
+        )}
       </div>
 
-      <Field label="Téléphone">
+      <div style={{ ...S.card, marginBottom: 16 }}>
+        <div style={{ ...S.label, marginBottom: 10 }}>{t.myOrdersHere}</div>
+        {orders.length === 0 ? (
+          <div style={{ fontSize: 13, color: C.faint }}>{t.noOrdersHere}</div>
+        ) : (
+          <div style={{ display: 'grid', gap: 8 }}>
+            {orders.slice(0, 6).map((o) => (
+              <div
+                key={o.id}
+                style={{
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: 10,
+                  fontSize: 13.5,
+                  paddingBottom: 8,
+                  borderBottom: `1px solid ${C.line}`,
+                }}
+              >
+                <span
+                  style={{
+                    fontFamily: FONT.label,
+                    fontWeight: 600,
+                    letterSpacing: 1,
+                    color: C.navy,
+                  }}
+                >
+                  {o.pickup_code}
+                </span>
+                <span style={{ color: C.dim, fontSize: 12 }}>{timeFR(o.created_at)}</span>
+                <span
+                  style={{
+                    marginLeft: 'auto',
+                    fontSize: 11,
+                    fontFamily: FONT.label,
+                    letterSpacing: 0.6,
+                    color: (ORDER_STATUS[o.status] || ORDER_STATUS.RECEIVED).color,
+                  }}
+                >
+                  {statusLabel(o.status, lang, true).toUpperCase()}
+                </span>
+                <span style={{ ...S.money, fontWeight: 600 }}>{eur(o.total)}</span>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+
+      <ProfileReminder customer={customer} lang={lang} />
+
+      <div style={{ ...S.label, marginBottom: 10 }}>{t.yourInfo}</div>
+
+      <Field label={t.phone}>
         <input
           style={S.input}
           type="tel"
           value={phone}
           onChange={(e) => setPhone(e.target.value)}
+          onBlur={() => setPhone((v) => normalizePhoneFR(v) || v)}
           autoComplete="tel"
           placeholder="06 12 34 56 78"
         />
       </Field>
 
-      <div style={{ display: 'flex', gap: 10 }}>
-        <div style={{ flex: 1 }}>
-          <Field label="Code postal">
-            <input
-              style={S.input}
-              inputMode="numeric"
-              value={postalCode}
-              onChange={(e) => setPostalCode(e.target.value)}
-              autoComplete="postal-code"
-              placeholder="75011"
-            />
-          </Field>
-        </div>
-        <div style={{ flex: 1 }}>
-          <Field label="Date de naissance">
-            <input
-              style={S.input}
-              type="date"
-              value={birthdate}
-              onChange={(e) => setBirthdate(e.target.value)}
-              autoComplete="bday"
-              max={new Date().toISOString().slice(0, 10)}
-            />
-          </Field>
-        </div>
-      </div>
+      {/* Retour terrain : sur une ligne partagée, le code postal se
+          retrouvait écrasé à côté des trois cases de la date de naissance.
+          Chacun a maintenant sa propre ligne. */}
+      <Field label={t.postalCode}>
+        <input
+          style={S.input}
+          inputMode="numeric"
+          value={postalCode}
+          onChange={(e) => setPostalCode(e.target.value)}
+          autoComplete="postal-code"
+          placeholder="75011"
+        />
+      </Field>
 
-      <Field label="E-mail" hint="Optionnel">
+      <BirthdateField label={t.birthdate} value={birthdate} onChange={setBirthdate} />
+
+      <Field label={t.email} hint={t.optional}>
         <input
           style={S.input}
           type="email"
@@ -2762,13 +3600,43 @@ function ClientProfileSheet({ open, customer, onClose, onSaved, showToast }) {
         />
       </Field>
 
-      <Field label="Instagram" hint="Optionnel">
+      <Field label={t.instagram} hint={t.optional}>
         <input style={S.input} value={instagram} onChange={(e) => setInstagram(e.target.value)} placeholder="@alex" />
       </Field>
 
       <button disabled={busy} onClick={save} style={{ ...S.btn, opacity: busy ? 0.6 : 1 }}>
-        {busy ? '…' : 'Enregistrer'}
+        {busy ? '…' : t.save}
       </button>
+
+      {/* Déconnexion : sert à repasser par le parcours d'entrée — pour le
+          tester, ou quand un téléphone change de mains. Reléguée en bas, en
+          discret : c'est une sortie de route, pas une action courante. */}
+      {onLogout && (
+        <div style={{ marginTop: 26, paddingTop: 18, borderTop: `1px solid ${C.line}` }}>
+          <div style={{ fontSize: 11.5, color: C.faint, lineHeight: 1.55, marginBottom: 10 }}>
+            {t.logoutHint}
+          </div>
+          <button
+            disabled={leaving}
+            onClick={async () => {
+              if (!confirm(t.logoutConfirm)) return
+              setLeaving(true)
+              onClose()
+              await onLogout()
+            }}
+            style={{
+              ...S.btnGhost,
+              minHeight: 44,
+              fontSize: 12.5,
+              borderColor: C.danger,
+              color: C.danger,
+              opacity: leaving ? 0.6 : 1,
+            }}
+          >
+            {leaving ? '…' : t.logout}
+          </button>
+        </div>
+      )}
     </Sheet>
   )
 }
@@ -2777,8 +3645,8 @@ function ClientProfileSheet({ open, customer, onClose, onSaved, showToast }) {
 function CartSheet({ open, cart, lang, subtotal, onClose, onQty, onCheckout }) {
   const t = useT(lang)
   return (
-    <Sheet open={open} onClose={onClose} title={t.cart}>
-      {cart.length === 0 && <Empty emoji="🥂" title="Panier vide" />}
+    <Sheet open={open} onClose={onClose} title={t.cart} lang={lang}>
+      {cart.length === 0 && <Empty emoji="🥂" title={t.emptyCart} />}
       <div style={{ display: 'grid', gap: 10 }}>
         {cart.map((l) => {
           const info = tr(l.product, lang)
@@ -2841,7 +3709,7 @@ function CartSheet({ open, cart, lang, subtotal, onClose, onQty, onCheckout }) {
           </div>
           <div style={{ marginTop: 16 }}>
             <button onClick={onCheckout} style={S.btn}>
-              Continuer
+              {t.continue}
             </button>
           </div>
         </>
@@ -2851,69 +3719,82 @@ function CartSheet({ open, cart, lang, subtotal, onClose, onQty, onCheckout }) {
 }
 
 // ----------------------------------------------------------------- Validation
-function CheckoutSheet({ open, lang, event, cart, pass, promoCode, subtotal, prepMin, onClose, onSubmit }) {
+function CheckoutSheet({ open, lang, event, cart, pass, promoCode, subtotal, prepMin, creditsTotal = 0, onClose, onSubmit }) {
   const t = useT(lang)
   const [note, setNote] = useState('')
-  const [promoResult, setPromoResult] = useState(null)
+  const [preview, setPreview] = useState(null)
   const [busy, setBusy] = useState(false)
 
-  // Le code (s'il y en a un) est saisi une seule fois, au niveau de la carte
-  // (voir PromoCodeCard) — ici on ne fait qu'en afficher l'effet, recalculé
-  // automatiquement à chaque ouverture / changement de panier.
+  // Retour terrain, décision majeure du point équipe (2.3) : « sur le modèle
+  // d'Uber Eats ou Bolt, à la validation du panier, afficher le solde de
+  // crédits et le reste à payer ». Et la règle qui va avec, non négociable :
+  // ce nombre doit être EXACT, sous peine de litige au comptoir si le client
+  // a validé sur une promesse que le retrait dément.
+  //
+  // On appelle donc preview_order() — le même calcul que place_order(), en
+  // lecture seule — plutôt que de reconstruire ici une estimation qui
+  // dupliquerait (et pourrait un jour diverger de) la vraie logique
+  // d'encaissement. Un seul appel couvre code %/montant, forfait groupe ET
+  // codes cadeaux ; l'ancien code n'affichait que les deux premiers.
   useEffect(() => {
-    if (!open || !promoCode) {
-      setPromoResult(null)
+    if (!open || !cart?.length) {
+      setPreview(null)
       return
     }
     let dead = false
+    const items = cart.map((l) => ({
+      product_id: l.product.id,
+      quantity: l.quantity,
+      variant_id: l.variantId,
+      options: l.options.map((o) => ({ id: o.id, name: o.name, price: o.price })),
+    }))
     supabase
-      .rpc('preview_promo', { p_event: event.id, p_code: promoCode, p_subtotal: subtotal })
+      .rpc('preview_order', { p_event: event.id, p_items: items, p_promo: promoCode || null })
       .then(({ data, error }) => {
-        if (!dead) setPromoResult(error ? { valid: false } : data)
+        if (!dead) setPreview(error ? null : data)
       })
     return () => {
       dead = true
     }
-  }, [open, promoCode, event.id, subtotal])
+  }, [open, cart, promoCode, event.id])
 
-  const promoDiscount = promoResult?.valid ? Number(promoResult.discount) : 0
-  const walletEst = estimateWalletDiscount(cart || [], pass)
-  const discount = promoDiscount + walletEst.discount
-  const total = Math.max(0, subtotal - discount)
+  const discount = Number(preview?.discount ?? 0)
+  const total = preview ? Number(preview.total) : subtotal
+  const showingCode = promoCode && preview && !preview.promo_applied
 
   return (
-    <Sheet open={open} onClose={onClose} title="Valider la commande">
+    <Sheet open={open} onClose={onClose} title={t.validateOrder} lang={lang}>
       <Field label={t.note}>
         <textarea
           style={{ ...S.input, minHeight: 76, paddingTop: 12, resize: 'vertical' }}
           value={note}
           onChange={(e) => setNote(e.target.value)}
-          placeholder="Sans glace, peu sucré, allergie…"
+          placeholder={t.notePlaceholder}
         />
       </Field>
 
       {promoCode && (
         <div style={{ marginBottom: 14 }}>
-          {promoResult == null ? (
-            <Banner tone="info">Vérification du code {promoCode}…</Banner>
-          ) : promoResult.valid ? (
-            <Banner tone="ok">
-              Code {promoCode} — réduction de {eur(promoDiscount)} appliquée ci-dessous.
-            </Banner>
+          {!preview ? (
+            <Banner tone="info">{t.checkingCode(promoCode)}</Banner>
+          ) : showingCode ? (
+            <Banner tone="danger">{t.codeInvalid(promoCode)}</Banner>
           ) : (
-            <Banner tone="danger">
-              Code {promoCode} invalide, expiré, épuisé ou panier insuffisant pour ce code.
-            </Banner>
+            <Banner tone="ok">{t.codeApplied(promoCode, eur(discount))}</Banner>
           )}
         </div>
       )}
 
-      {walletEst.discount > 0 && (
+      {/* Solde de crédits / reste à payer, à la Uber Eats — n'apparaît que
+          tant qu'il reste effectivement des crédits à faire jouer ou
+          consommés sur CETTE commande. Zéro crédit restant = la bannière
+          disparaît, exactement la règle demandée. */}
+      {/* N'existe QUE si le client avait des crédits en entrant dans cet
+          écran — la même garde que le badge sur la carte. Le nombre vient du
+          serveur : c'est exactement ce qu'il restera après validation. */}
+      {creditsTotal > 0 && preview && (
         <div style={{ marginBottom: 14 }}>
-          <Banner tone="ok">
-            🎟️ Forfait : {eur(walletEst.discount)} couverts par votre portefeuille — il vous restera{' '}
-            {walletEst.creditsRemaining} crédit{walletEst.creditsRemaining > 1 ? 's' : ''} après cette commande.
-          </Banner>
+          <Banner tone="ok">{t.creditsLeftAfter(preview.credits_left)}</Banner>
         </div>
       )}
 
@@ -2943,13 +3824,12 @@ function CheckoutSheet({ open, lang, event, cart, pass, promoCode, subtotal, pre
       </div>
 
       <div style={{ marginBottom: 16 }}>
-        <PayAtBar />
+        <PayAtBar lang={lang} />
       </div>
 
       <div style={{ marginBottom: 16 }}>
         <Banner tone="info">
-          Prête dans environ <strong>{prepMin} min</strong>. Merci de récupérer votre commande dans
-          les 5 minutes une fois prête — elle reste due même si elle n’est pas retirée.
+          <strong>{t.readyIn(prepMin)}</strong> {t.pickup5}
         </Banner>
       </div>
 
@@ -2962,7 +3842,7 @@ function CheckoutSheet({ open, lang, event, cart, pass, promoCode, subtotal, pre
         }}
         style={{ ...S.btn, opacity: busy ? 0.6 : 1, minHeight: 58 }}
       >
-        {busy ? 'Envoi…' : t.send}
+        {busy ? t.sending : t.send}
       </button>
     </Sheet>
   )
@@ -2974,33 +3854,68 @@ function CheckoutSheet({ open, lang, event, cart, pass, promoCode, subtotal, pre
  * Historique complet des messages (diffusions + messages individuels),
  * contrairement au bandeau qui ne montrait que les 3 derniers non lus.
  */
-function MessagesView({ messages, customer, onMarkRead, onBackToMenu }) {
-  if (!messages.length)
+function MessagesView({
+  lang,
+  messages,
+  customer,
+  onMarkRead,
+  onBackToMenu,
+  onOpenProfile,
+  onOpenOrder,
+  doneOrders,
+}) {
+  const t = useT(lang)
+  const shown = messages.filter((m) => {
+    if (m.kind !== 'status') return true
+    if (!m.order_id) return false
+    return !doneOrders?.has(m.order_id)
+  })
+
+  if (!shown.length)
     return (
       <>
-        <Empty
-          emoji="💬"
-          title="Aucun message pour l’instant"
-          sub="Les annonces de la soirée et les messages qui vous sont adressés apparaîtront ici."
-        />
+        <ProfileReminder customer={customer} lang={lang} onOpen={onOpenProfile} />
+        <Empty emoji="💬" title={t.noMessages} sub={t.noMessagesSub} />
         <button onClick={onBackToMenu} style={S.btnGhost}>
-          Voir la carte
+          {t.seeMenu}
         </button>
       </>
     )
 
   return (
     <div style={{ display: 'grid', gap: 8 }}>
-      {messages
-        .filter((m) => m.kind !== 'status')
-        .map((m) => (
+      <ProfileReminder customer={customer} lang={lang} onOpen={onOpenProfile} />
+      {shown.map((m) => {
+        // Trois natures de message, lisibles d'un coup d'œil : le suivi de
+        // commande (statut), le message adressé à une personne, l'annonce de la
+        // soirée. Un message urgent passe au rouge, quelle que soit sa nature.
+        const urgent = Boolean(m.urgent)
+        const tone = urgent
+          ? { fg: C.danger, bg: 'rgba(192,57,43,.08)', label: t.msgUrgent }
+          : m.kind === 'status'
+            ? { fg: C.ok, bg: 'rgba(46,125,91,.07)', label: t.msgOrder }
+            : m.kind === 'individual'
+              ? { fg: C.indigo, bg: 'rgba(106,95,214,.10)', label: t.msgForYou }
+              : { fg: C.terracotta, bg: C.paper, label: t.announcement }
+        // Un message qui parle d'une commande mène à cette commande : c'est la
+        // boucle centrale de l'expérience client, et elle était rompue — le
+        // temps d'attente vit dans « Mes commandes », pas dans le message.
+        const linked = Boolean(m.order_id && onOpenOrder)
+        return (
           <div
             key={m.id}
+            onClick={linked ? () => onOpenOrder(m.order_id) : undefined}
+            role={linked ? 'button' : undefined}
+            tabIndex={linked ? 0 : undefined}
+            onKeyDown={
+              linked ? (e) => (e.key === 'Enter' || e.key === ' ') && onOpenOrder(m.order_id) : undefined
+            }
             style={{
-              background: m.kind === 'individual' ? 'rgba(106,95,214,.10)' : C.paper,
-              border: `1.5px solid ${m.kind === 'individual' ? C.indigo : C.line}`,
+              background: tone.bg,
+              border: `1.5px solid ${urgent || m.kind !== 'broadcast' ? tone.fg : C.line}`,
               borderRadius: 14,
               padding: 14,
+              cursor: linked ? 'pointer' : 'default',
             }}
           >
             <div
@@ -3012,49 +3927,93 @@ function MessagesView({ messages, customer, onMarkRead, onBackToMenu }) {
                 fontSize: 10.5,
                 letterSpacing: 1.4,
                 textTransform: 'uppercase',
-                color: m.kind === 'individual' ? C.indigo : C.terracotta,
+                color: tone.fg,
                 marginBottom: 5,
               }}
             >
-              {m.kind === 'individual' ? 'Message pour vous' : 'Annonce de la soirée'} · {timeFR(m.created_at)}
+              {urgent && <span aria-hidden>⚠️</span>}
+              {tone.label} · {timeFR(m.created_at)}
               {m.customer_id === customer?.id && !m.read_at && (
-                <span style={{ width: 7, height: 7, borderRadius: 4, background: C.terracotta }} />
+                <span style={{ width: 7, height: 7, borderRadius: 4, background: tone.fg }} />
               )}
             </div>
             <div style={{ fontSize: 14, lineHeight: 1.55 }}>{m.body}</div>
+            {linked && (
+              <div
+                style={{
+                  marginTop: 8,
+                  fontSize: 12,
+                  fontWeight: 600,
+                  color: tone.fg,
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: 5,
+                }}
+              >
+                {t.seeMyOrder} <span aria-hidden>›</span>
+              </div>
+            )}
             {m.customer_id === customer?.id && !m.read_at && (
               <button
-                onClick={() => onMarkRead(m)}
+                onClick={(e) => {
+                  e.stopPropagation()
+                  onMarkRead(m)
+                }}
                 style={{ background: 'none', border: 'none', color: C.dim, fontSize: 12, padding: '8px 0 0', cursor: 'pointer' }}
               >
-                Marquer comme lu
+                {t.markRead}
               </button>
             )}
           </div>
-        ))}
+        )
+      })}
+
+      {/* La carte reste à un tap, depuis n'importe quel écran secondaire. */}
+      <button onClick={onBackToMenu} style={{ ...S.btnGhost, marginTop: 4 }}>
+        {t.seeMenu}
+      </button>
     </div>
   )
 }
 
-function MyOrders({ orders, event, venue, customer, lang, pushOn, onEnablePush, onReview, onBackToMenu }) {
+function MyOrders({
+  orders,
+  event,
+  venue,
+  customer,
+  lang,
+  pushOn,
+  onEnablePush,
+  onReview,
+  onBackToMenu,
+  focusOrder,
+  onFocusDone,
+}) {
   const t = useT(lang)
   const [now, setNow] = useState(Date.now())
+  const cardRefs = useRef({})
 
   useEffect(() => {
     const id = setInterval(() => setNow(Date.now()), 1000)
     return () => clearInterval(id)
   }, [])
 
+  // Arrivée depuis un message de suivi : on amène directement le bon ticket
+  // sous les yeux plutôt que de laisser chercher dans la liste.
+  useEffect(() => {
+    if (!focusOrder) return
+    const el = cardRefs.current[focusOrder]
+    if (el) glideIntoView(el, 16)
+    const id = setTimeout(() => onFocusDone?.(), 2200)
+    return () => clearTimeout(id)
+  }, [focusOrder, orders, onFocusDone])
+
   if (!orders.length)
     return (
       <>
-        <Empty
-          emoji="🍹"
-          title="Aucune commande pour l’instant"
-          sub="Vos commandes de la soirée apparaîtront ici."
-        />
+        <Empty emoji="🍹" title={t.noOrders} sub={t.noOrdersSub} />
         <button onClick={onBackToMenu} style={S.btnGhost}>
-          Voir la carte
+          {t.seeMenu}
         </button>
       </>
     )
@@ -3070,13 +4029,23 @@ function MyOrders({ orders, event, venue, customer, lang, pushOn, onEnablePush, 
             color: pushOn ? C.ok : C.terracotta,
           }}
         >
-          {pushOn ? '✓ Notifications activées' : 'Me prévenir quand c’est prêt'}
+          {pushOn ? t.notifOn : t.notifCta}
         </button>
       )}
 
       {orders.map((o) => (
-        <OrderCard
+        <div
           key={o.id}
+          ref={(el) => {
+            cardRefs.current[o.id] = el
+          }}
+          style={{
+            borderRadius: 20,
+            transition: 'box-shadow .4s',
+            boxShadow: focusOrder === o.id ? `0 0 0 3px ${C.terracotta}66` : 'none',
+          }}
+        >
+        <OrderCard
           order={o}
           event={event}
           venue={venue}
@@ -3085,10 +4054,11 @@ function MyOrders({ orders, event, venue, customer, lang, pushOn, onEnablePush, 
           now={now}
           onReview={() => onReview(o)}
         />
+        </div>
       ))}
 
       <button onClick={onBackToMenu} style={S.btnGhost}>
-        Voir la carte
+        {t.seeMenu}
       </button>
     </div>
   )
@@ -3154,8 +4124,8 @@ function OrderCard({ order, event, venue, customer, lang, now, onReview }) {
         </div>
         <div style={{ fontSize: 12.5, color: order.status === 'READY' ? C.navy : C.dim, marginTop: 6 }}>
           {order.status === 'READY'
-            ? 'Présentez ce code au bar et réglez sur place'
-            : `Commande de ${timeFR(order.created_at)}`}
+            ? t.showCodeAtBar
+            : t.orderedAt(timeFR(order.created_at))}
         </div>
       </div>
 
@@ -3164,7 +4134,7 @@ function OrderCard({ order, event, venue, customer, lang, now, onReview }) {
         <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 14 }}>
           <div style={{ width: 9, height: 9, borderRadius: 5, background: st.color }} />
           <div style={{ fontFamily: FONT.label, fontWeight: 600, letterSpacing: 1, color: st.color }}>
-            {st.label.toUpperCase()}
+            {statusLabel(order.status, lang).toUpperCase()}
           </div>
           {(order.status === 'RECEIVED' || order.status === 'IN_PREP') && etaSec > 0 && (
             <div style={{ ...S.money, marginLeft: 'auto', fontSize: 20, fontWeight: 600 }}>
@@ -3176,8 +4146,8 @@ function OrderCard({ order, event, venue, customer, lang, now, onReview }) {
         {/* Progression */}
         {!['CANCELLED'].includes(order.status) && (
           <div style={{ display: 'flex', gap: 5, marginBottom: 16 }}>
-            {['Reçue', 'En prépa', 'Prête', 'Retirée', 'Réglée'].map((label, i) => (
-              <div key={label} style={{ flex: 1 }}>
+            {steps.map((code, i) => (
+              <div key={code} style={{ flex: 1 }}>
                 <div
                   style={{
                     height: 4,
@@ -3194,7 +4164,7 @@ function OrderCard({ order, event, venue, customer, lang, now, onReview }) {
                     color: i <= idx ? C.text : C.faint,
                   }}
                 >
-                  {label.toUpperCase()}
+                  {statusLabel(code, lang, true).toUpperCase()}
                 </div>
               </div>
             ))}
@@ -3203,10 +4173,7 @@ function OrderCard({ order, event, venue, customer, lang, now, onReview }) {
 
         {order.status === 'UNPAID' && (
           <div style={{ marginBottom: 14 }}>
-            <Banner tone="danger">
-              Cette commande n’a pas été réglée en fin de soirée. Elle reste due — merci de vous
-              rapprocher de l’établissement.
-            </Banner>
+            <Banner tone="danger">{t.unpaidOrder}</Banner>
           </div>
         )}
 
@@ -3273,25 +4240,25 @@ function OrderCard({ order, event, venue, customer, lang, now, onReview }) {
 
         {order.note && (
           <div style={{ fontSize: 12.5, color: C.dim, marginTop: 10 }}>
-            <strong>Note :</strong> {order.note}
+            <strong>{t.noteLabel}</strong> {order.note}
           </div>
         )}
 
         <div style={{ marginTop: 14 }}>
           {order.status === 'PAID' ? (
-            <Banner tone="ok">Réglée au bar — merci !</Banner>
+            <Banner tone="ok">{t.paidAtBar}</Banner>
           ) : (
-            <PayAtBar compact />
+            <PayAtBar compact lang={lang} />
           )}
         </div>
 
         <div style={{ display: 'grid', gap: 8, marginTop: 12 }}>
           <button onClick={downloadRecap} style={{ ...S.btnGhost, minHeight: 44, fontSize: 12 }}>
-            Récapitulatif PDF
+            {t.pdfRecap}
           </button>
           {order.status === 'PAID' && (
             <button onClick={onReview} style={{ ...S.btnGhost, minHeight: 44, fontSize: 12, borderColor: C.indigo, color: C.indigo }}>
-              Noter le service
+              {t.rateService}
             </button>
           )}
         </div>
@@ -3301,7 +4268,8 @@ function OrderCard({ order, event, venue, customer, lang, now, onReview }) {
 }
 
 // ---------------------------------------------------------------------- Avis
-function ReviewSheet({ order, event, customer, onClose, onDone }) {
+function ReviewSheet({ lang, order, event, customer, onClose, onDone }) {
+  const t = useT(lang)
   const [rating, setRating] = useState(0)
   const [comment, setComment] = useState('')
   const [busy, setBusy] = useState(false)
@@ -3309,9 +4277,9 @@ function ReviewSheet({ order, event, customer, onClose, onDone }) {
   if (!order) return null
 
   return (
-    <Sheet open={!!order} onClose={onClose} title="Votre soirée">
+    <Sheet open={!!order} onClose={onClose} title={t.yourNight} lang={lang}>
       <div style={{ color: C.dim, fontSize: 13.5, marginTop: -8, marginBottom: 18, lineHeight: 1.55 }}>
-        Comment s’est passé le service ?
+        {t.howWasService}
       </div>
       <div style={{ display: 'flex', gap: 8, marginBottom: 16 }}>
         {[1, 2, 3, 4, 5].map((n) => (
@@ -3337,7 +4305,7 @@ function ReviewSheet({ order, event, customer, onClose, onDone }) {
         style={{ ...S.input, minHeight: 84, paddingTop: 12 }}
         value={comment}
         onChange={(e) => setComment(e.target.value)}
-        placeholder="Un mot pour l’équipe (facultatif)"
+        placeholder={t.reviewPlaceholder}
       />
       <div style={{ marginTop: 14 }}>
         <button
@@ -3356,7 +4324,7 @@ function ReviewSheet({ order, event, customer, onClose, onDone }) {
           }}
           style={{ ...S.btn, opacity: !rating || busy ? 0.5 : 1 }}
         >
-          {busy ? '…' : 'Envoyer'}
+          {busy ? '…' : t.sendShort}
         </button>
       </div>
     </Sheet>
@@ -3646,14 +4614,10 @@ function StaffLogin() {
 
           {mode !== 'forgot' && (
             <Field label="Mot de passe">
-              <input
-                style={S.input}
-                type="password"
-                required
-                minLength={6}
-                autoComplete={mode === 'login' ? 'current-password' : 'new-password'}
+              <PasswordInput
                 value={password}
                 onChange={(e) => setPassword(e.target.value)}
+                autoComplete={mode === 'login' ? 'current-password' : 'new-password'}
               />
             </Field>
           )}
@@ -4408,17 +5372,88 @@ function OrderNotesSheet({ order, onClose, onSaved, showToast }) {
   )
 }
 
+/**
+ * Détail des articles offerts sur une commande — ce que le bar doit servir
+ * sans encaisser, et au titre de quel code.
+ */
+function GiftBanner({ orderId }) {
+  const [rows, setRows] = useState(null)
+
+  useEffect(() => {
+    if (!orderId) return
+    let dead = false
+    supabase
+      .from('gift_redemptions')
+      .select('product_name, unit_price, covered, paid, redeemed_at, promo_codes ( code, label )')
+      .eq('order_id', orderId)
+      .order('redeemed_at')
+      .then(({ data }) => {
+        if (!dead) setRows(data || [])
+      })
+    return () => {
+      dead = true
+    }
+  }, [orderId])
+
+  if (!rows || rows.length === 0) return null
+
+  return (
+    <div
+      style={{
+        padding: 14,
+        borderRadius: 14,
+        background: `${C.gold}14`,
+        border: `2px solid ${C.gold}`,
+      }}
+    >
+      <div style={{ ...S.h1, fontSize: 16, color: C.goldDark, marginBottom: 8 }}>
+        🎁 {rows.length} crédit{rows.length > 1 ? 's' : ''} — {rows.length > 1 ? 'articles' : 'article'} à offrir
+      </div>
+      <div style={{ display: 'grid', gap: 5 }}>
+        {rows.map((r, i) => (
+          <div key={i} style={{ fontSize: 13 }}>
+            <strong>{r.product_name}</strong>
+            <span style={{ color: C.dim }}>
+              {' '}
+              — {eur(r.covered)} offerts
+              {Number(r.paid) > 0 ? `, ${eur(r.paid)} à encaisser` : ''}
+            </span>
+            {r.promo_codes?.code && (
+              <span style={{ color: C.faint, fontSize: 11.5 }}>
+                {' '}
+                · {r.promo_codes.label || r.promo_codes.code}
+              </span>
+            )}
+          </div>
+        ))}
+      </div>
+    </div>
+  )
+}
+
 function BarTab({ event, venue, onEventChange, showToast }) {
   const [orders, setOrders] = useState([])
   const [loading, setLoading] = useState(true)
   const [prep, setPrep] = useState(event.default_prep_min ?? 1)
   const [detail, setDetail] = useState(null)
   const [notesFor, setNotesFor] = useState(null)
+  // Retour terrain 5.3 : « depuis une commande, rebondir directement sur la
+  // fiche client concernée » — un incident se règle au comptoir avec le
+  // ticket en main, pas avec un nom.
+  const [ficheFor, setFicheFor] = useState(null)
   const [soldOutOpen, setSoldOutOpen] = useState(false)
   const [staffPush, setStaffPush] = useState(false)
   const [ack, setAck] = useState(() => new Set(LS.get(`noti:ack:${event.id}`, [])))
+  // Sonnerie choisie par l'établissement, mémorisée sur la tablette du bar :
+  // c'est un réglage de poste, pas une donnée de soirée.
+  const [ringtone, setRingtone] = useState(() => LS.get('noti:ringtone', DEFAULT_RINGTONE))
   const alarm = useRef(null)
-  if (!alarm.current) alarm.current = new Alarm()
+  if (!alarm.current) alarm.current = new Alarm(ringtone)
+
+  useEffect(() => {
+    LS.set('noti:ringtone', ringtone)
+    alarm.current?.setKind(ringtone)
+  }, [ringtone])
 
   useEffect(() => setPrep(event.default_prep_min ?? 1), [event.default_prep_min])
 
@@ -4484,7 +5519,7 @@ function BarTab({ event, venue, onEventChange, showToast }) {
     })
   }
 
-  async function move(order, status) {
+  async function move(order, status, opts = {}) {
     unlockAudio()
     const { error } = await supabase.from('orders').update({ status }).eq('id', order.id)
     if (error) return showToast(frError(error), 'error')
@@ -4500,7 +5535,48 @@ function BarTab({ event, venue, onEventChange, showToast }) {
         requireInteraction: true,
       })
     }
+
+    // Retour en arrière après un « Prête » cliqué trop vite : le client a déjà
+    // été prévenu et se déplace. On le rattrape plutôt que de le laisser
+    // attendre devant le bar.
+    if (opts.back && order.status === 'READY') {
+      notify({
+        eventId: event.id,
+        kind: 'status',
+        customerId: order.customer_id,
+        orderId: order.id,
+        title: 'Encore quelques instants',
+        body: `Commande ${order.pickup_code} : finalement encore en préparation, on vous reprévient dès que c’est prêt. Désolé pour l’aller-retour.`,
+      })
+    }
+
+    // Annulation : le client doit l'apprendre autrement qu'en trouvant son
+    // ticket barré. Message urgent, il est peut-être déjà en route.
+    if (status === 'CANCELLED') {
+      notify({
+        eventId: event.id,
+        kind: 'status',
+        customerId: order.customer_id,
+        orderId: order.id,
+        title: 'Commande annulée',
+        body: `Commande ${order.pickup_code} : elle a été annulée par le bar. Rien ne vous sera facturé — voyez avec l’équipe sur place.`,
+        urgent: true,
+      })
+    }
+
+    if (opts.back) showToast(`${order.pickup_code} revenue à « ${statusLabel(status, 'fr')} ».`, 'ok')
     load()
+  }
+
+  // Relance de retrait : message urgent adressé au client, horodaté côté base
+  // (voir nudge_pickup dans 0022).
+  const [nudging, setNudging] = useState(null)
+  async function nudge(order) {
+    setNudging(order.id)
+    const { error } = await supabase.rpc('nudge_pickup', { p_order: order.id, p_body: null })
+    setNudging(null)
+    if (error) return showToast(frError(error), 'error')
+    showToast(`Relance envoyée pour ${order.pickup_code}.`, 'ok')
   }
 
   async function savePrep(v) {
@@ -4576,14 +5652,31 @@ function BarTab({ event, venue, onEventChange, showToast }) {
                     }}
                   >
                     {min} min
-                    {min >= ESCALADE_MIN ? ' · à escalader' : ''}
                   </span>
+                  {/* Relance directe : le message part en rouge sur le téléphone
+                      du client, sans passer par le micro. */}
+                  <button
+                    onClick={() => nudge(o)}
+                    disabled={nudging === o.id}
+                    style={{
+                      ...S.chip,
+                      minHeight: 32,
+                      padding: '4px 10px',
+                      fontSize: 11,
+                      borderColor: C.danger,
+                      color: C.danger,
+                      opacity: nudging === o.id ? 0.5 : 1,
+                    }}
+                  >
+                    {nudging === o.id ? '…' : 'Relancer'}
+                  </button>
                 </div>
               ))}
             </div>
             <div style={{ fontSize: 11.5, color: C.dim, marginTop: 10, lineHeight: 1.5 }}>
-              Appelez le code au micro. Au-delà de {ESCALADE_MIN} min, l’organisateur prend le relais
-              depuis l’onglet Organisation.
+              « Relancer » envoie un message urgent au client. Appelez aussi le code au micro.
+              Au-delà de {ESCALADE_MIN} min, l’organisateur prend le relais depuis l’onglet
+              Organisation.
             </div>
           </div>
         </div>
@@ -4605,6 +5698,50 @@ function BarTab({ event, venue, onEventChange, showToast }) {
           <button onClick={() => savePrep(prep + 1)} style={stepBtn}>
             +
           </button>
+        </div>
+      </div>
+
+      {/* Sonnerie d'alerte — un club et un bar à cocktails n'ont pas les mêmes
+          attentes. On écoute avant de choisir. */}
+      <div style={{ ...S.card, padding: 14, marginBottom: 14 }} className="no-print">
+        <div style={{ ...S.label, marginBottom: 8 }}>🔔 Sonnerie des nouvelles commandes</div>
+        <div style={{ display: 'grid', gap: 6 }}>
+          {RINGTONES.map((r) => {
+            const on = ringtone === r.k
+            return (
+              <button
+                key={r.k}
+                onClick={() => {
+                  unlockAudio()
+                  setRingtone(r.k)
+                  previewRingtone(r.k)
+                }}
+                style={{
+                  ...S.chip,
+                  width: '100%',
+                  minHeight: 46,
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: 10,
+                  textAlign: 'left',
+                  whiteSpace: 'normal',
+                  borderColor: on ? C.terracotta : C.lineHi,
+                  background: on ? 'rgba(185,106,76,.08)' : 'transparent',
+                  color: on ? C.terracotta : C.dim,
+                }}
+              >
+                <span style={{ fontSize: 15 }}>{on ? '●' : '○'}</span>
+                <span style={{ flex: 1 }}>
+                  <span style={{ fontWeight: 600, fontSize: 13 }}>{r.label}</span>
+                  <span style={{ display: 'block', fontSize: 11, color: C.faint }}>{r.hint}</span>
+                </span>
+                <span style={{ fontSize: 13 }}>▶</span>
+              </button>
+            )
+          })}
+        </div>
+        <div style={{ fontSize: 11, color: C.faint, marginTop: 8, lineHeight: 1.5 }}>
+          Un tap sélectionne et fait écouter. Le réglage reste sur cette tablette.
         </div>
       </div>
 
@@ -4634,10 +5771,13 @@ function BarTab({ event, venue, onEventChange, showToast }) {
 
       <div style={{ display: 'flex', gap: 12, overflowX: 'auto', paddingBottom: 8 }}>
         {[
-          { title: 'Reçues', list: received, color: C.indigo, action: 'En préparation', next: 'IN_PREP' },
-          { title: 'En préparation', list: inPrep, color: C.warn, action: 'Prête', next: 'READY' },
-          { title: 'Prêtes', list: ready, color: C.terracotta, action: 'Retirée', next: 'PICKED_UP' },
-          { title: 'Retirées', list: pickedUp, color: C.ok, action: 'Réglée', next: 'PAID' },
+          // `prev` : un tap de trop sur « Prête » notifiait le client, qui
+          // venait attendre devant le bar — exactement ce que l'outil est censé
+          // éviter. Mieux vaut pouvoir revenir en arrière et ne pas s'en servir.
+          { title: 'Reçues', list: received, color: C.indigo, action: 'En préparation', next: 'IN_PREP', prev: null },
+          { title: 'En préparation', list: inPrep, color: C.warn, action: 'Prête', next: 'READY', prev: 'RECEIVED' },
+          { title: 'Prêtes', list: ready, color: C.terracotta, action: 'Retirée', next: 'PICKED_UP', prev: 'IN_PREP' },
+          { title: 'Retirées', list: pickedUp, color: C.ok, action: 'Réglée', next: 'PAID', prev: 'READY' },
         ].map((col) => (
           <div key={col.title} style={{ minWidth: 268, flex: '1 0 268px' }}>
             <div
@@ -4696,6 +5836,25 @@ function BarTab({ event, venue, onEventChange, showToast }) {
                       {o.notes_count > 0 && (
                         <div style={{ marginTop: 5 }}>
                           <FlagDot flag={o.flag} count={o.notes_count} />
+                        </div>
+                      )}
+                      {o.gift_count > 0 && (
+                        <div
+                          style={{
+                            marginTop: 6,
+                            display: 'inline-flex',
+                            alignItems: 'center',
+                            gap: 4,
+                            padding: '3px 9px',
+                            borderRadius: 999,
+                            fontSize: 11,
+                            fontWeight: 700,
+                            background: `${C.gold}22`,
+                            color: C.goldDark,
+                            border: `1px solid ${C.gold}66`,
+                          }}
+                        >
+                          🎁 {o.gift_count} CRÉDIT{o.gift_count > 1 ? 'S' : ''} · {eur(o.gift_total)} offert{o.gift_count > 1 ? 's' : ''}
                         </div>
                       )}
                     </div>
@@ -4764,6 +5923,25 @@ function BarTab({ event, venue, onEventChange, showToast }) {
                     >
                       {col.action}
                     </button>
+                    {col.prev && (
+                      <button
+                        onClick={() => move(o, col.prev, { back: true })}
+                        title={`Revenir à « ${statusLabel(col.prev, 'fr')} »`}
+                        style={{
+                          width: 44,
+                          minHeight: 44,
+                          borderRadius: 12,
+                          border: `1.5px solid ${C.lineHi}`,
+                          background: C.paper,
+                          color: C.dim,
+                          cursor: 'pointer',
+                          fontSize: 17,
+                          lineHeight: 1,
+                        }}
+                      >
+                        ↩
+                      </button>
+                    )}
                     <button
                       onClick={() => setNotesFor(o)}
                       title="Commenter / signaler cette commande"
@@ -4803,14 +5981,39 @@ function BarTab({ event, venue, onEventChange, showToast }) {
       <Sheet open={!!detail} onClose={() => setDetail(null)} title={detail ? `Commande ${detail.pickup_code}` : ''}>
         {detail && (
           <>
-            <div style={{ marginBottom: 14, fontSize: 13.5 }}>
-              <strong>
-                {detail.customers?.first_name} {detail.customers?.last_name}
-              </strong>
+            {detail.gift_count > 0 && (
+              <div style={{ marginBottom: 14 }}>
+                <GiftBanner orderId={detail.id} />
+              </div>
+            )}
+            <button
+              onClick={() => {
+                const o = detail
+                setDetail(null)
+                setFicheFor(o.customer_id)
+              }}
+              disabled={!detail.customer_id}
+              style={{
+                width: '100%',
+                textAlign: 'left',
+                background: 'none',
+                border: `1px solid ${C.line}`,
+                borderRadius: 12,
+                padding: '10px 12px',
+                marginBottom: 14,
+                cursor: detail.customer_id ? 'pointer' : 'default',
+              }}
+            >
+              <div style={{ fontSize: 13.5, display: 'flex', alignItems: 'center', gap: 6 }}>
+                <strong style={{ flex: 1 }}>
+                  {detail.customers?.first_name} {detail.customers?.last_name}
+                </strong>
+                {detail.customer_id && <span style={{ color: C.indigo, fontSize: 12 }}>Voir la fiche ›</span>}
+              </div>
               <div style={{ color: C.dim, fontSize: 12.5, marginTop: 3 }}>
                 {phoneFR(detail.customers?.phone)}
               </div>
-            </div>
+            </button>
             <div style={{ display: 'grid', gap: 8, marginBottom: 16 }}>
               {(detail.order_items || []).map((it) => (
                 <div
@@ -4871,9 +6074,11 @@ function BarTab({ event, venue, onEventChange, showToast }) {
               </button>
               <button
                 onClick={async () => {
-                  await supabase.from('orders').update({ status: 'CANCELLED' }).eq('id', detail.id)
+                  if (!confirm(`Annuler la commande ${detail.pickup_code} ? Le client en sera prévenu.`)) return
+                  // Passe par move() pour que le client reçoive la notification
+                  // d'annulation — l'update direct ne prévenait personne.
+                  await move(detail, 'CANCELLED')
                   setDetail(null)
-                  load()
                 }}
                 style={{ ...S.btnGhost, borderColor: C.danger, color: C.danger }}
               >
@@ -4883,6 +6088,14 @@ function BarTab({ event, venue, onEventChange, showToast }) {
           </>
         )}
       </Sheet>
+
+      <ClientFicheSheet
+        customerId={ficheFor}
+        event={event}
+        onClose={() => setFicheFor(null)}
+        onChanged={load}
+        showToast={showToast}
+      />
     </div>
   )
 }
@@ -4978,6 +6191,10 @@ function CaisseTab({ event, venue, showToast }) {
   const [selected, setSelected] = useState([])
   const [payOpen, setPayOpen] = useState(false)
   const [showPaid, setShowPaid] = useState(false)
+  // Retour terrain 6.4 : « le montant encaissé doit inclure l'argent entré
+  // grâce à l'outil » — détenir le code d'entrée du jour vaut avoir payé,
+  // donc son activation alimente ce total sans passer par une commande.
+  const [entries, setEntries] = useState(null)
 
   const load = useCallback(async () => {
     const { data } = await supabase
@@ -4990,8 +6207,14 @@ function CaisseTab({ event, venue, showToast }) {
     setLoading(false)
   }, [event.id])
 
+  const loadEntries = useCallback(async () => {
+    const { data } = await supabase.rpc('event_entries_summary', { p_event: event.id })
+    setEntries(data || null)
+  }, [event.id])
+
   useEffect(() => {
     load()
+    loadEntries()
     const ch = supabase
       .channel(`caisse-${event.id}`)
       .on(
@@ -4999,9 +6222,14 @@ function CaisseTab({ event, venue, showToast }) {
         { event: '*', schema: 'public', table: 'orders', filter: `event_id=eq.${event.id}` },
         () => load()
       )
+      .on(
+        'postgres_changes',
+        { event: 'INSERT', schema: 'public', table: 'event_entries', filter: `event_id=eq.${event.id}` },
+        () => loadEntries()
+      )
       .subscribe()
     return () => supabase.removeChannel(ch)
-  }, [event.id, load])
+  }, [event.id, load, loadEntries])
 
   const visible = orders.filter((o) => (showPaid ? true : o.status !== 'PAID'))
 
@@ -5017,6 +6245,10 @@ function CaisseTab({ event, venue, showToast }) {
 
   const selectedOrders = orders.filter((o) => selected.includes(o.id))
   const selectedTotal = selectedOrders.reduce((s, o) => s + Number(o.total || 0), 0)
+  // Consos déjà payées par un crédit : elles ne sont PAS à encaisser, mais le
+  // bar doit pouvoir rapprocher sa caisse de ce qui est sorti du stock.
+  const selectedGift = selectedOrders.reduce((s, o) => s + Number(o.gift_total || 0), 0)
+  const selectedGross = selectedOrders.reduce((s, o) => s + Number(o.subtotal || 0), 0)
 
   async function markPaid(method) {
     const { error } = await supabase
@@ -5033,8 +6265,14 @@ function CaisseTab({ event, venue, showToast }) {
   if (loading) return <Spinner />
 
   const due = orders.filter((o) => o.status !== 'PAID').reduce((s, o) => s + Number(o.total || 0), 0)
-  const cashed = orders.filter((o) => o.status === 'PAID').reduce((s, o) => s + Number(o.total || 0), 0)
+  const cashedOrders = orders.filter((o) => o.status === 'PAID').reduce((s, o) => s + Number(o.total || 0), 0)
+  const entriesTotal = Number(entries?.entries_total || 0)
+  // « Encaissé » regroupe désormais les commandes réglées ET les entrées
+  // payées à l'activation du code du jour — c'est tout l'argent que l'outil a
+  // fait rentrer, pas seulement ce qui passe par une commande.
+  const cashed = cashedOrders + entriesTotal
   const unpaid = orders.filter((o) => o.status === 'UNPAID')
+  const scanDelta = entries ? Math.max(0, Number(entries.scan_count || 0) - Number(entries.entries_count || 0)) : null
 
   return (
     <div style={{ paddingBottom: selected.length ? 120 : 0 }}>
@@ -5058,6 +6296,42 @@ function CaisseTab({ event, venue, showToast }) {
         ))}
       </div>
 
+      {/* Fenêtre Entrées : n'apparaît que si un code d'entrée existe pour
+          cette soirée (event_entries_summary ne renvoie rien pour un
+          non-staff, et entries reste à 0 tant qu'aucun code d'entrée n'a
+          jamais été activé). */}
+      {entries && (Number(entries.entries_count) > 0 || Number(entries.scan_count) > 0) && (
+        <div style={{ ...S.card, padding: 14, marginBottom: 14, border: `1.5px solid ${C.gold}88` }}>
+          <div style={{ ...S.label, marginBottom: 10 }}>🎫 Entrées</div>
+          <div style={{ display: 'flex', gap: 10 }}>
+            <div style={{ flex: 1, textAlign: 'center' }}>
+              <div style={{ ...S.money, fontSize: 19, fontWeight: 600, color: C.goldDark }}>
+                {entries.entries_count}
+              </div>
+              <div style={{ fontSize: 10.5, color: C.dim, marginTop: 2 }}>payées</div>
+            </div>
+            <div style={{ flex: 1, textAlign: 'center' }}>
+              <div style={{ ...S.money, fontSize: 19, fontWeight: 600, color: C.goldDark }}>
+                {eur(entriesTotal)}
+              </div>
+              <div style={{ fontSize: 10.5, color: C.dim, marginTop: 2 }}>encaissées</div>
+            </div>
+            <div style={{ flex: 1, textAlign: 'center' }}>
+              <div style={{ ...S.money, fontSize: 19, fontWeight: 600, color: C.dim }}>
+                {entries.scan_count}
+              </div>
+              <div style={{ fontSize: 10.5, color: C.dim, marginTop: 2 }}>scans QR</div>
+            </div>
+          </div>
+          {scanDelta > 0 && (
+            <div style={{ fontSize: 11, color: C.faint, marginTop: 10, lineHeight: 1.5 }}>
+              {scanDelta} personne{scanDelta > 1 ? 's' : ''} {scanDelta > 1 ? 'sont entrées' : 'est entrée'} sans
+              activer le code d’entrée — invitation ou connaissance.
+            </div>
+          )}
+        </div>
+      )}
+
       <button
         onClick={() => setShowPaid((v) => !v)}
         style={{ ...S.btnGhost, minHeight: 42, fontSize: 12, marginBottom: 14 }}
@@ -5070,7 +6344,12 @@ function CaisseTab({ event, venue, showToast }) {
       {byCustomer.map(([cid, list]) => {
         const c = list[0].customers
         const tot = list.reduce((s, o) => s + Number(o.total || 0), 0)
-        const allSel = list.every((o) => selected.includes(o.id))
+        // Retour terrain 5.2 : une commande déjà réglée restait sélectionnable
+        // et « Marquer réglé » réapparaissait dessus — confusion pure, ce
+        // n'est l'action de personne. Seules les commandes non réglées entrent
+        // dans « tout sélectionner ».
+        const payable = list.filter((o) => o.status !== 'PAID')
+        const allSel = payable.length > 0 && payable.every((o) => selected.includes(o.id))
         return (
           <div key={cid} style={{ ...S.card, padding: 14, marginBottom: 12 }}>
             <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 10 }}>
@@ -5089,11 +6368,20 @@ function CaisseTab({ event, venue, showToast }) {
                 <button
                   onClick={() =>
                     setSelected((p) => {
-                      const ids = list.map((o) => o.id)
+                      const ids = payable.map((o) => o.id)
                       return allSel ? p.filter((x) => !ids.includes(x)) : [...new Set([...p, ...ids])]
                     })
                   }
-                  style={{ background: 'none', border: 'none', color: C.indigo, fontSize: 11.5, cursor: 'pointer', padding: '4px 0 0' }}
+                  disabled={payable.length === 0}
+                  style={{
+                    background: 'none',
+                    border: 'none',
+                    color: C.indigo,
+                    fontSize: 11.5,
+                    cursor: payable.length === 0 ? 'default' : 'pointer',
+                    padding: '4px 0 0',
+                    opacity: payable.length === 0 ? 0.4 : 1,
+                  }}
                 >
                   {allSel ? 'Tout décocher' : 'Tout sélectionner'}
                 </button>
@@ -5102,25 +6390,30 @@ function CaisseTab({ event, venue, showToast }) {
 
             <div style={{ display: 'grid', gap: 8 }}>
               {list.map((o) => {
-                const sel = selected.includes(o.id)
+                const paid = o.status === 'PAID'
+                const sel = !paid && selected.includes(o.id)
                 const st = ORDER_STATUS[o.status]
                 return (
                   <button
                     key={o.id}
-                    onClick={() =>
+                    onClick={() => {
+                      if (paid) return
                       setSelected((p) => (p.includes(o.id) ? p.filter((x) => x !== o.id) : [...p, o.id]))
-                    }
+                    }}
+                    disabled={paid}
+                    title={paid ? 'Déjà réglée' : undefined}
                     style={{
                       display: 'flex',
                       alignItems: 'center',
                       gap: 12,
                       padding: 11,
                       borderRadius: 12,
-                      cursor: 'pointer',
+                      cursor: paid ? 'default' : 'pointer',
                       textAlign: 'left',
                       border: `1.5px solid ${sel ? C.terracotta : C.line}`,
-                      background: sel ? 'rgba(185,106,76,.08)' : C.creamSoft,
+                      background: sel ? 'rgba(185,106,76,.08)' : paid ? 'transparent' : C.creamSoft,
                       color: C.text,
+                      opacity: paid ? 0.55 : 1,
                     }}
                   >
                     <div
@@ -5138,7 +6431,7 @@ function CaisseTab({ event, venue, showToast }) {
                         justifyContent: 'center',
                       }}
                     >
-                      {sel ? '✓' : ''}
+                      {paid ? '✓' : sel ? '✓' : ''}
                     </div>
                     <div style={{ flex: 1, minWidth: 0 }}>
                       <div style={{ fontFamily: FONT.label, fontWeight: 600, letterSpacing: 1.4 }}>
@@ -5196,6 +6489,49 @@ function CaisseTab({ event, venue, showToast }) {
             aucun paiement — indiquez simplement le moyen utilisé.
           </Banner>
         </div>
+
+        {/* Rapprochement : ce qui est sorti du bar n'est pas ce qui rentre en
+            caisse dès qu'un crédit a été consommé. Les deux chiffres côte à
+            côte évitent d'avoir à le recalculer en fin de soirée. */}
+        {selectedGift > 0 && (
+          <div style={{ ...S.card, padding: 14, marginBottom: 16 }}>
+            <div style={{ ...S.label, marginBottom: 10 }}>Rapprochement</div>
+            {[
+              ['Valeur carte des articles', eur(selectedGross), C.dim],
+              ['Déjà payé par des crédits', `− ${eur(selectedGift)}`, C.goldDark],
+              ['Reste à encaisser', eur(selectedTotal), C.terracotta],
+            ].map(([label, value, color], i, arr) => (
+              <div
+                key={label}
+                style={{
+                  display: 'flex',
+                  justifyContent: 'space-between',
+                  alignItems: 'baseline',
+                  padding: '6px 0',
+                  borderTop: i === arr.length - 1 ? `1px solid ${C.lineHi}` : 'none',
+                  marginTop: i === arr.length - 1 ? 4 : 0,
+                  paddingTop: i === arr.length - 1 ? 10 : 6,
+                }}
+              >
+                <span style={{ fontSize: 13, color: C.dim }}>{label}</span>
+                <span
+                  style={{
+                    ...S.money,
+                    fontWeight: i === arr.length - 1 ? 700 : 500,
+                    fontSize: i === arr.length - 1 ? 16 : 13.5,
+                    color,
+                  }}
+                >
+                  {value}
+                </span>
+              </div>
+            ))}
+            <div style={{ fontSize: 11, color: C.faint, marginTop: 8, lineHeight: 1.5 }}>
+              Les consos réglées en crédits sont prépayées : rien à encaisser dessus, mais elles
+              sont bien sorties du stock.
+            </div>
+          </div>
+        )}
         <div style={{ display: 'grid', gap: 8 }}>
           {[
             ['especes', 'Espèces'],
@@ -5228,7 +6564,9 @@ function AffluenceCard({ pulse, slots }) {
   const pct = capacity > 0 ? Math.min(100, Math.round((headcount / capacity) * 100)) : null
   const last15 = Number(live?.arrivals_15min ?? 0)
   const last60 = Number(live?.arrivals_60min ?? 0)
-  const active = Number(live?.active_30min ?? 0)
+  // v_event_presence expose still_here (scan OU commande sur 30 min) ; on
+  // retombe sur active_30min si la migration 0026 n'est pas encore appliquée.
+  const active = Number(live?.still_here ?? live?.active_30min ?? 0)
 
   const tone = pct == null ? C.indigo : pct >= 90 ? C.danger : pct >= 70 ? C.warn : C.ok
   const toneLabel =
@@ -5356,6 +6694,9 @@ function OrgaTab({ event, venue, showToast, onEventChange }) {
   const [pulse, setPulse] = useState(null)
   const [now, setNow] = useState(Date.now())
   const [ficheFor, setFicheFor] = useState(null)
+  // Retour terrain 6.3 : « mentionner explicitement estimation sous le
+  // chiffre, et rendre le mot cliquable pour afficher la méthode de calcul. »
+  const [methodOpen, setMethodOpen] = useState(false)
 
   useEffect(() => {
     const id = setInterval(() => setNow(Date.now()), 15000)
@@ -5396,7 +6737,7 @@ function OrgaTab({ event, venue, showToast, onEventChange }) {
         .select('*')
         .eq('event_id', event.id)
         .order('slot', { ascending: true }),
-      supabase.from('v_event_pulse').select('*').eq('event_id', event.id).maybeSingle(),
+      supabase.from('v_event_presence').select('*').eq('event_id', event.id).maybeSingle(),
     ])
     setLive(l.data || null)
     setBoard(b.data || [])
@@ -5551,10 +6892,13 @@ function OrgaTab({ event, venue, showToast, onEventChange }) {
     await shareOrDownload(blob, `noti-rapport-${event.id.slice(0, 8)}.pdf`, 'Rapport')
   }
 
-  const stat = (t, v, c) => (
+  const stat = (t, v, c, sub) => (
     <div key={t} style={{ ...S.card, flex: 1, minWidth: 92, padding: '13px 10px', textAlign: 'center' }}>
       <div style={{ ...S.money, fontSize: 21, fontWeight: 600, color: c }}>{v}</div>
       <div style={{ ...S.label, marginBottom: 0, marginTop: 4, fontSize: 9.5 }}>{t}</div>
+      {sub && (
+        <div style={{ fontSize: 9, color: C.faint, marginTop: 3, lineHeight: 1.3 }}>{sub}</div>
+      )}
     </div>
   )
 
@@ -5562,12 +6906,43 @@ function OrgaTab({ event, venue, showToast, onEventChange }) {
     <div>
       {/* Temps réel */}
       <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginBottom: 14 }}>
-        {stat('Scans QR', live?.present_count ?? 0, C.indigo)}
-        {stat('Présents', live?.headcount ?? 0, C.indigo)}
+        {/* « Présents » affichait le cumul des entrées et ne redescendait
+            jamais. Renommé « Total scanné » pour ne pas se confondre avec les
+            « Entrées » payées de l'onglet Caisse (0029) — deux notions
+            différentes qui portaient jadis le même mot. */}
+        {stat('Total scanné', live?.headcount ?? 0, C.dim, 'Cumul depuis l’ouverture')}
+        <button
+          onClick={() => setMethodOpen((v) => !v)}
+          style={{ all: 'unset', cursor: 'pointer', flex: 1, minWidth: 92 }}
+        >
+          {stat(
+            'Encore là (estimation)',
+            pulse?.still_here ?? pulse?.active_30min ?? 0,
+            C.indigo,
+            methodOpen ? 'Masquer le détail ▲' : 'Comment est-ce calculé ? ▾'
+          )}
+        </button>
         {stat('En prépa', live?.in_preparation ?? 0, C.navy)}
         {stat('À retirer', live?.awaiting_pickup ?? 0, C.terracotta)}
         {stat('Encaissé', eur(live?.revenue_paid ?? 0), C.ok)}
       </div>
+
+      {methodOpen && (
+        <div style={{ marginBottom: 14 }}>
+          <Banner tone="info">
+            <strong>Une estimation, pas un comptage exact</strong>
+            <div style={{ fontSize: 12.5, marginTop: 6, lineHeight: 1.6 }}>
+              Compte comme « encore là » toute personne ayant{' '}
+              <strong>commandé une boisson ou une bouteille dans la dernière heure</strong>, ou{' '}
+              <strong>utilisé l’outil dans les 30 dernières minutes</strong> sans forcément commander.
+              Une fenêtre plus large sur les commandes évite de sous-estimer — on ne connaît pas le
+              rythme de consommation de chacun ; une fenêtre plus courte sur le simple usage suffit,
+              car on ne rouvre plus l’outil une fois parti. Les deux durées sont réglables pour votre
+              établissement dans Réglages.
+            </div>
+          </Banner>
+        </div>
+      )}
 
       <AffluenceCard pulse={pulse} slots={slots} />
 
@@ -5755,6 +7130,7 @@ function OrgaTab({ event, venue, showToast, onEventChange }) {
         customerId={ficheFor}
         event={event}
         onClose={() => setFicheFor(null)}
+        onChanged={load}
         onMessage={(target) => {
           setFicheFor(null)
           setDmFor(target)
@@ -5841,17 +7217,22 @@ function OrgaTab({ event, venue, showToast, onEventChange }) {
                 {p.code}
               </div>
               <div style={{ fontSize: 11.5, color: C.faint, marginTop: 2 }}>
-                {p.kind === 'credits'
-                  ? `🎟️ ${Math.round((p.credits_per_person || 0) / CREDITS_PAR_CONSO)} conso${
-                      Math.round((p.credits_per_person || 0) / CREDITS_PAR_CONSO) > 1 ? 's' : ''
-                    }${p.food_tokens_per_person > 0 ? ' + 1 plat' : ''} /pers`
-                  : p.kind === 'percent'
-                    ? `-${p.value}%`
-                    : `-${eur(p.value)}`}
-                {p.kind !== 'credits' && p.min_total > 0 ? ` · dès ${eur(p.min_total)}` : ''}
+                {p.kind === 'gift'
+                  ? `🎁 ${(p.gift_items || [])
+                      .map((g) => giftLineLabel(g))
+                      .join(' + ') || 'aucun article'}`
+                  : p.kind === 'credits'
+                    ? `🎟️ ${Math.round((p.credits_per_person || 0) / CREDITS_PAR_CONSO)} conso${
+                        Math.round((p.credits_per_person || 0) / CREDITS_PAR_CONSO) > 1 ? 's' : ''
+                      }${p.food_tokens_per_person > 0 ? ' + 1 plat' : ''} /pers`
+                    : p.kind === 'percent'
+                      ? `-${p.value}%`
+                      : `-${eur(p.value)}`}
+                {!['credits', 'gift'].includes(p.kind) && p.min_total > 0 ? ` · dès ${eur(p.min_total)}` : ''}
                 {' · '}
                 {p.uses_count}
-                {p.max_uses ? `/${p.max_uses}` : ''} {p.kind === 'credits' ? 'personne' : 'utilisé'}
+                {p.max_uses ? `/${p.max_uses}` : ''}{' '}
+                {['credits', 'gift'].includes(p.kind) ? 'personne' : 'utilisé'}
                 {p.uses_count > 1 ? 's' : ''}
               </div>
             </div>
@@ -5872,6 +7253,7 @@ function OrgaTab({ event, venue, showToast, onEventChange }) {
       <PromoCodeSheet
         promo={editingPromo}
         event={event}
+        venue={venue}
         onClose={() => setEditingPromo(null)}
         onSaved={() => {
           setEditingPromo(null)
@@ -5944,8 +7326,41 @@ const BROADCAST_TEMPLATES = [
   'Forfaits : dernière ligne droite pour convertir votre jeton food en conso (crédits), fenêtre fermée à 22h — après quoi il reste un jeton food perdu s’il n’est pas utilisé.',
 ]
 
+/**
+ * Interrupteur « message urgent ». Le client le reçoit en rouge, avec un
+ * bandeau distinct : sans ça, une relance de retrait se noyait dans les
+ * annonces de la soirée.
+ */
+function UrgentToggle({ on, onChange }) {
+  return (
+    <button
+      onClick={() => onChange(!on)}
+      style={{
+        ...S.chip,
+        width: '100%',
+        minHeight: 46,
+        marginBottom: 14,
+        justifyContent: 'flex-start',
+        gap: 10,
+        display: 'flex',
+        alignItems: 'center',
+        whiteSpace: 'normal',
+        textAlign: 'left',
+        borderColor: on ? C.danger : C.lineHi,
+        background: on ? 'rgba(192,57,43,.08)' : 'transparent',
+        color: on ? C.danger : C.dim,
+        fontWeight: on ? 600 : 500,
+      }}
+    >
+      <span style={{ fontSize: 16 }}>{on ? '⚠️' : '○'}</span>
+      Message urgent — bandeau rouge côté client
+    </button>
+  )
+}
+
 function BroadcastSheet({ open, event, onClose, onSent, onChanged, showToast }) {
   const [body, setBody] = useState('')
+  const [urgent, setUrgent] = useState(false)
   const [busy, setBusy] = useState(false)
   const [sent, setSent] = useState([])
   const [loadingSent, setLoadingSent] = useState(false)
@@ -6015,6 +7430,8 @@ function BroadcastSheet({ open, event, onClose, onSent, onChanged, showToast }) 
         />
       </Field>
 
+      <UrgentToggle on={urgent} onChange={setUrgent} />
+
       <button
         disabled={!body.trim() || busy}
         onClick={async () => {
@@ -6024,10 +7441,12 @@ function BroadcastSheet({ open, event, onClose, onSent, onChanged, showToast }) 
             kind: 'broadcast',
             body: body.trim(),
             title: event.name,
+            urgent,
           })
           setBusy(false)
           if (!res) return showToast('Envoi impossible : message non enregistré.', 'error')
           setBody('')
+          setUrgent(false)
           loadSent()
           onSent(res)
         }}
@@ -6060,6 +7479,9 @@ function BroadcastSheet({ open, event, onClose, onSent, onChanged, showToast }) 
                       ? `À ${m.customers?.first_name || 'un client'} ${m.customers?.last_name || ''}`.trim()
                       : 'Diffusion générale'}
                   </span>
+                  {m.urgent && (
+                    <span style={{ fontSize: 10.5, fontWeight: 600, color: C.danger }}>⚠️ URGENT</span>
+                  )}
                   <span style={{ marginLeft: 'auto', fontSize: 10.5, color: C.faint }}>
                     {dateFR(m.created_at)} {timeFR(m.created_at)}
                   </span>
@@ -6086,10 +7508,11 @@ function BroadcastSheet({ open, event, onClose, onSent, onChanged, showToast }) 
 }
 
 /** Fiche client complète (staff) — tous les champs collectés, tous événements confondus. */
-function ClientFicheSheet({ customerId, event, onClose, onMessage, showToast }) {
+function ClientFicheSheet({ customerId, event, onClose, onMessage, onChanged, showToast }) {
   const [cust, setCust] = useState(null)
   const [promoCodesUsed, setPromoCodesUsed] = useState([])
   const [orders, setOrders] = useState([])
+  const [giftsUsed, setGiftsUsed] = useState([])
   const [notes, setNotes] = useState([])
   const [attendance, setAttendance] = useState(null)
   const [wallet, setWallet] = useState(null)
@@ -6107,6 +7530,7 @@ function ClientFicheSheet({ customerId, event, onClose, onMessage, showToast }) 
         { data: c, error },
         { data: ords },
         { data: reds },
+        { data: giftRows },
         { data: nts },
         { data: att },
         { data: wal },
@@ -6122,6 +7546,12 @@ function ClientFicheSheet({ customerId, event, onClose, onMessage, showToast }) 
           .from('promo_redemptions')
           .select('credits_granted, created_at, promo_codes ( code )')
           .eq('customer_id', customerId),
+        supabase
+          .from('gift_redemptions')
+          .select('product_name, unit_price, covered, paid, redeemed_at, promo_codes ( code, label ), orders ( pickup_code )')
+          .eq('customer_id', customerId)
+          .order('redeemed_at', { ascending: false })
+          .limit(50),
         supabase
           .from('order_notes')
           .select('*')
@@ -6149,6 +7579,7 @@ function ClientFicheSheet({ customerId, event, onClose, onMessage, showToast }) 
       if (error) showToast?.(frError(error), 'error')
       setCust(c || null)
       setOrders(ords || [])
+      setGiftsUsed(giftRows || [])
       setNotes(nts || [])
       setAttendance(att || null)
       setWallet(wal || null)
@@ -6170,6 +7601,16 @@ function ClientFicheSheet({ customerId, event, onClose, onMessage, showToast }) 
   // « Actif en live » : un scan ou une commande dans la dernière demi-heure.
   const lastSeen = attendance?.last_scan_at
   const liveNow = lastSeen && Date.now() - new Date(lastSeen).getTime() < 30 * 60 * 1000
+
+  async function toggleTag(tag) {
+    if (!cust) return
+    const tags = cust.tags || []
+    const next = tags.includes(tag) ? tags.filter((t) => t !== tag) : [...tags, tag]
+    const { error } = await supabase.from('customers').update({ tags: next }).eq('id', cust.id)
+    if (error) return showToast?.(frError(error), 'error')
+    setCust({ ...cust, tags: next })
+    onChanged?.()
+  }
 
   return (
     <Sheet open={!!customerId} onClose={onClose} title="Fiche client">
@@ -6284,6 +7725,47 @@ function ClientFicheSheet({ customerId, event, onClose, onMessage, showToast }) 
             </div>
           </div>
 
+          <div style={{ display: 'flex', gap: 8 }}>
+            <div style={{ ...S.card, flex: 1, padding: 12, textAlign: 'center' }}>
+              <div style={{ ...S.money, fontSize: 19, fontWeight: 600, color: (cust.unpaid_count || 0) > 0 ? C.danger : C.text }}>
+                {cust.unpaid_count || 0}
+              </div>
+              <div style={{ ...S.label, marginBottom: 0, marginTop: 2, fontSize: 9.5 }}>Impayés</div>
+            </div>
+            <div style={{ ...S.card, flex: 1, padding: 12, textAlign: 'center' }}>
+              <div style={{ ...S.money, fontSize: 13.5, fontWeight: 600 }}>
+                {cust.first_seen_at ? dateFR(cust.first_seen_at) : '—'}
+              </div>
+              <div style={{ ...S.label, marginBottom: 0, marginTop: 2, fontSize: 9.5 }}>Première venue</div>
+            </div>
+          </div>
+
+          {/* Segmentation — modifiable directement depuis la fiche */}
+          <div>
+            <div style={{ ...S.label, marginBottom: 6 }}>Segmentation</div>
+            <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+              {ALL_TAGS.map((t) => {
+                const on = (cust.tags || []).includes(t)
+                return (
+                  <button
+                    key={t}
+                    onClick={() => toggleTag(t)}
+                    style={{
+                      ...S.chip,
+                      minHeight: 40,
+                      borderColor: on ? C.terracotta : C.lineHi,
+                      color: on ? C.terracotta : C.dim,
+                      background: on ? 'rgba(185,106,76,.08)' : 'transparent',
+                    }}
+                  >
+                    {on ? '✓ ' : ''}
+                    {TAG_LABEL[t]}
+                  </button>
+                )
+              })}
+            </div>
+          </div>
+
           {promoCodesUsed.length > 0 && (
             <div>
               <div style={{ ...S.label, marginBottom: 6 }}>Codes promo utilisés</div>
@@ -6301,6 +7783,46 @@ function ClientFicheSheet({ customerId, event, onClose, onMessage, showToast }) 
             <div>
               <div style={{ ...S.label, marginBottom: 6 }}>Note</div>
               <div style={{ fontSize: 13.5, color: C.dim }}>{cust.staff_note}</div>
+            </div>
+          )}
+
+          {/* Crédits consommés — l'article exact, l'heure exacte, le code */}
+          {giftsUsed.length > 0 && (
+            <div>
+              <div style={{ ...S.label, marginBottom: 6 }}>
+                💳 Crédits utilisés ({giftsUsed.length}) ·{' '}
+                {eur(giftsUsed.reduce((s, g) => s + Number(g.covered || 0), 0))} offerts
+              </div>
+              <div style={{ display: 'grid', gap: 8 }}>
+                {giftsUsed.map((g, i) => (
+                  <div
+                    key={i}
+                    style={{
+                      padding: 11,
+                      borderRadius: 12,
+                      background: `${C.gold}12`,
+                      border: `1px solid ${C.gold}55`,
+                    }}
+                  >
+                    <div style={{ display: 'flex', alignItems: 'baseline', gap: 8 }}>
+                      <strong style={{ fontSize: 13.5 }}>{g.product_name}</strong>
+                      <span style={{ marginLeft: 'auto', ...S.money, fontWeight: 600, color: C.goldDark }}>
+                        {eur(g.covered)}
+                      </span>
+                    </div>
+                    <div style={{ fontSize: 11.5, color: C.dim, marginTop: 3 }}>
+                      {dateFR(g.redeemed_at)} à <strong>{timeFR(g.redeemed_at)}</strong>
+                      {g.orders?.pickup_code ? ` · commande ${g.orders.pickup_code}` : ''}
+                      {Number(g.paid) > 0 ? ` · ${eur(g.paid)} réglés en plus` : ''}
+                    </div>
+                    {g.promo_codes?.code && (
+                      <div style={{ fontSize: 11, color: C.faint, marginTop: 2 }}>
+                        via {g.promo_codes.label || g.promo_codes.code} ({g.promo_codes.code})
+                      </div>
+                    )}
+                  </div>
+                ))}
+              </div>
             </div>
           )}
 
@@ -6404,6 +7926,7 @@ function ClientFicheSheet({ customerId, event, onClose, onMessage, showToast }) 
 
 function DirectMessageSheet({ target, event, onClose, onSent, showToast }) {
   const [body, setBody] = useState('')
+  const [urgent, setUrgent] = useState(false)
   const [busy, setBusy] = useState(false)
 
   useEffect(() => {
@@ -6424,6 +7947,7 @@ function DirectMessageSheet({ target, event, onClose, onSent, showToast }) {
           onChange={(e) => setBody(e.target.value)}
         />
       </Field>
+      <UrgentToggle on={urgent} onChange={setUrgent} />
       <button
         disabled={!body.trim() || busy}
         onClick={async () => {
@@ -6434,6 +7958,7 @@ function DirectMessageSheet({ target, event, onClose, onSent, showToast }) {
             customerId: target.customer_id,
             body: body.trim(),
             title: event.name,
+            urgent,
           })
           setBusy(false)
           if (!res) return showToast('Envoi impossible : message non enregistré.', 'error')
@@ -6455,9 +7980,69 @@ const EMPTY_PROMO = {
   value: 10,
   min_total: 0,
   max_uses: null,
+  uses_per_person: 1,
   active: true,
   credits_per_person: 6,
   food_tokens_per_person: 1,
+  gift_items: [],
+  is_entry_code: false,
+  entry_price: 25,
+}
+
+/** Catégories offrables par un code cadeau, dans les mots de la carte. */
+// Trois cases, plus quatre : le type de boisson ne se choisit plus à la
+// création du code. On donne des crédits, et le barème s'applique au moment de
+// la commande — 1 crédit = 1 soft, 2 crédits = 1 conso alcoolisée.
+const GIFT_CATEGORIES = [
+  { k: 'drink', label: 'Boisson', emoji: '🥂' },
+  { k: 'food', label: 'Food', emoji: '🍽️' },
+  { k: 'bottle', label: 'Bouteille', emoji: '🍾' },
+]
+
+/** Ce que coûte une unité, en crédits — miroir de gift_credit_cost() côté base. */
+const CREDIT_COST = { alcohol: 2, soft: 1, food: 1, bottle: 1 }
+
+// Le staff lit ces libellés en français ; le client, dans sa langue (le
+// dictionnaire porte les mêmes catégories sous catAlcohol / catSoft / …).
+const GIFT_CAT_KEY = { drink: 'catDrink', food: 'catFood', bottle: 'catBottle' }
+const giftCatLabel = (k, lang) =>
+  (lang && lang !== 'fr' ? dict(lang)[GIFT_CAT_KEY[k]] : null) ||
+  GIFT_CATEGORIES.find((c) => c.k === k)?.label ||
+  k
+const giftCatEmoji = (k) => GIFT_CATEGORIES.find((c) => c.k === k)?.emoji || '🎁'
+
+/**
+ * Résumé d'une ligne de cadeau côté STAFF. On y parle en crédits, et le
+ * plafond en euros y figure : c'est une information de marge, réservée au
+ * staff — le client, lui, ne voit jamais d'euros (cf. bloc 2 du retour).
+ */
+function giftLineLabel(item, productName) {
+  const q = Number(item.quantity) || 1
+  if (item.mode === 'product') {
+    return `${q} × ${productName || 'article de la carte'}`
+  }
+  const cat = giftCatLabel(item.category)
+  const plafond = item.max_value ? ` · plafond ${eur(item.max_value)}` : ''
+  return `${q} crédit${q > 1 ? 's' : ''} ${cat.toLowerCase()}${plafond}`
+}
+
+/**
+ * Phrase de confirmation lue par le staff AVANT d'enregistrer un code.
+ * Retour terrain : « ces métriques doivent être affichées clairement au moment
+ * de la création, idéalement avec un message récapitulatif de confirmation ».
+ * Sans ça : incompréhensions, tickets, et sorties offertes non prévues.
+ */
+function giftRecap(f, nameOf) {
+  const items = Array.isArray(f.gift_items) ? f.gift_items : []
+  if (!items.length) return null
+
+  const qui = f.max_uses ? `${f.max_uses} personne${f.max_uses > 1 ? 's' : ''} maximum` : 'un nombre illimité de personnes'
+  const quoi = items.map((it) => giftLineLabel(it, nameOf?.(it.product_id))).join(', ')
+  const combien = Number(f.uses_per_person) > 1
+    ? `${f.uses_per_person} fois chacune`
+    : 'une fois chacune'
+
+  return `Ce code permet à ${qui} d’obtenir ${quoi}, ${combien}.`
 }
 
 // Barème inchangé : 1 alcool éligible = 2 crédits, 1 soft = 1 crédit. Le staff
@@ -6566,11 +8151,291 @@ function ForfaitFields({ f, set }) {
           1 alcool de la sélection forfait, ou 2 softs. Au-delà, elle règle au prix de la carte.
         </Banner>
       </div>
+
+      {/* Retour terrain 6.4 : « détenir ce code = avoir payé son entrée » — le
+          code d'entrée du jour alimente automatiquement Encaissé dès son
+          activation, sans passer par une commande. Un seul par soirée. */}
+      <button
+        onClick={() => set('is_entry_code', !f.is_entry_code)}
+        style={{
+          display: 'flex',
+          justifyContent: 'space-between',
+          alignItems: 'center',
+          width: '100%',
+          minHeight: 56,
+          padding: '0 14px',
+          borderRadius: 14,
+          cursor: 'pointer',
+          border: `1.5px solid ${f.is_entry_code ? C.gold : C.lineHi}`,
+          background: f.is_entry_code ? `${C.gold}18` : C.paper,
+          color: C.text,
+          marginBottom: f.is_entry_code ? 10 : 14,
+          textAlign: 'left',
+        }}
+      >
+        <span>
+          <span style={{ fontSize: 14, fontWeight: 500 }}>🎫 C’est le code d’entrée de la soirée</span>
+          <span style={{ display: 'block', fontSize: 11.5, color: C.faint, marginTop: 2 }}>
+            Son activation compte comme une entrée payée dans Encaissé
+          </span>
+        </span>
+        <span style={{ fontFamily: FONT.label, fontWeight: 600, color: f.is_entry_code ? C.goldDark : C.faint }}>
+          {f.is_entry_code ? 'OUI' : 'NON'}
+        </span>
+      </button>
+
+      {f.is_entry_code && (
+        <Field label="Prix de l’entrée" hint="Comptabilisé dès l’activation du code, une fois par personne">
+          <input
+            style={S.input}
+            type="number"
+            min="0"
+            step="0.5"
+            value={f.entry_price ?? ''}
+            onChange={(e) => set('entry_price', e.target.value === '' ? '' : Number(e.target.value))}
+            placeholder="25"
+          />
+        </Field>
+      )}
     </>
   )
 }
 
-function PromoCodeSheet({ promo, event, onClose, onSaved, showToast }) {
+/**
+ * Éditeur des lignes d'un code cadeau.
+ *
+ * Chaque ligne dit ce qui est offert : soit une catégorie de la carte avec un
+ * plafond facultatif (« 1 boisson alcoolisée au choix jusqu'à 15 € »), soit un
+ * article précis (« 1 Spritz »). Un code peut en cumuler plusieurs.
+ */
+function GiftFields({ f, set, venueId, showToast }) {
+  const [products, setProducts] = useState([])
+  const items = Array.isArray(f.gift_items) ? f.gift_items : []
+
+  useEffect(() => {
+    if (!venueId) return
+    let dead = false
+    supabase
+      .from('products')
+      .select('id, name, price, universe, subcategory')
+      .eq('venue_id', venueId)
+      .eq('is_listed', true)
+      .order('universe')
+      .order('subcategory')
+      .order('name')
+      .then(({ data }) => {
+        if (!dead) setProducts(data || [])
+      })
+    return () => {
+      dead = true
+    }
+  }, [venueId])
+
+  const nameOf = (id) => products.find((p) => p.id === id)?.name
+  const recap = giftRecap(f, nameOf)
+  const update = (i, patch) => set('gift_items', items.map((it, k) => (k === i ? { ...it, ...patch } : it)))
+  const remove = (i) => set('gift_items', items.filter((_, k) => k !== i))
+  const add = (mode) =>
+    set('gift_items', [
+      ...items,
+      mode === 'product'
+        ? { mode: 'product', product_id: products[0]?.id || '', quantity: 1 }
+        : { mode: 'category', category: 'drink', quantity: 2, max_value: 15 },
+    ])
+
+  return (
+    <>
+      <div style={{ marginBottom: 12 }}>
+        <Banner tone="info">
+          Chaque personne qui saisit ce code reçoit des <strong>crédits</strong>. Le barème
+          s’applique tout seul à la commande : <strong>1 crédit = 1 soft</strong>,{' '}
+          <strong>2 crédits = 1 conso alcoolisée</strong>. L’équipe voit ensuite dans la fiche du
+          client <strong>l’heure exacte et l’article précis</strong> qu’il a pris.
+        </Banner>
+      </div>
+
+      <div style={{ ...S.label, marginBottom: 8 }}>Crédits offerts à chaque personne</div>
+
+      {items.length === 0 && (
+        <div style={{ fontSize: 12.5, color: C.faint, marginBottom: 10 }}>
+          Aucun crédit pour l’instant — ajoutez-en ci-dessous.
+        </div>
+      )}
+
+      <div style={{ display: 'grid', gap: 10, marginBottom: 12 }}>
+        {items.map((it, i) => (
+          <div
+            key={i}
+            style={{
+              padding: 12,
+              borderRadius: 14,
+              background: C.paper,
+              border: `1.5px solid ${C.terracotta}44`,
+            }}
+          >
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 10 }}>
+              <span style={{ fontSize: 13, fontWeight: 600, flex: 1 }}>
+                🎁 {giftLineLabel(it, nameOf(it.product_id))}
+              </span>
+              <button
+                onClick={() => remove(i)}
+                title="Retirer cette ligne"
+                style={{ background: 'none', border: 'none', cursor: 'pointer', color: C.danger, fontSize: 14, padding: 0 }}
+              >
+                ✕
+              </button>
+            </div>
+
+            {it.mode === 'category' ? (
+              <>
+                <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginBottom: 10 }}>
+                  {GIFT_CATEGORIES.map((c) => (
+                    <button
+                      key={c.k}
+                      onClick={() => update(i, { category: c.k })}
+                      style={{
+                        ...S.chip,
+                        flex: '1 0 46%',
+                        minHeight: 40,
+                        fontSize: 11.5,
+                        borderColor: it.category === c.k ? C.terracotta : C.lineHi,
+                        color: it.category === c.k ? C.terracotta : C.dim,
+                      }}
+                    >
+                      {c.emoji} {c.label}
+                    </button>
+                  ))}
+                </div>
+                <div style={{ display: 'flex', gap: 10 }}>
+                  <div style={{ flex: 1 }}>
+                    <Field
+                      label="Crédits"
+                      hint={
+                        it.category === 'drink'
+                          ? `= ${Math.floor((it.quantity ?? 1) / 2)} alcool ou ${it.quantity ?? 1} soft`
+                          : `= ${it.quantity ?? 1} article`
+                      }
+                    >
+                      <input
+                        style={S.input}
+                        type="number"
+                        min="1"
+                        value={it.quantity ?? 1}
+                        onChange={(e) => update(i, { quantity: Math.max(1, Number(e.target.value) || 1) })}
+                      />
+                    </Field>
+                  </div>
+                  <div style={{ flex: 1 }}>
+                    <Field label="Plafond (€)" hint="Interne — jamais montré au client">
+                      <input
+                        style={S.input}
+                        type="number"
+                        min="0"
+                        step="0.5"
+                        value={it.max_value ?? ''}
+                        onChange={(e) =>
+                          update(i, { max_value: e.target.value === '' ? null : Number(e.target.value) })
+                        }
+                        placeholder="ex. 15"
+                      />
+                    </Field>
+                  </div>
+                </div>
+                <div style={{ fontSize: 11, color: C.faint, lineHeight: 1.5 }}>
+                  Protection de marge : au-delà du plafond, le client règle la différence au bar.
+                  Il ne voit pas ce montant, il ne voit que ses crédits.
+                </div>
+              </>
+            ) : (
+              <>
+                <Field label="Article de la carte">
+                  <select
+                    style={S.input}
+                    value={it.product_id || ''}
+                    onChange={(e) => update(i, { product_id: e.target.value })}
+                  >
+                    <option value="">— choisir —</option>
+                    {products.map((p) => (
+                      <option key={p.id} value={p.id}>
+                        {p.name} · {eur(p.price)}
+                      </option>
+                    ))}
+                  </select>
+                </Field>
+                <Field label="Quantité">
+                  <input
+                    style={S.input}
+                    type="number"
+                    min="1"
+                    value={it.quantity ?? 1}
+                    onChange={(e) => update(i, { quantity: Math.max(1, Number(e.target.value) || 1) })}
+                  />
+                </Field>
+              </>
+            )}
+          </div>
+        ))}
+      </div>
+
+      <div style={{ display: 'flex', gap: 8, marginBottom: 14 }}>
+        <button onClick={() => add('category')} style={{ ...S.btnGhost, minHeight: 44, fontSize: 12.5 }}>
+          + Catégorie au choix
+        </button>
+        <button
+          onClick={() => {
+            if (!products.length) return showToast('Aucun article sur la carte de ce lieu.', 'error')
+            add('product')
+          }}
+          style={{ ...S.btnGhost, minHeight: 44, fontSize: 12.5 }}
+        >
+          + Article précis
+        </button>
+      </div>
+
+      {/* Deux limites distinctes, et il faut les deux (retour terrain, 2.4) :
+          combien de personnes peuvent activer le code, et combien de fois
+          chacune. Sans la première, la 16ᵉ personne d'un code prévu pour 15
+          passerait quand même. */}
+      <div style={{ ...S.label, marginTop: 6, marginBottom: 8 }}>Limites du code</div>
+      <div style={{ display: 'flex', gap: 10 }}>
+        <div style={{ flex: 1 }}>
+          <Field label="Diffusion" hint="Personnes pouvant l’activer. Vide = illimité.">
+            <input
+              style={S.input}
+              type="number"
+              min="1"
+              value={f.max_uses ?? ''}
+              onChange={(e) => set('max_uses', e.target.value === '' ? null : Number(e.target.value))}
+              placeholder="ex. 15"
+            />
+          </Field>
+        </div>
+        <div style={{ flex: 1 }}>
+          <Field label="Utilisation" hint="Activations par personne.">
+            <input
+              style={S.input}
+              type="number"
+              min="1"
+              value={f.uses_per_person ?? 1}
+              onChange={(e) => set('uses_per_person', Math.max(1, Number(e.target.value) || 1))}
+            />
+          </Field>
+        </div>
+      </div>
+
+      {recap && (
+        <div style={{ marginBottom: 14 }}>
+          <Banner tone="warn">
+            <div style={{ ...S.label, marginBottom: 4, color: 'inherit' }}>Avant d’enregistrer</div>
+            <div style={{ fontSize: 13.5, lineHeight: 1.55 }}>{recap}</div>
+          </Banner>
+        </div>
+      )}
+    </>
+  )
+}
+
+function PromoCodeSheet({ promo, event, venue, onClose, onSaved, showToast }) {
   const [f, setF] = useState(EMPTY_PROMO)
   const [busy, setBusy] = useState(false)
 
@@ -6583,6 +8448,14 @@ function PromoCodeSheet({ promo, event, onClose, onSaved, showToast }) {
 
   async function save() {
     if (!f.code.trim()) return showToast('Le code est obligatoire.', 'error')
+
+    const gifts = Array.isArray(f.gift_items) ? f.gift_items : []
+    if (f.kind === 'gift') {
+      if (gifts.length === 0) return showToast('Ajoutez au moins un crédit.', 'error')
+      if (gifts.some((g) => g.mode === 'product' && !g.product_id))
+        return showToast('Choisissez l’article pour chaque crédit « article précis ».', 'error')
+    }
+
     setBusy(true)
     const payload = {
       event_id: event.id,
@@ -6592,15 +8465,25 @@ function PromoCodeSheet({ promo, event, onClose, onSaved, showToast }) {
       value: Number(f.value) || 0,
       min_total: Number(f.min_total) || 0,
       max_uses: f.max_uses === '' || f.max_uses == null ? null : Number(f.max_uses),
+      uses_per_person: Math.max(1, Number(f.uses_per_person) || 1),
       active: !!f.active,
       credits_per_person: Number(f.credits_per_person) || 0,
       food_tokens_per_person: Number(f.food_tokens_per_person) || 0,
+      gift_items: f.kind === 'gift' ? gifts : [],
+      is_entry_code: f.kind === 'credits' && !!f.is_entry_code,
+      entry_price: f.kind === 'credits' && f.is_entry_code ? Number(f.entry_price) || 0 : null,
     }
     const { error } = f.id
       ? await supabase.from('promo_codes').update(payload).eq('id', f.id)
       : await supabase.from('promo_codes').insert(payload)
     setBusy(false)
-    if (error) return showToast(frError(error), 'error')
+    if (error) {
+      // Un seul code d'entrée par soirée (contrainte base) : message clair
+      // plutôt que le nom technique de l'index.
+      if (String(error.message || '').includes('promo_codes_one_entry_per_event'))
+        return showToast('Il y a déjà un code d’entrée actif sur cette soirée — désactivez-le d’abord.', 'error')
+      return showToast(frError(error), 'error')
+    }
     onSaved()
   }
 
@@ -6623,12 +8506,12 @@ function PromoCodeSheet({ promo, event, onClose, onSaved, showToast }) {
         />
       </Field>
 
-      <Field label="Libellé" hint="Usage interne, non affiché au client">
+      <Field label="Nom du code" hint="Pour vous retrouver dans vos codes — non affiché au client">
         <input
           style={S.input}
           value={f.label || ''}
           onChange={(e) => set('label', e.target.value)}
-          placeholder="Réduction soirée lancement"
+          placeholder="Soirée Noti 1"
         />
       </Field>
 
@@ -6670,10 +8553,24 @@ function PromoCodeSheet({ promo, event, onClose, onSaved, showToast }) {
           >
             🎟️ Forfait groupe
           </button>
+          <button
+            onClick={() => set('kind', 'gift')}
+            style={{
+              ...S.chip,
+              flex: '1 0 100%',
+              minHeight: 44,
+              borderColor: f.kind === 'gift' ? C.terracotta : C.lineHi,
+              color: f.kind === 'gift' ? C.terracotta : C.dim,
+            }}
+          >
+            🎁 Crédit offert
+          </button>
         </div>
       </Field>
 
-      {f.kind === 'credits' ? (
+      {f.kind === 'gift' ? (
+        <GiftFields f={f} set={set} venueId={venue?.id} showToast={showToast} />
+      ) : f.kind === 'credits' ? (
         <ForfaitFields f={f} set={set} />
       ) : (
         <>
@@ -7011,13 +8908,15 @@ function ClientMenuPreview({ products, open, onClose }) {
 
   useEffect(() => {
     if (!open || !subcat) return
-    chipRefs.current[subcat]?.scrollIntoView({ behavior: 'smooth', block: 'nearest', inline: 'center' })
+    glideChipIntoView(chipRefs.current[subcat])
   }, [subcat, open])
 
+  const chipsBarRef = useRef(null)
+
   function goToSubcat(c) {
-    scrollLock.current = Date.now() + 900
+    scrollLock.current = Date.now() + 1100
     setSubcat(c)
-    sectionRefs.current[c]?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+    glideIntoView(sectionRefs.current[c], (chipsBarRef.current?.offsetHeight || 52) + 10)
   }
 
   return (
@@ -7068,7 +8967,7 @@ function ClientMenuPreview({ products, open, onClose }) {
             ))}
           </div>
 
-          <ScrollHint sticky top={0} style={{ marginBottom: 14, background: C.creamSoft }}>
+          <ScrollHint sticky top={0} barRef={chipsBarRef} style={{ marginBottom: 14, background: C.creamSoft }}>
             {subcats.map((c) => (
               <button
                 key={c}
@@ -7350,9 +9249,13 @@ function ClientsTab({ event, showToast }) {
   const [loading, setLoading] = useState(true)
   const [q, setQ] = useState('')
   const [filter, setFilter] = useState(null)
-  const [detail, setDetail] = useState(null)
   const [ficheFor, setFicheFor] = useState(null)
   const [dmFor, setDmFor] = useState(null)
+
+  // Codes de retrait de la soirée, par client : au bar on a le ticket sous les
+  // yeux, pas le nom. Retour terrain : « pouvoir retrouver un client à partir
+  // de son seul numéro de ticket de retrait ».
+  const [codesByCustomer, setCodesByCustomer] = useState({})
 
   const load = useCallback(async () => {
     // Clients présents sur cette soirée (la RLS limite déjà à nos événements).
@@ -7365,6 +9268,18 @@ function ClientsTab({ event, showToast }) {
       .filter((c) => c?.id)
     list.sort((a, b) => Number(b.total_spent || 0) - Number(a.total_spent || 0))
     setRows(list)
+
+    const { data: ords } = await supabase
+      .from('orders')
+      .select('customer_id, pickup_code')
+      .eq('event_id', event.id)
+    const map = {}
+    for (const o of ords || []) {
+      if (!o.customer_id || !o.pickup_code) continue
+      ;(map[o.customer_id] ||= []).push(String(o.pickup_code).toUpperCase())
+    }
+    setCodesByCustomer(map)
+
     setLoading(false)
   }, [event.id])
 
@@ -7372,23 +9287,17 @@ function ClientsTab({ event, showToast }) {
     load()
   }, [load])
 
-  async function toggleTag(customer, tag) {
-    const tags = customer.tags || []
-    const next = tags.includes(tag) ? tags.filter((t) => t !== tag) : [...tags, tag]
-    const { error } = await supabase.from('customers').update({ tags: next }).eq('id', customer.id)
-    if (error) return showToast(frError(error), 'error')
-    setDetail((d) => (d ? { ...d, tags: next } : d))
-    load()
-  }
-
   if (loading) return <Spinner />
 
-  const filtered = rows.filter(
-    (r) =>
-      `${r.first_name || ''} ${r.last_name || ''} ${r.phone || ''}`
-        .toLowerCase()
-        .includes(q.toLowerCase()) && (!filter || (r.tags || []).includes(filter))
-  )
+  // Nom, prénom, téléphone — et code de retrait.
+  const needle = q.trim().toLowerCase()
+  const filtered = rows.filter((r) => {
+    if (filter && !(r.tags || []).includes(filter)) return false
+    if (!needle) return true
+    const identity = `${r.first_name || ''} ${r.last_name || ''} ${r.phone || ''}`.toLowerCase()
+    if (identity.includes(needle)) return true
+    return (codesByCustomer[r.id] || []).some((c) => c.toLowerCase().includes(needle))
+  })
 
   return (
     <div>
@@ -7409,7 +9318,7 @@ function ClientsTab({ event, showToast }) {
         style={{ ...S.input, marginBottom: 10 }}
         value={q}
         onChange={(e) => setQ(e.target.value)}
-        placeholder="Rechercher…"
+        placeholder="Nom, prénom, téléphone ou code de retrait…"
       />
 
       <div style={{ display: 'flex', gap: 6, marginBottom: 14, overflowX: 'auto' }}>
@@ -7440,7 +9349,7 @@ function ClientsTab({ event, showToast }) {
         {filtered.map((r) => (
           <button
             key={r.id}
-            onClick={() => setDetail(r)}
+            onClick={() => setFicheFor(r.id)}
             style={{ ...S.card, padding: 12, display: 'flex', gap: 12, alignItems: 'center', cursor: 'pointer', textAlign: 'left', color: C.text }}
           >
             <div
@@ -7496,81 +9405,11 @@ function ClientsTab({ event, showToast }) {
         ))}
       </div>
 
-      <Sheet
-        open={!!detail}
-        onClose={() => setDetail(null)}
-        title={detail ? `${detail.first_name || ''} ${detail.last_name || ''}` : ''}
-      >
-        {detail && (
-          <>
-            <div style={{ ...S.card, padding: 14, marginBottom: 14 }}>
-              {[
-                ['Soirées', detail.events_count || 1],
-                ['Commandes réglées', detail.orders_count || 0],
-                ['Total dépensé', eur(detail.total_spent)],
-                ['Impayés', detail.unpaid_count || 0],
-                ['Première venue', detail.first_seen_at ? dateFR(detail.first_seen_at) : '—'],
-              ].map(([k, v]) => (
-                <div key={k} style={{ display: 'flex', justifyContent: 'space-between', padding: '4px 0', fontSize: 13.5 }}>
-                  <span style={{ color: C.dim }}>{k}</span>
-                  <span style={{ ...S.money, fontWeight: 500 }}>{v}</span>
-                </div>
-              ))}
-            </div>
-
-            <div style={S.label}>Segmentation</div>
-            <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginBottom: 16 }}>
-              {ALL_TAGS.map((t) => {
-                const on = (detail.tags || []).includes(t)
-                return (
-                  <button
-                    key={t}
-                    onClick={() => toggleTag(detail, t)}
-                    style={{
-                      ...S.chip,
-                      minHeight: 42,
-                      borderColor: on ? C.terracotta : C.lineHi,
-                      color: on ? C.terracotta : C.dim,
-                      background: on ? 'rgba(185,106,76,.08)' : 'transparent',
-                    }}
-                  >
-                    {on ? '✓ ' : ''}
-                    {TAG_LABEL[t]}
-                  </button>
-                )
-              })}
-            </div>
-
-            <div style={{ display: 'grid', gap: 8 }}>
-              <button
-                onClick={() => {
-                  const d = detail
-                  setDetail(null)
-                  setDmFor({ customer_id: d.id, first_name: d.first_name, last_name: d.last_name })
-                }}
-                style={S.btn}
-              >
-                ✉️ Envoyer un message à {detail.first_name || 'ce client'}
-              </button>
-              <button
-                onClick={() => {
-                  const d = detail
-                  setDetail(null)
-                  setFicheFor(d.id)
-                }}
-                style={S.btnGhost}
-              >
-                Voir la fiche complète
-              </button>
-            </div>
-          </>
-        )}
-      </Sheet>
-
       <ClientFicheSheet
         customerId={ficheFor}
         event={event}
         onClose={() => setFicheFor(null)}
+        onChanged={load}
         onMessage={(target) => {
           setFicheFor(null)
           setDmFor(target)
@@ -8010,6 +9849,8 @@ function ReglagesTab({ venue, event, session, role, onReload, showToast }) {
           default_prep_min: Number(e.default_prep_min) || 1,
           closes_at: e.closes_at || null,
           capacity: e.capacity == null || e.capacity === '' ? null : Number(e.capacity),
+          presence_order_window_min: Math.max(1, Number(e.presence_order_window_min) || 60),
+          presence_scan_window_min: Math.max(1, Number(e.presence_scan_window_min) || 30),
           accept_orders: !!e.accept_orders,
           service_message: e.service_message || null,
           welcome_message: e.welcome_message || null,
@@ -8104,6 +9945,42 @@ function ReglagesTab({ venue, event, session, role, onReload, showToast }) {
             placeholder="ex. 250"
           />
         </Field>
+        {/* Retour terrain 6.2 : « la fenêtre doit rester ajustable selon
+            l'établissement — fort turnover, on descend à 15-20 min. » */}
+        <div style={{ display: 'flex', gap: 10 }}>
+          <div style={{ flex: 1 }}>
+            <Field
+              label={`« Encore là » après commande : ${e.presence_order_window_min ?? 60} min`}
+              hint="Boisson ou bouteille commandée"
+            >
+              <input
+                type="range"
+                min={15}
+                max={120}
+                step={5}
+                value={e.presence_order_window_min ?? 60}
+                onChange={(ev) => setE({ ...e, presence_order_window_min: Number(ev.target.value) })}
+                style={{ width: '100%', accentColor: C.indigo }}
+              />
+            </Field>
+          </div>
+          <div style={{ flex: 1 }}>
+            <Field
+              label={`« Encore là » sans commande : ${e.presence_scan_window_min ?? 30} min`}
+              hint="Simple usage de l’outil"
+            >
+              <input
+                type="range"
+                min={10}
+                max={60}
+                step={5}
+                value={e.presence_scan_window_min ?? 30}
+                onChange={(ev) => setE({ ...e, presence_scan_window_min: Number(ev.target.value) })}
+                style={{ width: '100%', accentColor: C.indigo }}
+              />
+            </Field>
+          </div>
+        </div>
         <Field label="Message d'accueil">
           <input
             style={S.input}
@@ -8120,7 +9997,10 @@ function ReglagesTab({ venue, event, session, role, onReload, showToast }) {
             placeholder="Happy hour jusqu'à 22 h"
           />
         </Field>
-        <Field label="Langues">
+        <Field
+          label="Langues"
+          hint="L'app est entièrement traduite. Les noms de vos produits suivent les traductions saisies dans la carte."
+        >
           <div style={{ display: 'flex', gap: 8 }}>
             {['fr', 'en', 'es'].map((l) => {
               const on = (e.languages || ['fr']).includes(l)

@@ -90,7 +90,14 @@ export async function notify(payload) {
   }
 }
 
-async function notifyFallback({ eventId, kind = 'broadcast', body, customerId = null, orderId = null }) {
+async function notifyFallback({
+  eventId,
+  kind = 'broadcast',
+  body,
+  customerId = null,
+  orderId = null,
+  urgent = false,
+}) {
   try {
     const { error } = await supabase.from('messages').insert({
       event_id: eventId,
@@ -98,6 +105,7 @@ async function notifyFallback({ eventId, kind = 'broadcast', body, customerId = 
       body,
       customer_id: customerId,
       order_id: orderId,
+      urgent,
     })
     if (error) throw error
 

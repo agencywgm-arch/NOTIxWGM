@@ -100,6 +100,13 @@ feuille de route *v2.0 — août 2026* (cas pilote **Noti Club · Noti Calling**
   (VIP / habitué / gros panier / incident) — tags automatiques inclus. Le suivi cross-soirée
   repose désormais sur le **téléphone** (ancre d'identité) : il tient même si le client change
   d'appareil ou vide son stockage local
+- **Codes « article offert »** : un code nommé (« Soirée Noti 1 »), limité à N personnes, qui
+  offre **un article de votre carte** — soit une catégorie au choix avec plafond (« 1 boisson
+  alcoolisée jusqu'à 15 € »), soit un article précis (« 1 Spritz »). L'article est déduit
+  automatiquement à la commande ; au-delà du plafond le client règle la différence au bar
+- **Journal des cadeaux** : chaque cadeau consommé est tracé — **article exact, heure exacte,
+  montant offert, reste à charge, code d'origine et commande**. Le bar voit un bandeau doré
+  « 🎁 offert » sur la commande, la fiche client garde la ligne
 - **Historique des codes utilisés** par client dans l'export CSV (codes % / montant réellement
   appliqués sur ses commandes + forfaits activés, avec les crédits reçus)
 - **Équipe & rôles** : invitation par e-mail, rattachement automatique à la première connexion,
@@ -175,6 +182,7 @@ supabase/
     0018_profil_cp_naissance_editable.sql  code postal / naissance modifiables (patch, TOUTES installs)
     0019_illustrations_food.sql  carte food (8 plats) + leurs illustrations (patch, TOUTES installs)
     0020_equipe_suivi_affluence.sql  équipe & rôles, suivi de commande, affluence (patch, TOUTES installs)
+    0021_codes_cadeaux.sql       codes « article offert » + journal des cadeaux (patch, TOUTES installs)
   functions/
     notify/                notification de statut / diffusion / message individuel
     reminders/             relances automatiques (cron)
@@ -314,6 +322,30 @@ feuille de route §10). Notez **Project URL** et **anon public key** (*Settings 
 > *(Une première version de ce patch, nommée `0020_equipe_cagnotte_suivi.sql`, remplaçait les
 > crédits par une cagnotte en euros. Elle est abandonnée. Si vous l'avez déjà exécutée, le
 > nouveau patch remet tout en place sans perte de données — il suffit de le coller par-dessus.)*
+
+> **`0021_codes_cadeaux.sql` s'exécute dans tous les cas**, base neuve ou existante. Il ajoute le
+> quatrième type de code promo : **l'article offert**.
+>
+> Le promoteur crée un code, lui donne un **nom** et un **nombre de personnes**, puis décrit ce
+> qu'il offre — autant de lignes qu'il veut :
+>
+> - **une catégorie au choix** (boisson alcoolisée, soft, plat, bouteille) avec un **plafond en €**
+>   facultatif : « 1 boisson alcoolisée au choix jusqu'à 15 € ». Au-delà, le client règle la
+>   différence au bar ;
+> - **un article précis de la carte** : « 1 Spritz », sans plafond puisque le prix est connu.
+>
+> À la commande, l'article est offert automatiquement et **chaque unité est journalisée** dans
+> `gift_redemptions` : article exact, prix carte, part couverte, reste à charge, horodatage, code
+> d'origine et commande. C'est ce journal qui alimente le bandeau doré du bar et la section
+> « Cadeaux utilisés » de la fiche client. Une commande annulée rend le cadeau et efface ses
+> lignes de journal.
+>
+> `customer_dossier()` rassemble par ailleurs, en un seul appel, tout ce que l'outil a collecté sur
+> un client : identité, consentements, présences horodatées, forfaits, cadeaux reçus et consommés,
+> codes activés et signalements de l'équipe.
+>
+> Le barème des forfaits (0013) n'est pas touché : les deux mécaniques coexistent, un client peut
+> avoir un forfait **et** un cadeau. Le cadeau est appliqué en premier.
 
 ### 3. Activer l'authentification
 

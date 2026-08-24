@@ -32,6 +32,8 @@ export type NotifyInput = {
   channels?: Array<'push' | 'sms'>
   url?: string
   requireInteraction?: boolean
+  /** Rendu en rouge côté client (relance de retrait, incident). */
+  urgent?: boolean
 }
 
 export async function dispatch(input: NotifyInput) {
@@ -45,6 +47,7 @@ export async function dispatch(input: NotifyInput) {
     channels = ['push', 'sms'],
     url = '/',
     requireInteraction = false,
+    urgent = false,
   } = input
 
   await admin.from('messages').insert({
@@ -53,6 +56,7 @@ export async function dispatch(input: NotifyInput) {
     body,
     customer_id: customerId,
     order_id: orderId,
+    urgent,
   })
 
   let customerIds: string[] = []
