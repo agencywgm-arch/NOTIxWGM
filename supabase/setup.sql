@@ -5534,3 +5534,474 @@ comment on view public.v_event_presence is
   'scanné ; still_here = encore actives (scan ou commande dans les 30 min).';
 
 
+-- ============================================================================
+--  0027 — Le mocktail rejoint les softs
+--
+--  Retour terrain, 7.3 : « les mocktails sont actuellement dans Cocktails. Ils
+--  doivent aller dans Softs. » Une seule référence concernée : Mocktail
+--  Exotique, sans alcool, historiquement rangé avec les cocktails alcoolisés.
+--
+--  Le nouveau rang est calculé (max + 1 dans Softs), pas codé en dur : il
+--  reste juste quelle que soit la taille de la section au moment où cette
+--  migration s'exécute. Idempotent — si le produit est déjà dans Softs, ou
+--  n'existe pas (carte reconstruite autrement), la clause where ne trouve
+--  rien et la mise à jour ne fait rien.
+-- ============================================================================
+
+update public.products p
+   set subcategory = 'Softs',
+       sort_order  = coalesce(
+         (select max(sort_order) + 1 from public.products
+           where venue_id = p.venue_id and universe = 'drinks' and subcategory = 'Softs'),
+         1
+       )
+ where p.universe = 'drinks'
+   and p.subcategory = 'Cocktails'
+   and p.is_alcohol = false
+   and p.name = 'Mocktail Exotique';
+
+
+-- ============================================================================
+--  0028 — Prévisualisation de commande : le solde de crédits AVANT de valider
+--
+--  Retour terrain, 2.3 (décision majeure du point équipe) :
+--
+--  · Le client doit voir, au fil de la carte, quels articles ses crédits
+--    peuvent couvrir — un marquage éphémère, qui disparaît dès qu'il n'a
+--    plus de crédits.
+--  · « Sur le modèle d'Uber Eats ou Bolt : à la validation du panier,
+--    afficher le solde de crédits et le reste à payer. »
+--  · La règle critique : « le marquage ne doit s'afficher que si le client a
+--    effectivement des crédits disponibles. [...] Scénario à éviter
+--    absolument : le client a épuisé ses crédits, la mention traîne encore,
+--    il commande, et au retrait on lui annonce un règlement au bar. »
+--
+--  Le badge sur la carte (« ce type d'article se paie avec vos crédits ») est
+--  calculé côté client — c'est une indication, pas un prix, et il ne dépend
+--  que du solde déjà connu du client (my_gift_summary / event_passes), sans
+--  toucher au plafond en euros qui reste une donnée strictement interne.
+--
+--  Mais le total affiché à la validation, lui, doit être EXACT — c'est très
+--  exactement le scénario à éviter qui est en jeu. Le reconstruire dans le
+--  navigateur aurait dupliqué toute la logique de place_order(), plafond en
+--  euros compris ; c'est précisément ce genre de duplication qui vient de
+--  provoquer un bug dans cette même série de migrations. preview_order()
+--  tourne donc le MÊME calcul que place_order(), en lecture seule, pour que
+--  le nombre annoncé avant validation soit celui qui sera appliqué.
+--
+--  Duplication assumée, testée : les deux fonctions ne partagent pas de code
+--  (place_order() n'est pas retouché, il vient d'être corrigé et re-vérifié),
+--  mais le test joint compare leurs résultats sur le même panier et exige
+--  l'égalité. Toute divergence future entre les deux échouera ce test.
+-- ============================================================================
+
+-- Type de travail : une copie mutable, en mémoire, de chaque droit à crédit du
+-- client — pour simuler leur consommation le long du panier sans jamais
+-- écrire dans gift_entitlements (contrainte d'une fonction stable/lecture
+-- seule, et tout l'intérêt d'une prévisualisation).
+do $$ begin
+  create type public._gift_ent_sim as (
+    id uuid, mode text, category text, product_id uuid,
+    max_value numeric, remaining int
+  );
+exception when duplicate_object then null; end $$;
+
+create or replace function public.preview_order(
+  p_event uuid,
+  p_items jsonb,
+  p_promo text default null
+)
+returns jsonb
+language plpgsql stable security definer set search_path = public
+as $$
+declare
+  v_cust      uuid := public.my_customer_id();
+  v_item      jsonb;
+  v_prod      public.products;
+  v_qty       int;
+  v_unit      numeric(10,2);
+  v_variant   jsonb;
+  v_opt       jsonb;
+  v_subtotal  numeric(10,2) := 0;
+  v_discount  numeric(10,2) := 0;
+  v_promo     public.promo_codes;
+  v_pass      public.event_passes;
+  v_wallet_cost  int;
+  v_wallet_units int;
+  v_credits_used int := 0;
+  v_food_used    boolean := false;
+  v_richard_used boolean := false;
+  v_ents         public._gift_ent_sim[];
+  v_i            int;
+  v_gift_cat     text;
+  v_gift_cost    int;
+  v_gift_left    int;
+  v_gift_take    int;
+  v_gift_covered numeric(10,2);
+  v_gift_total   numeric(10,2) := 0;
+  v_gift_count   int := 0;
+  v_gift_credits int := 0;
+begin
+  if v_cust is null then raise exception 'not_a_customer'; end if;
+  if p_items is null or jsonb_array_length(p_items) = 0 then
+    return jsonb_build_object('subtotal', 0, 'discount', 0, 'total', 0, 'gift_total', 0, 'credits_left', 0);
+  end if;
+
+  select * into v_pass from public.event_passes
+    where event_id = p_event and customer_id = v_cust;
+  if v_pass.id is not null then
+    v_richard_used := v_pass.richard_used;
+    v_food_used := not v_pass.food_token_available;
+  end if;
+
+  select coalesce(array_agg(row(e.id, e.mode, e.category, e.product_id, e.max_value, e.quantity_remaining)::public._gift_ent_sim
+                   order by (e.mode = 'product') desc, e.created_at), array[]::public._gift_ent_sim[])
+    into v_ents
+    from public.gift_entitlements e
+   where e.event_id = p_event and e.customer_id = v_cust and e.quantity_remaining > 0;
+
+  for v_item in select * from jsonb_array_elements(p_items) loop
+    select * into v_prod from public.products
+      where id = (v_item ->> 'product_id')::uuid and is_listed and not sold_out;
+    if v_prod.id is null then raise exception 'product_unavailable'; end if;
+
+    v_qty := greatest(1, least(50, coalesce((v_item ->> 'quantity')::int, 1)));
+
+    v_unit := v_prod.price;
+    if jsonb_array_length(coalesce(v_prod.variants, '[]'::jsonb)) > 0 then
+      select value into v_variant
+        from jsonb_array_elements(v_prod.variants)
+        where value ->> 'id' = coalesce(v_item ->> 'variant_id', '')
+        limit 1;
+      if v_variant is null then raise exception 'variant_required'; end if;
+      v_unit := (v_variant ->> 'price')::numeric;
+    end if;
+
+    if v_item ? 'options' then
+      for v_opt in select * from jsonb_array_elements(v_item -> 'options') loop
+        v_unit := v_unit + coalesce((
+          select (o ->> 'price')::numeric
+          from jsonb_array_elements(v_prod.option_groups) g,
+               jsonb_array_elements(g -> 'options') o
+          where o ->> 'id' = v_opt ->> 'id'
+          limit 1
+        ), 0);
+      end loop;
+    end if;
+
+    v_subtotal := v_subtotal + v_unit * v_qty;
+
+    -- ---- Cadeaux : même ordre de préférence que place_order (article
+    -- précis avant catégorie), simulé sur la copie en mémoire. ---------------
+    v_gift_left := v_qty;
+    v_gift_cat  := public.gift_category_of(v_prod.universe, v_prod.is_alcohol);
+    v_gift_cost := public.gift_credit_cost(v_prod.universe, v_prod.is_alcohol);
+
+    loop
+      exit when v_gift_left <= 0;
+
+      v_i := null;
+      for k in 1 .. coalesce(array_length(v_ents, 1), 0) loop
+        if v_ents[k].remaining >= (case when v_ents[k].mode = 'product' then 1 else v_gift_cost end)
+           and (
+             (v_ents[k].mode = 'product' and v_ents[k].product_id = v_prod.id)
+             or (v_ents[k].mode = 'category' and v_ents[k].category = v_gift_cat)
+           )
+        then
+          v_i := k;
+          exit;
+        end if;
+      end loop;
+      exit when v_i is null;
+
+      v_gift_take := least(
+        v_gift_left,
+        v_ents[v_i].remaining / (case when v_ents[v_i].mode = 'product' then 1 else v_gift_cost end)
+      );
+      exit when v_gift_take <= 0;
+
+      v_gift_covered := case
+        when v_ents[v_i].max_value is null then v_unit
+        else least(v_unit, v_ents[v_i].max_value)
+      end;
+
+      v_ents[v_i].remaining := v_ents[v_i].remaining
+        - v_gift_take * (case when v_ents[v_i].mode = 'product' then 1 else v_gift_cost end);
+      v_gift_credits := v_gift_credits
+        + v_gift_take * (case when v_ents[v_i].mode = 'product' then 1 else v_gift_cost end);
+
+      v_discount   := v_discount + v_gift_covered * v_gift_take;
+      v_gift_total := v_gift_total + v_gift_covered * v_gift_take;
+      v_gift_count := v_gift_count + v_gift_take;
+      v_gift_left  := v_gift_left - v_gift_take;
+    end loop;
+
+    -- ---- Forfait Noti : le portefeuille ne couvre que ce qui reste --------
+    if v_pass.id is not null and v_gift_left > 0 then
+      if v_prod.credit_once and not v_richard_used then
+        v_wallet_cost := case when v_prod.credit_kind = 'alcohol' then 2 else 1 end;
+        if v_pass.credits_remaining - v_credits_used >= v_wallet_cost then
+          v_richard_used := true;
+          v_credits_used := v_credits_used + v_wallet_cost;
+          v_discount := v_discount + v_unit;
+        end if;
+      elsif v_prod.credit_kind in ('alcohol', 'soft') then
+        v_wallet_cost := case when v_prod.credit_kind = 'alcohol' then 2 else 1 end;
+        v_wallet_units := least(v_gift_left, (v_pass.credits_remaining - v_credits_used) / v_wallet_cost);
+        if v_wallet_units > 0 then
+          v_credits_used := v_credits_used + v_wallet_units * v_wallet_cost;
+          v_discount := v_discount + v_wallet_units * v_unit;
+        end if;
+      elsif v_prod.universe = 'food' and not v_food_used then
+        v_food_used := true;
+        v_discount := v_discount + v_unit;
+      end if;
+    end if;
+  end loop;
+
+  if nullif(btrim(p_promo), '') is not null then
+    select * into v_promo from public.promo_codes
+      where event_id = p_event and upper(code) = upper(trim(p_promo)) and active
+        and kind in ('percent', 'amount')
+        and (starts_at is null or starts_at <= now())
+        and (ends_at is null or ends_at >= now())
+        and (max_uses is null or uses_count < max_uses)
+        and min_total <= v_subtotal;
+    if v_promo.id is not null then
+      v_discount := v_discount + least(
+        case when v_promo.kind = 'amount' then v_promo.value
+             else round(v_subtotal * v_promo.value / 100, 2) end,
+        v_subtotal);
+    end if;
+  end if;
+
+  return jsonb_build_object(
+    'subtotal', v_subtotal,
+    'discount', least(v_discount, v_subtotal),
+    'total', greatest(0, v_subtotal - v_discount),
+    'gift_total', v_gift_total,
+    'gift_count', v_gift_count,
+    'promo_applied', v_promo.id is not null,
+    -- Crédits qui resteront APRÈS validation — c'est ce nombre, pas un
+    -- montant, que le client doit voir : « il vous restera 2 crédits ».
+    -- credits_left additionne forfait ET codes cadeaux, exactement comme
+    -- creditsTotal côté client (voir isCreditEligible / CreditsIntroSheet) —
+    -- une seule notion de « mes crédits », quelle que soit leur origine.
+    'credits_left',
+      coalesce(case when v_pass.id is not null then v_pass.credits_remaining - v_credits_used else 0 end, 0)
+      + coalesce((select sum(e.remaining) from unnest(v_ents) e), 0),
+    'pass_credits_left', case when v_pass.id is not null
+                               then v_pass.credits_remaining - v_credits_used else null end
+  );
+end
+$$;
+
+revoke all on function public.preview_order(uuid, jsonb, text) from public;
+grant execute on function public.preview_order(uuid, jsonb, text) to authenticated;
+
+
+-- ============================================================================
+--  0029 — Les entrées payantes dans « Encaissé »
+--
+--  Retour terrain, 6.4 (nouveau, validé) :
+--
+--  « Le montant encaissé doit inclure l'argent entré grâce à l'outil, donc
+--  les entrées. Une personne qui paie son entrée à 25 € reçoit immédiatement
+--  le code promo Noti daté du jour, qui lui donne accès à ses consos
+--  prépayées. Donc : détenir ce code = avoir payé son entrée → on peut
+--  comptabiliser automatiquement 25 € encaissés dès l'activation du code.
+--  Une personne qui scanne simplement le QR sans ce code est entrée
+--  autrement (invitation, connaissance) → seules ses commandes sont
+--  comptabilisées. Bénéfice secondaire : le delta entre scans QR et entrées
+--  payantes. »
+--
+--  Le « code Noti daté du jour » est le code de forfait groupe (kind =
+--  'credits', celui que redeem_pass() active) — c'est lui qui donne les
+--  consos prépayées décrites. Le staff marque LEQUEL des codes credits du
+--  jour est le code d'entrée, avec son prix ; l'activation du code
+--  enregistre l'entrée automatiquement, une fois par personne.
+--
+--  IMPORTANT : on n'a PAS touché à redeem_pass() (0020), déjà testé et tout
+--  juste sorti d'un vrai bug de régression sur ce même chemin — cf. 0024. Un
+--  DÉCLENCHEUR sur l'insertion dans event_passes fait le travail à côté, sans
+--  toucher une seule ligne de la fonction existante.
+-- ============================================================================
+
+alter table public.promo_codes
+  add column if not exists is_entry_code boolean not null default false,
+  add column if not exists entry_price numeric(10,2);
+
+comment on column public.promo_codes.is_entry_code is
+  'Coche ce code comme LE code d''entrée de la soirée (kind=credits) : son '
+  'activation vaut paiement d''entrée et alimente « Encaissé ».';
+comment on column public.promo_codes.entry_price is
+  'Prix de l''entrée associé à ce code, en euros (ex. 25.00).';
+
+-- Un seul code d'entrée actif par soirée — sinon deux entrées à des prix
+-- différents s'additionneraient de façon incohérente dans le total encaissé.
+create unique index if not exists promo_codes_one_entry_per_event
+  on public.promo_codes (event_id)
+  where is_entry_code;
+
+
+-- ---------------------------------------------------------------------------
+--  Journal des entrées payées : une ligne par personne et par soirée.
+-- ---------------------------------------------------------------------------
+create table if not exists public.event_entries (
+  id            uuid primary key default gen_random_uuid(),
+  event_id      uuid not null references public.events (id) on delete cascade,
+  customer_id   uuid not null references public.customers (id) on delete cascade,
+  promo_code_id uuid references public.promo_codes (id) on delete set null,
+  amount        numeric(10,2) not null,
+  created_at    timestamptz not null default now(),
+  unique (event_id, customer_id)
+);
+
+create index if not exists event_entries_event_idx on public.event_entries (event_id, created_at);
+
+alter table public.event_entries enable row level security;
+
+drop policy if exists event_entries_staff_read on public.event_entries;
+create policy event_entries_staff_read on public.event_entries
+  for select to authenticated
+  using (public.is_event_staff(event_id));
+
+
+-- ---------------------------------------------------------------------------
+--  Déclencheur : l'activation du code d'entrée du jour enregistre le
+--  paiement, une fois par personne (la contrainte unique de event_passes sur
+--  (event_id, customer_id) garantit déjà qu'il n'y a qu'une seule ligne par
+--  personne — voir redeem_pass, qui renvoie le pass existant sans en
+--  recréer un second à un rescan).
+-- ---------------------------------------------------------------------------
+create or replace function public.log_entry_on_pass()
+returns trigger
+language plpgsql security definer set search_path = public
+as $$
+declare
+  v_promo public.promo_codes;
+begin
+  select * into v_promo from public.promo_codes where id = new.promo_code_id;
+  if v_promo.is_entry_code then
+    insert into public.event_entries (event_id, customer_id, promo_code_id, amount)
+    values (new.event_id, new.customer_id, new.promo_code_id, coalesce(v_promo.entry_price, 0))
+    on conflict (event_id, customer_id) do nothing;
+  end if;
+  return new;
+end
+$$;
+
+drop trigger if exists trg_log_entry_on_pass on public.event_passes;
+create trigger trg_log_entry_on_pass
+  after insert on public.event_passes
+  for each row execute function public.log_entry_on_pass();
+
+
+-- ---------------------------------------------------------------------------
+--  Résumé pour l'écran staff : entrées payées, total, et le delta demandé
+--  (scans QR uniques moins entrées payées = qui est entré autrement).
+-- ---------------------------------------------------------------------------
+create or replace function public.event_entries_summary(p_event uuid)
+returns jsonb
+language sql stable security definer set search_path = public
+as $$
+  select jsonb_build_object(
+    'entries_count', coalesce((select count(*) from public.event_entries where event_id = p_event), 0),
+    'entries_total', coalesce((select sum(amount) from public.event_entries where event_id = p_event), 0),
+    'scan_count', coalesce((select count(*) from public.attendances where event_id = p_event), 0)
+  )
+  where public.is_event_staff(p_event);
+$$;
+
+grant execute on function public.event_entries_summary(uuid) to authenticated;
+
+
+-- ============================================================================
+--  0030 — Formule de présence affinée, et réglable par établissement
+--
+--  Retour terrain, 6.1 / 6.2 / 6.3 (méthode actée en point équipe) :
+--
+--  · « Scans QR = scans UNIQUES. Une personne qui rescanne pour se
+--    reconnecter ne doit pas être recomptée. » — déjà le cas : attendances a
+--    une ligne par (event_id, customer_id), donc scan_count (0026) compte
+--    déjà des personnes, jamais des scans. Rien à changer côté scan_count.
+--
+--  · Formule « personnes présentes » :
+--      a commandé un verre     → présente dans l'HEURE
+--      a commandé une bouteille → présente dans l'HEURE
+--      a utilisé l'outil (sans commander) → présente dans les 30 MIN
+--    Rationale de la séance : la fenêtre d'une heure sur les consos évite de
+--    sous-estimer (fréquence de consommation réelle inconnue) ; les 30 min
+--    sur le seul usage de l'outil suffisent, puisqu'une fois parti on ne
+--    consulte plus l'outil.
+--
+--  · « La fenêtre doit rester ajustable selon l'établissement — fort
+--    turnover, on descend à 15-20 min. »
+--
+--  · « Mentionner explicitement estimation sous le chiffre, et rendre le mot
+--    cliquable pour afficher la méthode de calcul. »  → côté texte/UI.
+-- ============================================================================
+
+alter table public.events
+  add column if not exists presence_order_window_min int not null default 60,
+  add column if not exists presence_scan_window_min  int not null default 30;
+
+comment on column public.events.presence_order_window_min is
+  'Fenêtre « présent » après une commande (minutes). Défaut 60.';
+comment on column public.events.presence_scan_window_min is
+  'Fenêtre « présent » sur simple usage de l''outil, sans commande (minutes). Défaut 30.';
+
+alter table public.events
+  add constraint events_presence_windows_positive
+  check (presence_order_window_min > 0 and presence_scan_window_min > 0)
+  not valid;
+-- `not valid` : ne bloque pas les lignes déjà en base (toutes ont le défaut
+-- valide de toute façon) ; validée à la prochaine occasion sans verrou long.
+alter table public.events validate constraint events_presence_windows_positive;
+
+
+create or replace view public.v_event_presence
+with (security_invoker = true) as
+select
+  e.id                                                                              as event_id,
+  e.capacity                                                                        as capacity,
+  (select coalesce(sum(a.group_size), 0) from public.attendances a
+    where a.event_id = e.id)                                                        as headcount,
+  (select count(*) from public.attendances a where a.event_id = e.id)               as scan_count,
+  (select coalesce(sum(a.group_size), 0) from public.attendances a
+    where a.event_id = e.id and a.first_scan_at >= now() - interval '15 minutes')   as arrivals_15min,
+  (select coalesce(sum(a.group_size), 0) from public.attendances a
+    where a.event_id = e.id and a.first_scan_at >= now() - interval '60 minutes')   as arrivals_60min,
+  (select max(a.first_scan_at) from public.attendances a where a.event_id = e.id)   as last_arrival_at,
+  -- Encore là, au sens fin : une commande de boisson OU bouteille dans la
+  -- fenêtre « commande », OU un simple usage (scan) dans la fenêtre « scan ».
+  -- Les deux fenêtres sont celles de LA soirée, pas une constante partagée.
+  (select count(*) from (
+     select o.customer_id
+       from public.orders o
+      where o.event_id = e.id
+        and o.status::text <> 'CANCELLED'
+        and o.created_at >= now() - make_interval(mins => e.presence_order_window_min)
+     union
+     select a.customer_id
+       from public.attendances a
+      where a.event_id = e.id
+        and a.last_scan_at >= now() - make_interval(mins => e.presence_scan_window_min)
+   ) actifs)                                                                        as still_here,
+  -- Ajoutées en fin de liste : `create or replace view` refuse de retirer ou
+  -- de déplacer des colonnes existantes (voir déjà le choix fait en 0026
+  -- pour la même raison). Exposées pour que l'écran staff puisse afficher la
+  -- méthode exacte au clic sur « estimation ».
+  e.presence_order_window_min                                                       as order_window_min,
+  e.presence_scan_window_min                                                        as scan_window_min
+from public.events e;
+
+grant select on public.v_event_presence to authenticated;
+
+comment on view public.v_event_presence is
+  'Présence réelle. headcount = entrées cumulées ; scan_count = personnes '
+  'ayant scanné ; still_here = commande boisson/bouteille dans la fenêtre '
+  '« commande », ou simple usage dans la fenêtre « scan » (les deux réglables '
+  'par soirée, events.presence_order_window_min / presence_scan_window_min).';
+
+

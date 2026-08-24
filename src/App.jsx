@@ -13,7 +13,7 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import QRCode from 'qrcode'
 import { supabase, isConfigured, frError, errorKey, BASE_PATH, scanUrl } from './lib/supabase.js'
-import { C, S, FONT, GRADIENT, eur, timeFR, dateFR, phoneFR } from './lib/theme.js'
+import { C, S, FONT, GRADIENT, eur, timeFR, dateFR, phoneFR, normalizePhoneFR } from './lib/theme.js'
 import { dict, useT, trProduct, LANG_LABEL } from './lib/i18n.js'
 import {
   canvasesToPdfBlob,
@@ -1476,7 +1476,7 @@ function IdentifyScreen({ lang, onVerified }) {
       const { error: e2 } = await supabase.rpc('upsert_me', {
         p_first_name: firstName.trim(),
         p_last_name: lastName.trim(),
-        p_phone: phone.trim(),
+        p_phone: normalizePhoneFR(phone) || phone.trim(),
         p_postal_code: postalCode.trim(),
         p_birthdate: birthdate,
         p_email: email.trim() || null,
@@ -1542,6 +1542,7 @@ function IdentifyScreen({ lang, onVerified }) {
             type="tel"
             value={phone}
             onChange={(e) => setPhone(e.target.value)}
+            onBlur={() => setPhone((v) => normalizePhoneFR(v) || v)}
             autoComplete="tel"
             placeholder="06 12 34 56 78"
           />
@@ -1892,7 +1893,17 @@ function OrderingApp({
     }
   }, [venue?.id, loadProducts, loadOrders, loadMessages])
 
-  // ---- Temps réel (WebSocket) + repli en polling doux ---------------------
+  // ---- Temps réel (WebSocket) + repli en polling ---------------------------
+  // Retour terrain 5.5 : « un message diffusé n'apparaît pas côté client tant
+  // qu'il n'a pas rechargé — rédhibitoire, personne ne recharge en soirée. »
+  // Le canal WebSocket existait déjà, avec un repli en polling à 20 s — trop
+  // lent pour une annonce ("le bar ferme dans 5 min") qui doit être vue tout
+  // de suite. Le repli passe à 6 s pour les messages, et surtout : si le canal
+  // WebSocket échoue à s'établir (Wi-Fi de salle capricieux, proxy qui bloque
+  // les WebSockets), on ne le découvrait jamais — on double la fréquence du
+  // repli dès que ce cas est détecté, pour que « pas de push » ne veuille
+  // jamais dire « pas de mise à jour ».
+  const [realtimeDown, setRealtimeDown] = useState(false)
   useEffect(() => {
     if (!customer?.id || !event?.id) return
     const ch = supabase
@@ -1915,13 +1926,15 @@ function OrderingApp({
         { event: 'UPDATE', schema: 'public', table: 'products', filter: `venue_id=eq.${venue?.id}` },
         () => loadProducts()
       )
-      .subscribe()
+      .subscribe((status) => {
+        setRealtimeDown(status === 'CHANNEL_ERROR' || status === 'TIMED_OUT' || status === 'CLOSED')
+      })
 
-    const poll = setInterval(() => {
+    const msgPoll = setInterval(() => loadMessages(), 6000)
+    const restPoll = setInterval(() => {
       loadOrders()
-      loadMessages()
       loadProducts()
-    }, 20000)
+    }, realtimeDown ? 6000 : 20000)
 
     const onSw = (e) => {
       if (e.data?.type === 'NOTI_PUSH') loadOrders()
@@ -1930,10 +1943,11 @@ function OrderingApp({
 
     return () => {
       supabase.removeChannel(ch)
-      clearInterval(poll)
+      clearInterval(msgPoll)
+      clearInterval(restPoll)
       navigator.serviceWorker?.removeEventListener('message', onSw)
     }
-  }, [customer?.id, event?.id, venue?.id, loadOrders, loadMessages, loadProducts])
+  }, [customer?.id, event?.id, venue?.id, loadOrders, loadMessages, loadProducts, realtimeDown])
 
   // ---- Sonnerie douce quand une commande passe à « prête » ----------------
   useEffect(() => {
@@ -2036,6 +2050,25 @@ function OrderingApp({
   useEffect(() => {
     window.scrollTo({ top: 0, behavior: 'auto' })
   }, [view])
+
+  // Retour terrain 7.2 : cliquer sur une catégorie en fin de carte (Digestifs)
+  // envoie tout en bas ; retrouver la barre de catégories demandait alors de
+  // tout re-remonter à la main. Un bouton flottant réapparaît passé un
+  // certain défilement.
+  const [showTop, setShowTop] = useState(false)
+  useEffect(() => {
+    let ticking = false
+    const onScroll = () => {
+      if (ticking) return
+      ticking = true
+      requestAnimationFrame(() => {
+        setShowTop(window.scrollY > 480)
+        ticking = false
+      })
+    }
+    window.addEventListener('scroll', onScroll, { passive: true })
+    return () => window.removeEventListener('scroll', onScroll)
+  }, [])
 
   // « Précédent » depuis Mes commandes ou Messages revient à la carte, il ne
   // quitte pas l'outil.
@@ -2519,6 +2552,7 @@ function OrderingApp({
                         product={p}
                         lang={lang}
                         disabled={blocked}
+                        creditEligible={creditsTotal > 0 && isCreditEligible(p, gifts, pass)}
                         onAdd={() => {
                           const needsChoice =
                             (p.variants || []).length > 0 || (p.option_groups || []).length > 0
@@ -2534,6 +2568,38 @@ function OrderingApp({
           </>
         )}
       </div>
+
+      {/* Retour en haut : réapparaît passé un certain défilement, seulement
+          sur la carte (les autres onglets sont courts). Décalé au-dessus du
+          panier flottant quand il est visible, pour ne jamais le recouvrir. */}
+      {showTop && view === 'menu' && (
+        <button
+          onClick={() => glide(() => window.scrollY, (v) => window.scrollTo(0, v), 0)}
+          aria-label={t.backToTop}
+          title={t.backToTop}
+          style={{
+            position: 'fixed',
+            right: 14,
+            bottom:
+              cartCount > 0
+                ? 'calc(env(safe-area-inset-bottom) + 82px)'
+                : 'calc(env(safe-area-inset-bottom) + 14px)',
+            zIndex: 60,
+            width: 46,
+            height: 46,
+            borderRadius: 23,
+            border: 'none',
+            background: C.paper,
+            color: C.terracotta,
+            fontSize: 18,
+            boxShadow: '0 6px 20px rgba(28,42,74,.22)',
+            cursor: 'pointer',
+            transition: 'bottom .2s',
+          }}
+        >
+          ↑
+        </button>
+      )}
 
       {/* Panier flottant */}
       {cartCount > 0 && view === 'menu' && (
@@ -2605,6 +2671,7 @@ function OrderingApp({
         pass={pass}
         promoCode={promoCode}
         subtotal={subtotal}
+        creditsTotal={creditsTotal}
         prepMin={event.default_prep_min ?? 1}
         onClose={() => setCartCheckout(false)}
         onSubmit={async (payload) => {
@@ -2654,7 +2721,7 @@ function OrderingApp({
 }
 
 // ------------------------------------------------------------ Carte produit
-function ProductCard({ product, lang, disabled, onAdd }) {
+function ProductCard({ product, lang, disabled, onAdd, creditEligible = false }) {
   const t = useT(lang)
   const info = tr(product, lang)
   const out = product.sold_out
@@ -2725,8 +2792,32 @@ function ProductCard({ product, lang, disabled, onAdd }) {
           </div>
         )}
 
-        <div style={{ ...S.money, fontSize: 15, fontWeight: 600, color: C.terracotta, marginTop: 6 }}>
-          {(product.variants || []).length > 0 ? t.priceFrom(eur(priceFrom)) : eur(product.price)}
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 6 }}>
+          <div style={{ ...S.money, fontSize: 15, fontWeight: 600, color: C.terracotta }}>
+            {(product.variants || []).length > 0 ? t.priceFrom(eur(priceFrom)) : eur(product.price)}
+          </div>
+          {/* Marquage éphémère : n'existe QUE quand le client a des crédits et
+              que CET article en particulier est couvert. Il disparaît tout
+              seul dès que l'un ou l'autre cesse d'être vrai — jamais de
+              mention qui traîne une fois les crédits épuisés. */}
+          {creditEligible && !out && (
+            <span
+              style={{
+                fontFamily: FONT.label,
+                fontSize: 9.5,
+                fontWeight: 700,
+                letterSpacing: 0.6,
+                color: C.goldDark,
+                background: `${C.gold}22`,
+                border: `1px solid ${C.gold}88`,
+                borderRadius: 999,
+                padding: '2px 8px',
+                whiteSpace: 'nowrap',
+              }}
+            >
+              🎟️ {t.creditBadge}
+            </span>
+          )}
         </div>
       </div>
 
@@ -3040,40 +3131,40 @@ function ScrollHint({ children, sticky = false, top = 0, style, barRef }) {
  * envoi, la source de vérité reste le serveur.
  */
 /**
- * Miroir du calcul de place_order() : 1 alcool éligible = 2 crédits, 1 soft =
- * 1 crédit, plus le jeton food. Le serveur reste seul juge — ceci ne sert qu'à
- * afficher l'effet du forfait avant de valider.
+ * Un article est-il actuellement couvert par au moins un crédit du client —
+ * qu'il vienne d'un code cadeau ou du forfait groupe ?
+ *
+ * Retour terrain, décision majeure du point équipe (2.3) : le badge doit
+ * apparaître à côté du prix pour les articles que les crédits couvrent, et
+ * disparaître ENTIÈREMENT dès que le client n'a plus de crédit — d'où l'appel
+ * `creditsTotal > 0` fait par l'appelant avant même d'invoquer cette
+ * fonction. Ce test-ci ne sert qu'à savoir SI un article est concerné ; il ne
+ * calcule ni prix ni plafond — ces données restent strictement internes (le
+ * plafond en euros n'est même plus renvoyé par my_gift_summary depuis 0024).
+ * Le total exact, lui, vient du serveur (preview_order) au moment de valider.
  */
-function estimateWalletDiscount(cart, pass) {
-  if (!pass) return { discount: 0, creditsRemaining: 0, foodAvailable: false }
-  let creditsRemaining = pass.credits_remaining
-  let richardUsed = pass.richard_used
-  let foodAvailable = pass.food_token_available
-  let discount = 0
-  for (const l of cart) {
-    const p = l.product
-    const unit = Number(l.basePrice) + (l.options || []).reduce((s, o) => s + Number(o.price || 0), 0)
-    if (p.credit_once && !richardUsed) {
-      const cost = p.credit_kind === 'alcohol' ? 2 : 1
-      if (creditsRemaining >= cost) {
-        creditsRemaining -= cost
-        richardUsed = true
-        discount += unit
-      }
-    } else if (p.credit_kind === 'alcohol' || p.credit_kind === 'soft') {
-      const cost = p.credit_kind === 'alcohol' ? 2 : 1
-      const units = Math.min(l.quantity, Math.floor(creditsRemaining / cost))
-      if (units > 0) {
-        creditsRemaining -= units * cost
-        discount += units * unit
-      }
-    } else if (p.universe === 'food' && foodAvailable) {
-      foodAvailable = false
-      discount += unit
-    }
+function isCreditEligible(product, gifts, pass) {
+  const cat = product.universe === 'food' ? 'food' : product.universe === 'bottles' ? 'bottle' : 'drink'
+  const cost = product.universe === 'drinks' && product.is_alcohol ? 2 : 1
+  if (
+    (gifts || []).some((g) =>
+      g.mode === 'product'
+        ? g.product_id === product.id && Number(g.remaining) >= 1
+        : g.category === cat && Number(g.remaining) >= cost
+    )
+  ) {
+    return true
   }
-  return { discount, creditsRemaining, foodAvailable }
+  if (pass) {
+    if (product.credit_once && !pass.richard_used) return true
+    if (product.credit_kind === 'alcohol' && pass.credits_remaining >= 2) return true
+    if (product.credit_kind === 'soft' && pass.credits_remaining >= 1) return true
+    if (product.universe === 'food' && pass.food_token_available) return true
+  }
+  return false
 }
+
+
 
 /**
  * Saisie unique pour TOUT code (réduction % / montant, ou forfait de groupe à
@@ -3355,7 +3446,7 @@ function ClientProfileSheet({
     setBusy(true)
     try {
       const { error } = await supabase.rpc('update_my_optional_profile', {
-        p_phone: phone.trim(),
+        p_phone: normalizePhoneFR(phone) || phone.trim(),
         p_postal_code: postalCode.trim(),
         p_birthdate: birthdate,
         p_email: email.trim() || '',
@@ -3476,28 +3567,27 @@ function ClientProfileSheet({
           type="tel"
           value={phone}
           onChange={(e) => setPhone(e.target.value)}
+          onBlur={() => setPhone((v) => normalizePhoneFR(v) || v)}
           autoComplete="tel"
           placeholder="06 12 34 56 78"
         />
       </Field>
 
-      <div style={{ display: 'flex', gap: 10 }}>
-        <div style={{ flex: 1 }}>
-          <Field label={t.postalCode}>
-            <input
-              style={S.input}
-              inputMode="numeric"
-              value={postalCode}
-              onChange={(e) => setPostalCode(e.target.value)}
-              autoComplete="postal-code"
-              placeholder="75011"
-            />
-          </Field>
-        </div>
-        <div style={{ flex: 1.35 }}>
-          <BirthdateField label={t.birthdate} value={birthdate} onChange={setBirthdate} />
-        </div>
-      </div>
+      {/* Retour terrain : sur une ligne partagée, le code postal se
+          retrouvait écrasé à côté des trois cases de la date de naissance.
+          Chacun a maintenant sa propre ligne. */}
+      <Field label={t.postalCode}>
+        <input
+          style={S.input}
+          inputMode="numeric"
+          value={postalCode}
+          onChange={(e) => setPostalCode(e.target.value)}
+          autoComplete="postal-code"
+          placeholder="75011"
+        />
+      </Field>
+
+      <BirthdateField label={t.birthdate} value={birthdate} onChange={setBirthdate} />
 
       <Field label={t.email} hint={t.optional}>
         <input
@@ -3629,35 +3719,48 @@ function CartSheet({ open, cart, lang, subtotal, onClose, onQty, onCheckout }) {
 }
 
 // ----------------------------------------------------------------- Validation
-function CheckoutSheet({ open, lang, event, cart, pass, promoCode, subtotal, prepMin, onClose, onSubmit }) {
+function CheckoutSheet({ open, lang, event, cart, pass, promoCode, subtotal, prepMin, creditsTotal = 0, onClose, onSubmit }) {
   const t = useT(lang)
   const [note, setNote] = useState('')
-  const [promoResult, setPromoResult] = useState(null)
+  const [preview, setPreview] = useState(null)
   const [busy, setBusy] = useState(false)
 
-  // Le code (s'il y en a un) est saisi une seule fois, au niveau de la carte
-  // (voir PromoCodeCard) — ici on ne fait qu'en afficher l'effet, recalculé
-  // automatiquement à chaque ouverture / changement de panier.
+  // Retour terrain, décision majeure du point équipe (2.3) : « sur le modèle
+  // d'Uber Eats ou Bolt, à la validation du panier, afficher le solde de
+  // crédits et le reste à payer ». Et la règle qui va avec, non négociable :
+  // ce nombre doit être EXACT, sous peine de litige au comptoir si le client
+  // a validé sur une promesse que le retrait dément.
+  //
+  // On appelle donc preview_order() — le même calcul que place_order(), en
+  // lecture seule — plutôt que de reconstruire ici une estimation qui
+  // dupliquerait (et pourrait un jour diverger de) la vraie logique
+  // d'encaissement. Un seul appel couvre code %/montant, forfait groupe ET
+  // codes cadeaux ; l'ancien code n'affichait que les deux premiers.
   useEffect(() => {
-    if (!open || !promoCode) {
-      setPromoResult(null)
+    if (!open || !cart?.length) {
+      setPreview(null)
       return
     }
     let dead = false
+    const items = cart.map((l) => ({
+      product_id: l.product.id,
+      quantity: l.quantity,
+      variant_id: l.variantId,
+      options: l.options.map((o) => ({ id: o.id, name: o.name, price: o.price })),
+    }))
     supabase
-      .rpc('preview_promo', { p_event: event.id, p_code: promoCode, p_subtotal: subtotal })
+      .rpc('preview_order', { p_event: event.id, p_items: items, p_promo: promoCode || null })
       .then(({ data, error }) => {
-        if (!dead) setPromoResult(error ? { valid: false } : data)
+        if (!dead) setPreview(error ? null : data)
       })
     return () => {
       dead = true
     }
-  }, [open, promoCode, event.id, subtotal])
+  }, [open, cart, promoCode, event.id])
 
-  const promoDiscount = promoResult?.valid ? Number(promoResult.discount) : 0
-  const walletEst = estimateWalletDiscount(cart || [], pass)
-  const discount = promoDiscount + walletEst.discount
-  const total = Math.max(0, subtotal - discount)
+  const discount = Number(preview?.discount ?? 0)
+  const total = preview ? Number(preview.total) : subtotal
+  const showingCode = promoCode && preview && !preview.promo_applied
 
   return (
     <Sheet open={open} onClose={onClose} title={t.validateOrder} lang={lang}>
@@ -3672,21 +3775,26 @@ function CheckoutSheet({ open, lang, event, cart, pass, promoCode, subtotal, pre
 
       {promoCode && (
         <div style={{ marginBottom: 14 }}>
-          {promoResult == null ? (
+          {!preview ? (
             <Banner tone="info">{t.checkingCode(promoCode)}</Banner>
-          ) : promoResult.valid ? (
-            <Banner tone="ok">{t.codeApplied(promoCode, eur(promoDiscount))}</Banner>
-          ) : (
+          ) : showingCode ? (
             <Banner tone="danger">{t.codeInvalid(promoCode)}</Banner>
+          ) : (
+            <Banner tone="ok">{t.codeApplied(promoCode, eur(discount))}</Banner>
           )}
         </div>
       )}
 
-      {walletEst.discount > 0 && (
+      {/* Solde de crédits / reste à payer, à la Uber Eats — n'apparaît que
+          tant qu'il reste effectivement des crédits à faire jouer ou
+          consommés sur CETTE commande. Zéro crédit restant = la bannière
+          disparaît, exactement la règle demandée. */}
+      {/* N'existe QUE si le client avait des crédits en entrant dans cet
+          écran — la même garde que le badge sur la carte. Le nombre vient du
+          serveur : c'est exactement ce qu'il restera après validation. */}
+      {creditsTotal > 0 && preview && (
         <div style={{ marginBottom: 14 }}>
-          <Banner tone="ok">
-            {t.walletCovered(eur(walletEst.discount), walletEst.creditsRemaining)}
-          </Banner>
+          <Banner tone="ok">{t.creditsLeftAfter(preview.credits_left)}</Banner>
         </div>
       )}
 
@@ -5329,6 +5437,10 @@ function BarTab({ event, venue, onEventChange, showToast }) {
   const [prep, setPrep] = useState(event.default_prep_min ?? 1)
   const [detail, setDetail] = useState(null)
   const [notesFor, setNotesFor] = useState(null)
+  // Retour terrain 5.3 : « depuis une commande, rebondir directement sur la
+  // fiche client concernée » — un incident se règle au comptoir avec le
+  // ticket en main, pas avec un nom.
+  const [ficheFor, setFicheFor] = useState(null)
   const [soldOutOpen, setSoldOutOpen] = useState(false)
   const [staffPush, setStaffPush] = useState(false)
   const [ack, setAck] = useState(() => new Set(LS.get(`noti:ack:${event.id}`, [])))
@@ -5874,14 +5986,34 @@ function BarTab({ event, venue, onEventChange, showToast }) {
                 <GiftBanner orderId={detail.id} />
               </div>
             )}
-            <div style={{ marginBottom: 14, fontSize: 13.5 }}>
-              <strong>
-                {detail.customers?.first_name} {detail.customers?.last_name}
-              </strong>
+            <button
+              onClick={() => {
+                const o = detail
+                setDetail(null)
+                setFicheFor(o.customer_id)
+              }}
+              disabled={!detail.customer_id}
+              style={{
+                width: '100%',
+                textAlign: 'left',
+                background: 'none',
+                border: `1px solid ${C.line}`,
+                borderRadius: 12,
+                padding: '10px 12px',
+                marginBottom: 14,
+                cursor: detail.customer_id ? 'pointer' : 'default',
+              }}
+            >
+              <div style={{ fontSize: 13.5, display: 'flex', alignItems: 'center', gap: 6 }}>
+                <strong style={{ flex: 1 }}>
+                  {detail.customers?.first_name} {detail.customers?.last_name}
+                </strong>
+                {detail.customer_id && <span style={{ color: C.indigo, fontSize: 12 }}>Voir la fiche ›</span>}
+              </div>
               <div style={{ color: C.dim, fontSize: 12.5, marginTop: 3 }}>
                 {phoneFR(detail.customers?.phone)}
               </div>
-            </div>
+            </button>
             <div style={{ display: 'grid', gap: 8, marginBottom: 16 }}>
               {(detail.order_items || []).map((it) => (
                 <div
@@ -5956,6 +6088,14 @@ function BarTab({ event, venue, onEventChange, showToast }) {
           </>
         )}
       </Sheet>
+
+      <ClientFicheSheet
+        customerId={ficheFor}
+        event={event}
+        onClose={() => setFicheFor(null)}
+        onChanged={load}
+        showToast={showToast}
+      />
     </div>
   )
 }
@@ -6051,6 +6191,10 @@ function CaisseTab({ event, venue, showToast }) {
   const [selected, setSelected] = useState([])
   const [payOpen, setPayOpen] = useState(false)
   const [showPaid, setShowPaid] = useState(false)
+  // Retour terrain 6.4 : « le montant encaissé doit inclure l'argent entré
+  // grâce à l'outil » — détenir le code d'entrée du jour vaut avoir payé,
+  // donc son activation alimente ce total sans passer par une commande.
+  const [entries, setEntries] = useState(null)
 
   const load = useCallback(async () => {
     const { data } = await supabase
@@ -6063,8 +6207,14 @@ function CaisseTab({ event, venue, showToast }) {
     setLoading(false)
   }, [event.id])
 
+  const loadEntries = useCallback(async () => {
+    const { data } = await supabase.rpc('event_entries_summary', { p_event: event.id })
+    setEntries(data || null)
+  }, [event.id])
+
   useEffect(() => {
     load()
+    loadEntries()
     const ch = supabase
       .channel(`caisse-${event.id}`)
       .on(
@@ -6072,9 +6222,14 @@ function CaisseTab({ event, venue, showToast }) {
         { event: '*', schema: 'public', table: 'orders', filter: `event_id=eq.${event.id}` },
         () => load()
       )
+      .on(
+        'postgres_changes',
+        { event: 'INSERT', schema: 'public', table: 'event_entries', filter: `event_id=eq.${event.id}` },
+        () => loadEntries()
+      )
       .subscribe()
     return () => supabase.removeChannel(ch)
-  }, [event.id, load])
+  }, [event.id, load, loadEntries])
 
   const visible = orders.filter((o) => (showPaid ? true : o.status !== 'PAID'))
 
@@ -6110,8 +6265,14 @@ function CaisseTab({ event, venue, showToast }) {
   if (loading) return <Spinner />
 
   const due = orders.filter((o) => o.status !== 'PAID').reduce((s, o) => s + Number(o.total || 0), 0)
-  const cashed = orders.filter((o) => o.status === 'PAID').reduce((s, o) => s + Number(o.total || 0), 0)
+  const cashedOrders = orders.filter((o) => o.status === 'PAID').reduce((s, o) => s + Number(o.total || 0), 0)
+  const entriesTotal = Number(entries?.entries_total || 0)
+  // « Encaissé » regroupe désormais les commandes réglées ET les entrées
+  // payées à l'activation du code du jour — c'est tout l'argent que l'outil a
+  // fait rentrer, pas seulement ce qui passe par une commande.
+  const cashed = cashedOrders + entriesTotal
   const unpaid = orders.filter((o) => o.status === 'UNPAID')
+  const scanDelta = entries ? Math.max(0, Number(entries.scan_count || 0) - Number(entries.entries_count || 0)) : null
 
   return (
     <div style={{ paddingBottom: selected.length ? 120 : 0 }}>
@@ -6135,6 +6296,42 @@ function CaisseTab({ event, venue, showToast }) {
         ))}
       </div>
 
+      {/* Fenêtre Entrées : n'apparaît que si un code d'entrée existe pour
+          cette soirée (event_entries_summary ne renvoie rien pour un
+          non-staff, et entries reste à 0 tant qu'aucun code d'entrée n'a
+          jamais été activé). */}
+      {entries && (Number(entries.entries_count) > 0 || Number(entries.scan_count) > 0) && (
+        <div style={{ ...S.card, padding: 14, marginBottom: 14, border: `1.5px solid ${C.gold}88` }}>
+          <div style={{ ...S.label, marginBottom: 10 }}>🎫 Entrées</div>
+          <div style={{ display: 'flex', gap: 10 }}>
+            <div style={{ flex: 1, textAlign: 'center' }}>
+              <div style={{ ...S.money, fontSize: 19, fontWeight: 600, color: C.goldDark }}>
+                {entries.entries_count}
+              </div>
+              <div style={{ fontSize: 10.5, color: C.dim, marginTop: 2 }}>payées</div>
+            </div>
+            <div style={{ flex: 1, textAlign: 'center' }}>
+              <div style={{ ...S.money, fontSize: 19, fontWeight: 600, color: C.goldDark }}>
+                {eur(entriesTotal)}
+              </div>
+              <div style={{ fontSize: 10.5, color: C.dim, marginTop: 2 }}>encaissées</div>
+            </div>
+            <div style={{ flex: 1, textAlign: 'center' }}>
+              <div style={{ ...S.money, fontSize: 19, fontWeight: 600, color: C.dim }}>
+                {entries.scan_count}
+              </div>
+              <div style={{ fontSize: 10.5, color: C.dim, marginTop: 2 }}>scans QR</div>
+            </div>
+          </div>
+          {scanDelta > 0 && (
+            <div style={{ fontSize: 11, color: C.faint, marginTop: 10, lineHeight: 1.5 }}>
+              {scanDelta} personne{scanDelta > 1 ? 's' : ''} {scanDelta > 1 ? 'sont entrées' : 'est entrée'} sans
+              activer le code d’entrée — invitation ou connaissance.
+            </div>
+          )}
+        </div>
+      )}
+
       <button
         onClick={() => setShowPaid((v) => !v)}
         style={{ ...S.btnGhost, minHeight: 42, fontSize: 12, marginBottom: 14 }}
@@ -6147,7 +6344,12 @@ function CaisseTab({ event, venue, showToast }) {
       {byCustomer.map(([cid, list]) => {
         const c = list[0].customers
         const tot = list.reduce((s, o) => s + Number(o.total || 0), 0)
-        const allSel = list.every((o) => selected.includes(o.id))
+        // Retour terrain 5.2 : une commande déjà réglée restait sélectionnable
+        // et « Marquer réglé » réapparaissait dessus — confusion pure, ce
+        // n'est l'action de personne. Seules les commandes non réglées entrent
+        // dans « tout sélectionner ».
+        const payable = list.filter((o) => o.status !== 'PAID')
+        const allSel = payable.length > 0 && payable.every((o) => selected.includes(o.id))
         return (
           <div key={cid} style={{ ...S.card, padding: 14, marginBottom: 12 }}>
             <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 10 }}>
@@ -6166,11 +6368,20 @@ function CaisseTab({ event, venue, showToast }) {
                 <button
                   onClick={() =>
                     setSelected((p) => {
-                      const ids = list.map((o) => o.id)
+                      const ids = payable.map((o) => o.id)
                       return allSel ? p.filter((x) => !ids.includes(x)) : [...new Set([...p, ...ids])]
                     })
                   }
-                  style={{ background: 'none', border: 'none', color: C.indigo, fontSize: 11.5, cursor: 'pointer', padding: '4px 0 0' }}
+                  disabled={payable.length === 0}
+                  style={{
+                    background: 'none',
+                    border: 'none',
+                    color: C.indigo,
+                    fontSize: 11.5,
+                    cursor: payable.length === 0 ? 'default' : 'pointer',
+                    padding: '4px 0 0',
+                    opacity: payable.length === 0 ? 0.4 : 1,
+                  }}
                 >
                   {allSel ? 'Tout décocher' : 'Tout sélectionner'}
                 </button>
@@ -6179,25 +6390,30 @@ function CaisseTab({ event, venue, showToast }) {
 
             <div style={{ display: 'grid', gap: 8 }}>
               {list.map((o) => {
-                const sel = selected.includes(o.id)
+                const paid = o.status === 'PAID'
+                const sel = !paid && selected.includes(o.id)
                 const st = ORDER_STATUS[o.status]
                 return (
                   <button
                     key={o.id}
-                    onClick={() =>
+                    onClick={() => {
+                      if (paid) return
                       setSelected((p) => (p.includes(o.id) ? p.filter((x) => x !== o.id) : [...p, o.id]))
-                    }
+                    }}
+                    disabled={paid}
+                    title={paid ? 'Déjà réglée' : undefined}
                     style={{
                       display: 'flex',
                       alignItems: 'center',
                       gap: 12,
                       padding: 11,
                       borderRadius: 12,
-                      cursor: 'pointer',
+                      cursor: paid ? 'default' : 'pointer',
                       textAlign: 'left',
                       border: `1.5px solid ${sel ? C.terracotta : C.line}`,
-                      background: sel ? 'rgba(185,106,76,.08)' : C.creamSoft,
+                      background: sel ? 'rgba(185,106,76,.08)' : paid ? 'transparent' : C.creamSoft,
                       color: C.text,
+                      opacity: paid ? 0.55 : 1,
                     }}
                   >
                     <div
@@ -6215,7 +6431,7 @@ function CaisseTab({ event, venue, showToast }) {
                         justifyContent: 'center',
                       }}
                     >
-                      {sel ? '✓' : ''}
+                      {paid ? '✓' : sel ? '✓' : ''}
                     </div>
                     <div style={{ flex: 1, minWidth: 0 }}>
                       <div style={{ fontFamily: FONT.label, fontWeight: 600, letterSpacing: 1.4 }}>
@@ -6478,6 +6694,9 @@ function OrgaTab({ event, venue, showToast, onEventChange }) {
   const [pulse, setPulse] = useState(null)
   const [now, setNow] = useState(Date.now())
   const [ficheFor, setFicheFor] = useState(null)
+  // Retour terrain 6.3 : « mentionner explicitement estimation sous le
+  // chiffre, et rendre le mot cliquable pour afficher la méthode de calcul. »
+  const [methodOpen, setMethodOpen] = useState(false)
 
   useEffect(() => {
     const id = setInterval(() => setNow(Date.now()), 15000)
@@ -6688,15 +6907,42 @@ function OrgaTab({ event, venue, showToast, onEventChange }) {
       {/* Temps réel */}
       <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginBottom: 14 }}>
         {/* « Présents » affichait le cumul des entrées et ne redescendait
-            jamais. Les deux chiffres sont maintenant nommés pour ce qu'ils
-            mesurent : total entré depuis l'ouverture, et encore actifs sur les
-            30 dernières minutes (scan ou commande). */}
-        {stat('Entrées', live?.headcount ?? 0, C.dim, 'Cumul depuis l’ouverture')}
-        {stat('Encore là', pulse?.still_here ?? pulse?.active_30min ?? 0, C.indigo, 'Scan ou commande, 30 min')}
+            jamais. Renommé « Total scanné » pour ne pas se confondre avec les
+            « Entrées » payées de l'onglet Caisse (0029) — deux notions
+            différentes qui portaient jadis le même mot. */}
+        {stat('Total scanné', live?.headcount ?? 0, C.dim, 'Cumul depuis l’ouverture')}
+        <button
+          onClick={() => setMethodOpen((v) => !v)}
+          style={{ all: 'unset', cursor: 'pointer', flex: 1, minWidth: 92 }}
+        >
+          {stat(
+            'Encore là (estimation)',
+            pulse?.still_here ?? pulse?.active_30min ?? 0,
+            C.indigo,
+            methodOpen ? 'Masquer le détail ▲' : 'Comment est-ce calculé ? ▾'
+          )}
+        </button>
         {stat('En prépa', live?.in_preparation ?? 0, C.navy)}
         {stat('À retirer', live?.awaiting_pickup ?? 0, C.terracotta)}
         {stat('Encaissé', eur(live?.revenue_paid ?? 0), C.ok)}
       </div>
+
+      {methodOpen && (
+        <div style={{ marginBottom: 14 }}>
+          <Banner tone="info">
+            <strong>Une estimation, pas un comptage exact</strong>
+            <div style={{ fontSize: 12.5, marginTop: 6, lineHeight: 1.6 }}>
+              Compte comme « encore là » toute personne ayant{' '}
+              <strong>commandé une boisson ou une bouteille dans la dernière heure</strong>, ou{' '}
+              <strong>utilisé l’outil dans les 30 dernières minutes</strong> sans forcément commander.
+              Une fenêtre plus large sur les commandes évite de sous-estimer — on ne connaît pas le
+              rythme de consommation de chacun ; une fenêtre plus courte sur le simple usage suffit,
+              car on ne rouvre plus l’outil une fois parti. Les deux durées sont réglables pour votre
+              établissement dans Réglages.
+            </div>
+          </Banner>
+        </div>
+      )}
 
       <AffluenceCard pulse={pulse} slots={slots} />
 
@@ -7739,6 +7985,8 @@ const EMPTY_PROMO = {
   credits_per_person: 6,
   food_tokens_per_person: 1,
   gift_items: [],
+  is_entry_code: false,
+  entry_price: 25,
 }
 
 /** Catégories offrables par un code cadeau, dans les mots de la carte. */
@@ -7903,6 +8151,52 @@ function ForfaitFields({ f, set }) {
           1 alcool de la sélection forfait, ou 2 softs. Au-delà, elle règle au prix de la carte.
         </Banner>
       </div>
+
+      {/* Retour terrain 6.4 : « détenir ce code = avoir payé son entrée » — le
+          code d'entrée du jour alimente automatiquement Encaissé dès son
+          activation, sans passer par une commande. Un seul par soirée. */}
+      <button
+        onClick={() => set('is_entry_code', !f.is_entry_code)}
+        style={{
+          display: 'flex',
+          justifyContent: 'space-between',
+          alignItems: 'center',
+          width: '100%',
+          minHeight: 56,
+          padding: '0 14px',
+          borderRadius: 14,
+          cursor: 'pointer',
+          border: `1.5px solid ${f.is_entry_code ? C.gold : C.lineHi}`,
+          background: f.is_entry_code ? `${C.gold}18` : C.paper,
+          color: C.text,
+          marginBottom: f.is_entry_code ? 10 : 14,
+          textAlign: 'left',
+        }}
+      >
+        <span>
+          <span style={{ fontSize: 14, fontWeight: 500 }}>🎫 C’est le code d’entrée de la soirée</span>
+          <span style={{ display: 'block', fontSize: 11.5, color: C.faint, marginTop: 2 }}>
+            Son activation compte comme une entrée payée dans Encaissé
+          </span>
+        </span>
+        <span style={{ fontFamily: FONT.label, fontWeight: 600, color: f.is_entry_code ? C.goldDark : C.faint }}>
+          {f.is_entry_code ? 'OUI' : 'NON'}
+        </span>
+      </button>
+
+      {f.is_entry_code && (
+        <Field label="Prix de l’entrée" hint="Comptabilisé dès l’activation du code, une fois par personne">
+          <input
+            style={S.input}
+            type="number"
+            min="0"
+            step="0.5"
+            value={f.entry_price ?? ''}
+            onChange={(e) => set('entry_price', e.target.value === '' ? '' : Number(e.target.value))}
+            placeholder="25"
+          />
+        </Field>
+      )}
     </>
   )
 }
@@ -8176,12 +8470,20 @@ function PromoCodeSheet({ promo, event, venue, onClose, onSaved, showToast }) {
       credits_per_person: Number(f.credits_per_person) || 0,
       food_tokens_per_person: Number(f.food_tokens_per_person) || 0,
       gift_items: f.kind === 'gift' ? gifts : [],
+      is_entry_code: f.kind === 'credits' && !!f.is_entry_code,
+      entry_price: f.kind === 'credits' && f.is_entry_code ? Number(f.entry_price) || 0 : null,
     }
     const { error } = f.id
       ? await supabase.from('promo_codes').update(payload).eq('id', f.id)
       : await supabase.from('promo_codes').insert(payload)
     setBusy(false)
-    if (error) return showToast(frError(error), 'error')
+    if (error) {
+      // Un seul code d'entrée par soirée (contrainte base) : message clair
+      // plutôt que le nom technique de l'index.
+      if (String(error.message || '').includes('promo_codes_one_entry_per_event'))
+        return showToast('Il y a déjà un code d’entrée actif sur cette soirée — désactivez-le d’abord.', 'error')
+      return showToast(frError(error), 'error')
+    }
     onSaved()
   }
 
@@ -9547,6 +9849,8 @@ function ReglagesTab({ venue, event, session, role, onReload, showToast }) {
           default_prep_min: Number(e.default_prep_min) || 1,
           closes_at: e.closes_at || null,
           capacity: e.capacity == null || e.capacity === '' ? null : Number(e.capacity),
+          presence_order_window_min: Math.max(1, Number(e.presence_order_window_min) || 60),
+          presence_scan_window_min: Math.max(1, Number(e.presence_scan_window_min) || 30),
           accept_orders: !!e.accept_orders,
           service_message: e.service_message || null,
           welcome_message: e.welcome_message || null,
@@ -9641,6 +9945,42 @@ function ReglagesTab({ venue, event, session, role, onReload, showToast }) {
             placeholder="ex. 250"
           />
         </Field>
+        {/* Retour terrain 6.2 : « la fenêtre doit rester ajustable selon
+            l'établissement — fort turnover, on descend à 15-20 min. » */}
+        <div style={{ display: 'flex', gap: 10 }}>
+          <div style={{ flex: 1 }}>
+            <Field
+              label={`« Encore là » après commande : ${e.presence_order_window_min ?? 60} min`}
+              hint="Boisson ou bouteille commandée"
+            >
+              <input
+                type="range"
+                min={15}
+                max={120}
+                step={5}
+                value={e.presence_order_window_min ?? 60}
+                onChange={(ev) => setE({ ...e, presence_order_window_min: Number(ev.target.value) })}
+                style={{ width: '100%', accentColor: C.indigo }}
+              />
+            </Field>
+          </div>
+          <div style={{ flex: 1 }}>
+            <Field
+              label={`« Encore là » sans commande : ${e.presence_scan_window_min ?? 30} min`}
+              hint="Simple usage de l’outil"
+            >
+              <input
+                type="range"
+                min={10}
+                max={60}
+                step={5}
+                value={e.presence_scan_window_min ?? 30}
+                onChange={(ev) => setE({ ...e, presence_scan_window_min: Number(ev.target.value) })}
+                style={{ width: '100%', accentColor: C.indigo }}
+              />
+            </Field>
+          </div>
+        </div>
         <Field label="Message d'accueil">
           <input
             style={S.input}

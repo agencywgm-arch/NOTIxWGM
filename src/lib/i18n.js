@@ -103,6 +103,7 @@ export const T = {
 
     // Navigation
     backHome: 'Retour à l’accueil',
+    backToTop: 'Remonter en haut',
     back: 'Retour',
     tabMenu: 'La carte',
     tabOrders: 'Mes commandes',
@@ -146,6 +147,7 @@ export const T = {
     creditsIntroHow:
       'Ils se déduisent tout seuls quand vous ajoutez un article au panier. Rien à faire de plus.',
     creditsIntroCta: 'Voir la carte',
+    creditBadge: 'Avec vos crédits',
     myCredits: 'Mes crédits',
     nAvailable: (n) => `${n} disponible${s(n)}`,
     nCredits: (n) => `${n} crédit${s(n)}`,
@@ -196,10 +198,12 @@ export const T = {
     validateOrder: 'Valider la commande',
     notePlaceholder: 'Sans glace, peu sucré, allergie…',
     checkingCode: (c) => `Vérification du code ${c}…`,
+    creditsLeftAfter: (n) =>
+      n > 0
+        ? `Il vous restera ${n} crédit${n > 1 ? 's' : ''} après cette commande.`
+        : 'Vos crédits seront épuisés après cette commande.',
     codeApplied: (c, v) => `Code ${c} — réduction de ${v} appliquée ci-dessous.`,
     codeInvalid: (c) => `Code ${c} invalide, expiré, épuisé ou panier insuffisant pour ce code.`,
-    walletCovered: (v, n) =>
-      `🎟️ Forfait : ${v} couverts par votre portefeuille — il vous restera ${n} crédit${s(n)} après cette commande.`,
     readyIn: (min) => `Prête dans environ ${min} min.`,
     pickup5:
       'Merci de récupérer votre commande dans les 5 minutes une fois prête — elle reste due même si elle n’est pas retirée.',
@@ -351,6 +355,7 @@ export const T = {
       'An order from a previous night was left unpaid. Please settle it with the bar — the team will help you.',
 
     backHome: 'Back to home',
+    backToTop: 'Back to top',
     back: 'Back',
     tabMenu: 'Menu',
     tabOrders: 'My orders',
@@ -390,6 +395,7 @@ export const T = {
     creditsIntroHow:
       'They come off on their own when you add an item to your cart. Nothing else to do.',
     creditsIntroCta: 'See the menu',
+    creditBadge: 'With your credits',
     myCredits: 'My credits',
     nAvailable: (n) => `${n} available`,
     nCredits: (n) => `${n} credit${s(n)}`,
@@ -437,10 +443,12 @@ export const T = {
     validateOrder: 'Confirm your order',
     notePlaceholder: 'No ice, less sugar, allergy…',
     checkingCode: (c) => `Checking code ${c}…`,
+    creditsLeftAfter: (n) =>
+      n > 0
+        ? `You will have ${n} credit${n > 1 ? 's' : ''} left after this order.`
+        : 'Your credits will be used up after this order.',
     codeApplied: (c, v) => `Code ${c} — ${v} discount applied below.`,
     codeInvalid: (c) => `Code ${c} is invalid, expired, used up, or your cart is too small for it.`,
-    walletCovered: (v, n) =>
-      `🎟️ Pass: ${v} covered by your wallet — you will have ${n} credit${s(n)} left after this order.`,
     readyIn: (min) => `Ready in about ${min} min.`,
     pickup5:
       'Please collect your order within 5 minutes once it is ready — it remains due even if it is not collected.',
@@ -588,6 +596,7 @@ export const T = {
       'Un pedido de una noche anterior quedó sin pagar. Regularízalo en la barra — el equipo te ayudará.',
 
     backHome: 'Volver al inicio',
+    backToTop: 'Volver arriba',
     back: 'Volver',
     tabMenu: 'La carta',
     tabOrders: 'Mis pedidos',
@@ -627,6 +636,7 @@ export const T = {
     creditsIntroHow:
       'Se descuentan solos al añadir un artículo al carrito. No hay nada más que hacer.',
     creditsIntroCta: 'Ver la carta',
+    creditBadge: 'Con tus créditos',
     myCredits: 'Mis créditos',
     nAvailable: (n) => `${n} disponible${s(n)}`,
     nCredits: (n) => `${n} crédito${s(n)}`,
@@ -674,10 +684,12 @@ export const T = {
     validateOrder: 'Confirmar el pedido',
     notePlaceholder: 'Sin hielo, poco azúcar, alergia…',
     checkingCode: (c) => `Comprobando el código ${c}…`,
+    creditsLeftAfter: (n) =>
+      n > 0
+        ? `Te quedarán ${n} crédito${n > 1 ? 's' : ''} después de este pedido.`
+        : 'Tus créditos se agotarán después de este pedido.',
     codeApplied: (c, v) => `Código ${c} — descuento de ${v} aplicado abajo.`,
     codeInvalid: (c) => `Código ${c} no válido, caducado, agotado o carrito insuficiente.`,
-    walletCovered: (v, n) =>
-      `🎟️ Bono: ${v} cubiertos por tu monedero — te quedarán ${n} crédito${s(n)} tras este pedido.`,
     readyIn: (min) => `Listo en unos ${min} min.`,
     pickup5:
       'Recoge tu pedido en los 5 minutos siguientes a estar listo — se debe igualmente aunque no se recoja.',

@@ -197,3 +197,28 @@ export const phoneFR = (p) => {
   const local = d.startsWith('33') ? '0' + d.slice(2) : d
   return local.replace(/(\d{2})(?=\d)/g, '$1 ').trim()
 }
+
+/**
+ * Ramène un numéro FR saisi ou pré-rempli par le navigateur à un format
+ * unique : 10 chiffres commençant par 0 (ex. 0612345678).
+ *
+ * Retour terrain : « l'autofill est inconstant — parfois +33, parfois 06,
+ * parfois il supprime le zéro. » Ce n'est pas cosmétique : le téléphone est
+ * l'ANCRE D'IDENTITÉ de la fiche client (voir upsert_me), comparée en
+ * égalité stricte. +33612345678, 0612345678 et 612345678 désignent la même
+ * personne mais créeraient trois fiches distinctes si on les stockait tels
+ * quels — la personne perdrait ses crédits et son historique à la prochaine
+ * saisie qui tombe sur une variante différente.
+ *
+ * Gère : +33 / 0033 / 33 en préfixe international, le zéro initial manquant
+ * (le bug observé), et les espaces/points/tirets de mise en forme. Un numéro
+ * qui ne ressemble à aucun de ces formats est renvoyé tel quel, chiffres
+ * seuls — mieux vaut une valeur inhabituelle que masquer un vrai problème.
+ */
+export const normalizePhoneFR = (p) => {
+  let d = String(p || '').replace(/\D/g, '')
+  if (d.startsWith('0033')) d = d.slice(4)
+  else if (d.startsWith('33') && d.length === 11) d = d.slice(2)
+  if (d.length === 9 && !d.startsWith('0')) d = '0' + d
+  return d
+}
