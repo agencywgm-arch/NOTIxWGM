@@ -69,7 +69,8 @@ Deno.serve(async (req) => {
     .maybeSingle()
   if (!attendance) return json({ error: 'forbidden' }, 403)
 
-  const { data: rateOk } = await caller.rpc('assistant_rate_ok', { p_event: eventId, p_customer: customerId })
+  // Le client est déduit de la session côté base (0033), pas transmis ici.
+  const { data: rateOk } = await caller.rpc('assistant_rate_ok', { p_event: eventId })
   if (rateOk === false) {
     return json({ error: 'rate_limited' }, 429)
   }
@@ -146,10 +147,27 @@ Deno.serve(async (req) => {
     orderLines || 'Aucune commande pour le moment.',
   ].join('\n')
 
-  const priorTurns = (history ?? [])
-    .slice()
-    .reverse()
-    .map((m: { role: string; content: string }) => ({ role: m.role as 'user' | 'assistant', content: m.content }))
+  // L'historique remonte en ordre décroissant : on le remet à l'endroit, puis
+  // on le NORMALISE avant de l'envoyer. L'API exige un premier message
+  // « user » et des rôles alternés ; les lignes sont écrites par paires, mais
+  // il suffirait d'une paire tronquée (écriture partielle, ligne supprimée à
+  // la main) pour que toutes les conversations suivantes de ce client
+  // échouent sur une erreur illisible. On répare ici plutôt que d'espérer.
+  const priorTurns: Array<{ role: 'user' | 'assistant'; content: string }> = []
+  for (const m of (history ?? []).slice().reverse()) {
+    const role = m.role === 'assistant' ? 'assistant' : 'user'
+    const content = (m.content ?? '').trim()
+    if (!content) continue
+    if (priorTurns.length === 0 && role !== 'user') continue
+    if (priorTurns.length > 0 && priorTurns[priorTurns.length - 1].role === role) {
+      priorTurns[priorTurns.length - 1].content += `\n\n${content}`
+      continue
+    }
+    priorTurns.push({ role, content })
+  }
+  // Le tour courant est un « user » : l'historique doit se terminer sur une
+  // réponse de l'assistant, sinon deux « user » se suivraient.
+  if (priorTurns.length > 0 && priorTurns[priorTurns.length - 1].role === 'user') priorTurns.pop()
 
   try {
     const response = await anthropic.beta.messages.create({

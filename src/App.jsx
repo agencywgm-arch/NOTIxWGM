@@ -2016,7 +2016,6 @@ function OrderingApp({
   const ordersClosed = Boolean(event) && (!event.is_active || !event.accept_orders)
   const blocked = Boolean(readyOrder) || ordersClosed
   const activeOrders = orders.filter((o) => ['RECEIVED', 'IN_PREP', 'READY'].includes(o.status))
-  const pendingPayment = orders.filter((o) => ['PICKED_UP', 'UNPAID'].includes(o.status))
 
   // ---- Catalogue ----------------------------------------------------------
   const universesAvailable = useMemo(
@@ -2845,6 +2844,12 @@ function AssistantSheet({ open, event, lang, customer, onClose }) {
       const { data, error } = await supabase.functions.invoke('client-assistant', {
         body: { eventId: event.id, message: text, lang },
       })
+      // Trop de questions d'affilée : ce n'est pas une panne, et le dire
+      // évite au client de croire que l'outil est cassé.
+      if (data?.error === 'rate_limited') {
+        setMessages((m) => [...m, { role: 'assistant', content: t.assistantSlowDown }])
+        return
+      }
       if (error || !data?.reply) throw error || new Error('empty')
       setMessages((m) => [...m, { role: 'assistant', content: data.reply }])
     } catch {
@@ -6686,6 +6691,8 @@ function CaisseTab({ event, venue, showToast }) {
   }, [visible])
 
   const selectedOrders = orders.filter((o) => selected.includes(o.id))
+  const visibleIds = new Set(visible.map((o) => o.id))
+  const hiddenSelected = selectedOrders.filter((o) => !visibleIds.has(o.id)).length
   const selectedTotal = selectedOrders.reduce((s, o) => s + Number(o.total || 0), 0)
   // Consos déjà payées par un crédit : elles ne sont PAS à encaisser, mais le
   // bar doit pouvoir rapprocher sa caisse de ce qui est sorti du stock.
@@ -6939,6 +6946,22 @@ function CaisseTab({ event, venue, showToast }) {
               {eur(selectedTotal)}
             </div>
           </div>
+          {/* La recherche peut masquer une commande déjà cochée : sans ce
+              rappel, on encaisserait plus que ce qu'on a sous les yeux. On
+              garde la sélection (cocher deux tickets via deux recherches
+              successives est utile au comptoir), mais on le dit. */}
+          {hiddenSelected > 0 && (
+            <div style={{ fontSize: 11.5, color: C.terracotta, marginBottom: 10, lineHeight: 1.45 }}>
+              Dont {hiddenSelected} commande{hiddenSelected > 1 ? 's' : ''} masquée
+              {hiddenSelected > 1 ? 's' : ''} par la recherche.{' '}
+              <button
+                onClick={() => setQ('')}
+                style={{ background: 'none', border: 'none', padding: 0, color: C.indigo, cursor: 'pointer', fontSize: 11.5, textDecoration: 'underline' }}
+              >
+                Tout afficher
+              </button>
+            </div>
+          )}
           <button onClick={() => setPayOpen(true)} style={{ ...S.btn, minHeight: 48 }}>
             Marquer réglé
           </button>
@@ -6946,6 +6969,15 @@ function CaisseTab({ event, venue, showToast }) {
       )}
 
       <Sheet open={payOpen} onClose={() => setPayOpen(false)} title="Encaissement">
+        {hiddenSelected > 0 && (
+          <div style={{ marginBottom: 14 }}>
+            <Banner tone="danger">
+              Attention : {hiddenSelected} des {selected.length} commandes sélectionnées{' '}
+              {hiddenSelected > 1 ? 'sont masquées' : 'est masquée'} par la recherche en cours. Le
+              total ci-dessous les inclut.
+            </Banner>
+          </div>
+        )}
         <div style={{ marginBottom: 16 }}>
           <Banner tone="info">
             Total encaissé au bar : <strong>{eur(selectedTotal)}</strong>. Noti Calling ne traite
