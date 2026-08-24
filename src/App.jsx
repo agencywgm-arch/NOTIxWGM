@@ -1744,6 +1744,7 @@ function OrderingApp({
   const [pushOn, setPushOn] = useState(false)
   const [reviewFor, setReviewFor] = useState(null)
   const [profileOpen, setProfileOpen] = useState(false)
+  const [assistantOpen, setAssistantOpen] = useState(false)
   const profileIncomplete =
     !customer?.email || !customer?.instagram || !customer?.postal_code || !customer?.birthdate
   const [pass, setPass] = useState(null)
@@ -2256,6 +2257,24 @@ function OrderingApp({
               </select>
             )}
             <button
+              onClick={() => setAssistantOpen(true)}
+              title={t.assistantOpen}
+              style={{
+                ...S.chip,
+                width: 40,
+                minHeight: 0,
+                height: 40,
+                padding: 0,
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                fontSize: 16,
+                borderColor: C.lineHi,
+              }}
+            >
+              💬
+            </button>
+            <button
               onClick={() => setProfileOpen(true)}
               title={t.myAccount}
               style={{
@@ -2716,7 +2735,143 @@ function OrderingApp({
           showToast(t.reviewThanks, 'ok')
         }}
       />
+
+      <AssistantSheet
+        open={assistantOpen}
+        event={event}
+        lang={lang}
+        customer={customer}
+        onClose={() => setAssistantOpen(false)}
+      />
     </div>
+  )
+}
+
+/**
+ * Assistant IA côté client — retour terrain : « un agent copilote pour les
+ * clients qui ont des questions pour commande ou besoin d'aide ». Le
+ * contexte (carte, commandes, crédits) est reconstruit côté serveur par
+ * l'Edge Function client-assistant ; ici on ne fait que discuter.
+ */
+function AssistantSheet({ open, event, lang, customer, onClose }) {
+  const t = useT(lang)
+  const [messages, setMessages] = useState([])
+  const [loaded, setLoaded] = useState(false)
+  const [input, setInput] = useState('')
+  const [sending, setSending] = useState(false)
+  const listRef = useRef(null)
+
+  useEffect(() => {
+    if (!open || !event?.id || !customer?.id) return
+    let cancelled = false
+    setLoaded(false)
+    ;(async () => {
+      const { data } = await supabase
+        .from('client_assistant_messages')
+        .select('role, content')
+        .eq('event_id', event.id)
+        .eq('customer_id', customer.id)
+        .order('created_at', { ascending: true })
+        .limit(40)
+      if (!cancelled) {
+        setMessages(data || [])
+        setLoaded(true)
+      }
+    })()
+    return () => {
+      cancelled = true
+    }
+  }, [open, event?.id, customer?.id])
+
+  useEffect(() => {
+    if (!listRef.current) return
+    listRef.current.scrollTo({ top: listRef.current.scrollHeight, behavior: 'smooth' })
+  }, [messages, sending])
+
+  async function send() {
+    const text = input.trim()
+    if (!text || sending) return
+    setInput('')
+    setMessages((m) => [...m, { role: 'user', content: text }])
+    setSending(true)
+    try {
+      const { data, error } = await supabase.functions.invoke('client-assistant', {
+        body: { eventId: event.id, message: text, lang },
+      })
+      if (error || !data?.reply) throw error || new Error('empty')
+      setMessages((m) => [...m, { role: 'assistant', content: data.reply }])
+    } catch {
+      // §18 : jamais d'erreur technique au client — un message de repli,
+      // dans le fil, qui pointe vers un humain.
+      setMessages((m) => [...m, { role: 'assistant', content: t.assistantError }])
+    } finally {
+      setSending(false)
+    }
+  }
+
+  return (
+    <Sheet open={open} onClose={onClose} title={t.assistantTitle} lang={lang}>
+      <div
+        ref={listRef}
+        style={{
+          display: 'flex',
+          flexDirection: 'column',
+          gap: 10,
+          maxHeight: '50vh',
+          overflowY: 'auto',
+          marginBottom: 14,
+          paddingRight: 2,
+        }}
+      >
+        {loaded && messages.length === 0 && (
+          <div style={{ fontSize: 13.5, color: C.dim, lineHeight: 1.5 }}>{t.assistantIntro}</div>
+        )}
+        {messages.map((m, i) => (
+          <div
+            key={i}
+            style={{
+              alignSelf: m.role === 'user' ? 'flex-end' : 'flex-start',
+              maxWidth: '85%',
+              background: m.role === 'user' ? C.terracotta : C.paper,
+              color: m.role === 'user' ? '#fff' : C.text,
+              border: m.role === 'user' ? 'none' : `1px solid ${C.line}`,
+              borderRadius: 14,
+              padding: '9px 12px',
+              fontSize: 13.5,
+              lineHeight: 1.45,
+              whiteSpace: 'pre-wrap',
+            }}
+          >
+            {m.content}
+          </div>
+        ))}
+        {sending && (
+          <div style={{ alignSelf: 'flex-start', fontSize: 12, color: C.faint, fontStyle: 'italic' }}>
+            {t.assistantThinking}
+          </div>
+        )}
+      </div>
+
+      <div style={{ display: 'flex', gap: 8 }}>
+        <input
+          value={input}
+          onChange={(e) => setInput(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === 'Enter') send()
+          }}
+          placeholder={t.assistantPlaceholder}
+          maxLength={600}
+          style={{ ...S.input, flex: 1 }}
+        />
+        <button
+          onClick={send}
+          disabled={!input.trim() || sending}
+          style={{ ...S.btn, width: 'auto', padding: '0 18px', opacity: !input.trim() || sending ? 0.5 : 1 }}
+        >
+          {t.assistantSend}
+        </button>
+      </div>
+    </Sheet>
   )
 }
 
@@ -6191,6 +6346,11 @@ function CaisseTab({ event, venue, showToast }) {
   const [selected, setSelected] = useState([])
   const [payOpen, setPayOpen] = useState(false)
   const [showPaid, setShowPaid] = useState(false)
+  // Retour terrain : même recherche (nom, téléphone, code de retrait) qu'en
+  // Clients, mais ici pour retrouver une commande à encaisser sans dérouler
+  // toute la liste — et accéder à la fiche client sans changer d'onglet.
+  const [q, setQ] = useState('')
+  const [ficheFor, setFicheFor] = useState(null)
   // Retour terrain 6.4 : « le montant encaissé doit inclure l'argent entré
   // grâce à l'outil » — détenir le code d'entrée du jour vaut avoir payé,
   // donc son activation alimente ce total sans passer par une commande.
@@ -6231,7 +6391,13 @@ function CaisseTab({ event, venue, showToast }) {
     return () => supabase.removeChannel(ch)
   }, [event.id, load, loadEntries])
 
-  const visible = orders.filter((o) => (showPaid ? true : o.status !== 'PAID'))
+  const needle = q.trim().toLowerCase()
+  const visible = orders.filter((o) => {
+    if (!showPaid && o.status === 'PAID') return false
+    if (!needle) return true
+    const identity = `${o.customers?.first_name || ''} ${o.customers?.last_name || ''} ${o.customers?.phone || ''} ${o.pickup_code || ''}`.toLowerCase()
+    return identity.includes(needle)
+  })
 
   const byCustomer = useMemo(() => {
     const map = new Map()
@@ -6332,6 +6498,13 @@ function CaisseTab({ event, venue, showToast }) {
         </div>
       )}
 
+      <input
+        style={{ ...S.input, marginBottom: 10 }}
+        value={q}
+        onChange={(e) => setQ(e.target.value)}
+        placeholder="Nom, prénom, téléphone ou code de retrait…"
+      />
+
       <button
         onClick={() => setShowPaid((v) => !v)}
         style={{ ...S.btnGhost, minHeight: 42, fontSize: 12, marginBottom: 14 }}
@@ -6339,7 +6512,9 @@ function CaisseTab({ event, venue, showToast }) {
         {showPaid ? 'Masquer les commandes réglées' : 'Afficher aussi les réglées'}
       </button>
 
-      {byCustomer.length === 0 && <Empty emoji="🧾" title="Rien à encaisser" />}
+      {byCustomer.length === 0 && (
+        <Empty emoji="🧾" title={needle ? 'Aucune commande ne correspond' : 'Rien à encaisser'} />
+      )}
 
       {byCustomer.map(([cid, list]) => {
         const c = list[0].customers
@@ -6353,14 +6528,26 @@ function CaisseTab({ event, venue, showToast }) {
         return (
           <div key={cid} style={{ ...S.card, padding: 14, marginBottom: 12 }}>
             <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 10 }}>
-              <div>
+              <button
+                onClick={() => setFicheFor(cid)}
+                disabled={!cid}
+                style={{
+                  background: 'none',
+                  border: 'none',
+                  padding: 0,
+                  textAlign: 'left',
+                  cursor: cid ? 'pointer' : 'default',
+                  color: C.text,
+                }}
+              >
                 <div style={{ fontWeight: 500, fontSize: 15 }}>
                   {c?.first_name} {c?.last_name}
                 </div>
-                <div style={{ fontSize: 11.5, color: C.faint, marginTop: 2 }}>
+                <div style={{ fontSize: 11.5, color: cid ? C.indigo : C.faint, marginTop: 2 }}>
                   {list.length} commande{list.length > 1 ? 's' : ''}
+                  {cid ? ' · Voir la fiche ›' : ''}
                 </div>
-              </div>
+              </button>
               <div style={{ textAlign: 'right' }}>
                 <div style={{ ...S.money, fontWeight: 600, fontSize: 18, color: C.terracotta }}>
                   {eur(tot)}
@@ -6544,6 +6731,14 @@ function CaisseTab({ event, venue, showToast }) {
           ))}
         </div>
       </Sheet>
+
+      <ClientFicheSheet
+        customerId={ficheFor}
+        event={event}
+        onClose={() => setFicheFor(null)}
+        onChanged={load}
+        showToast={showToast}
+      />
     </div>
   )
 }
@@ -6572,22 +6767,35 @@ function AffluenceCard({ pulse, slots }) {
   const toneLabel =
     pct == null ? null : pct >= 90 ? 'Salle pleine' : pct >= 70 ? 'Bien remplie' : 'De la place'
 
-  // Douze dernières tranches de 15 min, y compris celles sans arrivée : sans
-  // ça, une accalmie disparaîtrait de la courbe au lieu de s'y voir.
-  const bars = useMemo(() => {
-    const now = Date.now()
+  // Courbe cumulée depuis le début de la soirée (une tranche de 15 min, y
+  // compris celles sans arrivée : sans ça, une accalmie disparaîtrait de la
+  // courbe au lieu de s'y voir). Retour terrain : « la jauge d'entrée en
+  // courbe statistique » — le total qui monte au fil de la soirée, pas
+  // seulement le rythme des 3 dernières heures.
+  const cumBars = useMemo(() => {
+    if (!slots || slots.length === 0) return []
     const step = 15 * 60 * 1000
+    const now = Date.now()
     const currentSlot = Math.floor(now / step) * step
     const bySlot = Object.fromEntries(
       (slots || []).map((s) => [Math.floor(new Date(s.slot).getTime() / step) * step, Number(s.people) || 0])
     )
-    return Array.from({ length: 12 }, (_, i) => {
-      const t = currentSlot - (11 - i) * step
-      return { t, people: bySlot[t] || 0 }
-    })
+    const firstSlot = Math.min(...Object.keys(bySlot).map(Number))
+    // Plafonné à 18h de soirée : au-delà, une courbe reste lisible sans
+    // afficher des centaines de points inutiles.
+    const maxSpan = 72
+    const start = Math.max(firstSlot, currentSlot - (maxSpan - 1) * step)
+    let cum = 0
+    for (const t of Object.keys(bySlot).map(Number)) {
+      if (t < start) cum += bySlot[t]
+    }
+    const out = []
+    for (let t = start; t <= currentSlot; t += step) {
+      cum += bySlot[t] || 0
+      out.push({ t, cum })
+    }
+    return out
   }, [slots])
-
-  const peak = Math.max(1, ...bars.map((b) => b.people))
 
   return (
     <div style={{ ...S.card, marginBottom: 14 }}>
@@ -6655,27 +6863,90 @@ function AffluenceCard({ pulse, slots }) {
         </div>
       </div>
 
-      <div style={{ ...S.label, marginBottom: 8 }}>Arrivées · 3 dernières heures</div>
-      <div style={{ display: 'flex', alignItems: 'flex-end', gap: 4, height: 64 }}>
-        {bars.map((b) => (
-          <div key={b.t} style={{ flex: 1, display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 4 }}>
-            <div
-              title={`${b.people} personne(s) à ${timeFR(new Date(b.t).toISOString())}`}
-              style={{
-                width: '100%',
-                height: `${Math.max(3, (b.people / peak) * 48)}px`,
-                borderRadius: 4,
-                background: b.people > 0 ? C.indigo : 'rgba(28,42,74,.10)',
-                transition: 'height .5s ease',
-              }}
-            />
-            <div style={{ fontSize: 8.5, color: C.faint, whiteSpace: 'nowrap' }}>
-              {new Date(b.t).getMinutes() === 0 ? timeFR(new Date(b.t).toISOString()) : ''}
-            </div>
-          </div>
-        ))}
-      </div>
+      <div style={{ ...S.label, marginBottom: 8 }}>Entrées cumulées</div>
+      <AffluenceCurveChart bars={cumBars} capacity={capacity} />
     </div>
+  )
+}
+
+/** Courbe lisse des entrées cumulées depuis le début de la soirée (SVG, sans lib). */
+function AffluenceCurveChart({ bars, capacity }) {
+  const W = 300
+  const H = 92
+  const padTop = 10
+  const padBottom = 18
+  const plotH = H - padTop - padBottom
+
+  if (!bars || bars.length < 2) {
+    return (
+      <div style={{ height: H, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+        <span style={{ fontSize: 11.5, color: C.faint }}>Pas encore assez de données pour la courbe.</span>
+      </div>
+    )
+  }
+
+  const maxVal = Math.max(capacity || 0, ...bars.map((b) => b.cum), 1)
+  const x = (i) => (i / (bars.length - 1)) * W
+  const y = (v) => padTop + plotH - (v / maxVal) * plotH
+
+  // Lissage Catmull-Rom → Bézier cubique : une courbe qui passe par chaque
+  // point, sans les segments droits d'une simple polyligne.
+  const pts = bars.map((b, i) => [x(i), y(b.cum)])
+  let line = `M ${pts[0][0]} ${pts[0][1]}`
+  for (let i = 0; i < pts.length - 1; i++) {
+    const p0 = pts[i - 1] || pts[i]
+    const p1 = pts[i]
+    const p2 = pts[i + 1]
+    const p3 = pts[i + 2] || p2
+    const c1x = p1[0] + (p2[0] - p0[0]) / 6
+    const c1y = p1[1] + (p2[1] - p0[1]) / 6
+    const c2x = p2[0] - (p3[0] - p1[0]) / 6
+    const c2y = p2[1] - (p3[1] - p1[1]) / 6
+    line += ` C ${c1x} ${c1y}, ${c2x} ${c2y}, ${p2[0]} ${p2[1]}`
+  }
+  const area = `${line} L ${pts[pts.length - 1][0]} ${padTop + plotH} L ${pts[0][0]} ${padTop + plotH} Z`
+
+  const last = bars[bars.length - 1]
+  const step = Math.max(1, Math.floor(bars.length / 4))
+
+  return (
+    <svg viewBox={`0 0 ${W} ${H}`} width="100%" height={H} preserveAspectRatio="none" style={{ overflow: 'visible' }}>
+      <defs>
+        <linearGradient id="affluenceFill" x1="0" y1="0" x2="0" y2="1">
+          <stop offset="0%" stopColor={C.indigo} stopOpacity="0.22" />
+          <stop offset="100%" stopColor={C.indigo} stopOpacity="0" />
+        </linearGradient>
+      </defs>
+
+      {[0.25, 0.5, 0.75].map((f) => (
+        <line key={f} x1={0} x2={W} y1={padTop + plotH * (1 - f)} y2={padTop + plotH * (1 - f)}
+          stroke="rgba(28,42,74,.08)" strokeWidth={1} />
+      ))}
+
+      {capacity > 0 && (
+        <line x1={0} x2={W} y1={y(capacity)} y2={y(capacity)} stroke={C.terracotta} strokeWidth={1}
+          strokeDasharray="3 3" opacity={0.6} />
+      )}
+
+      <path d={area} fill="url(#affluenceFill)" stroke="none" />
+      <path d={line} fill="none" stroke={C.indigo} strokeWidth={2} strokeLinecap="round" strokeLinejoin="round" />
+
+      <circle cx={pts[pts.length - 1][0]} cy={pts[pts.length - 1][1]} r={3.5} fill={C.indigo} />
+
+      {bars.map((b, i) =>
+        i % step === 0 || i === bars.length - 1 ? (
+          <text key={b.t} x={Math.min(Math.max(x(i), 12), W - 12)} y={H - 3} fontSize={8.5}
+            fill={C.faint} textAnchor="middle">
+            {timeFR(new Date(b.t).toISOString())}
+          </text>
+        ) : null
+      )}
+
+      <text x={pts[pts.length - 1][0]} y={Math.max(10, pts[pts.length - 1][1] - 8)} fontSize={10.5}
+        fontWeight={600} fill={C.indigo} textAnchor="end">
+        {last.cum}
+      </text>
+    </svg>
   )
 }
 

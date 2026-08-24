@@ -105,6 +105,15 @@ export const T = {
     backHome: 'Retour à l’accueil',
     backToTop: 'Remonter en haut',
     back: 'Retour',
+
+    // Assistant
+    assistantOpen: 'Besoin d’aide ?',
+    assistantTitle: 'Assistant Noti',
+    assistantIntro: 'Une question sur la carte, votre commande ou vos crédits ? Je suis là.',
+    assistantPlaceholder: 'Écrivez votre question…',
+    assistantSend: 'Envoyer',
+    assistantThinking: 'Réponse en cours…',
+    assistantError: 'L’assistant est momentanément indisponible. Un membre de l’équipe peut vous aider via Messages.',
     tabMenu: 'La carte',
     tabOrders: 'Mes commandes',
     tabMessages: 'Messages',
@@ -357,6 +366,15 @@ export const T = {
     backHome: 'Back to home',
     backToTop: 'Back to top',
     back: 'Back',
+
+    // Assistant
+    assistantOpen: 'Need help?',
+    assistantTitle: 'Noti Assistant',
+    assistantIntro: 'A question about the menu, your order, or your credits? I’m here.',
+    assistantPlaceholder: 'Type your question…',
+    assistantSend: 'Send',
+    assistantThinking: 'Thinking…',
+    assistantError: 'The assistant is briefly unavailable. A team member can help you via Messages.',
     tabMenu: 'Menu',
     tabOrders: 'My orders',
     tabMessages: 'Messages',
@@ -598,6 +616,15 @@ export const T = {
     backHome: 'Volver al inicio',
     backToTop: 'Volver arriba',
     back: 'Volver',
+
+    // Asistente
+    assistantOpen: '¿Necesitas ayuda?',
+    assistantTitle: 'Asistente Noti',
+    assistantIntro: '¿Una pregunta sobre la carta, tu pedido o tus créditos? Estoy aquí.',
+    assistantPlaceholder: 'Escribe tu pregunta…',
+    assistantSend: 'Enviar',
+    assistantThinking: 'Respondiendo…',
+    assistantError: 'El asistente no está disponible por el momento. Un miembro del equipo puede ayudarte en Mensajes.',
     tabMenu: 'La carta',
     tabOrders: 'Mis pedidos',
     tabMessages: 'Mensajes',
