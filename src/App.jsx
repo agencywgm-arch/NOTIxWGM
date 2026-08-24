@@ -1866,15 +1866,20 @@ function OrderingApp({
     const gift = await supabase.rpc('redeem_gift_code', { p_event: event.id, p_code: code })
     if (!gift.error) {
       await loadGifts()
-      return { kind: 'gift', info: gift.data }
+      // `already` = quota individuel épuisé, rien n'a été recrédité. Le
+      // serveur le disait déjà ; on affichait « Crédits ajoutés » quand même.
+      return { kind: 'gift', already: gift.data?.already === true, info: gift.data }
     }
     if (!String(gift.error.message || '').includes('invalid_gift_code')) throw gift.error
 
-    // 2. Forfait de groupe à crédits
+    // 2. Forfait de groupe à crédits. Depuis 0034, un code invalide lève bien
+    //    `invalid_pass_code` même quand un forfait existe déjà — avant, il
+    //    renvoyait le forfait en place, donc un faux succès.
+    const hadPass = Boolean(pass?.id)
     const { data, error } = await supabase.rpc('redeem_pass', { p_event: event.id, p_code: code })
     if (!error) {
       setPass(data)
-      return { kind: 'credits' }
+      return { kind: 'credits', already: hadPass }
     }
     if (!String(error.message || '').includes('invalid_pass_code')) throw error
 
@@ -2948,11 +2953,23 @@ function ProductCard({ product, lang, disabled, onAdd, creditEligible = false })
         background: out ? 'rgba(28,42,74,.03)' : C.paper,
       }}
     >
+      {/* `cover` recadrait l'illustration pour remplir le carré : sur des
+          icônes verticales (une bouteille), le goulot et le culot passaient
+          à la trappe. `contain` garde le dessin entier, et le fond crème
+          occupe la place restante au lieu de laisser un trou blanc. */}
       {product.image_url && (
         <img
           src={product.image_url}
           alt=""
-          style={{ width: 68, height: 68, borderRadius: 14, objectFit: 'cover', flexShrink: 0 }}
+          style={{
+            width: 68,
+            height: 68,
+            borderRadius: 14,
+            objectFit: 'contain',
+            background: C.creamSoft,
+            padding: 6,
+            flexShrink: 0,
+          }}
         />
       )}
 
@@ -3108,7 +3125,9 @@ function ProductSheet({ product, lang, onClose, onConfirm }) {
           style={{
             width: '100%',
             height: 190,
-            objectFit: 'cover',
+            objectFit: 'contain',
+            background: C.creamSoft,
+            padding: 12,
             borderRadius: 16,
             marginTop: -8,
             marginBottom: 16,
@@ -3438,13 +3457,17 @@ function PromoCodeCard({ lang, pass, gifts, promoCode, onRedeemCode, onClearCode
                     const res = await onRedeemCode(code.trim())
                     setCode('')
                     setOpen(false)
+                    // Une ressaisie n'ajoute rien : le dire, plutôt que
+                    // d'annoncer des crédits qui n'ont pas bougé.
                     showToast(
-                      res.kind === 'gift'
-                        ? t.creditsAdded
-                        : res.kind === 'credits'
-                          ? t.passActivated
-                          : t.codeActivated,
-                      'ok'
+                      res.already
+                        ? t.codeAlreadyUsed
+                        : res.kind === 'gift'
+                          ? t.creditsAdded
+                          : res.kind === 'credits'
+                            ? t.passActivated
+                            : t.codeActivated,
+                      res.already ? 'info' : 'ok'
                     )
                   } catch (e) {
                     showToast(clientError(e, lang), 'error')
@@ -9911,7 +9934,11 @@ function ProductEditor({ product, venue, subcats, onClose, onSaved, showToast })
       <Field label="Photo">
         <div style={{ display: 'flex', gap: 10, alignItems: 'center' }}>
           {f.image_url && (
-            <img src={f.image_url} alt="" style={{ width: 52, height: 52, borderRadius: 12, objectFit: 'cover' }} />
+            <img
+              src={f.image_url}
+              alt=""
+              style={{ width: 52, height: 52, borderRadius: 12, objectFit: 'contain', background: C.creamSoft, padding: 4 }}
+            />
           )}
           <button onClick={() => fileRef.current?.click()} style={{ ...S.btnGhost, minHeight: 44, flex: 1, fontSize: 12 }}>
             {busy ? '…' : f.image_url ? 'Remplacer' : 'Ajouter'}
