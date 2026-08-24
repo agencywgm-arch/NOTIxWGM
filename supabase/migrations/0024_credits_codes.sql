@@ -495,17 +495,17 @@ begin
     if v_pass.id is not null and v_gift_left > 0 then
       if v_prod.credit_once and not v_pass.richard_used then
         v_wallet_cost := case when v_prod.credit_kind = 'alcohol' then 2 else 1 end;
-        if v_pass.quantity_remaining >= v_wallet_cost then
-          v_pass.quantity_remaining := v_pass.quantity_remaining - v_wallet_cost;
+        if v_pass.credits_remaining >= v_wallet_cost then
+          v_pass.credits_remaining := v_pass.credits_remaining - v_wallet_cost;
           v_pass.richard_used := true;
           v_credits_used := v_credits_used + v_wallet_cost;
           v_discount := v_discount + v_unit;
         end if;
       elsif v_prod.credit_kind in ('alcohol', 'soft') then
         v_wallet_cost := case when v_prod.credit_kind = 'alcohol' then 2 else 1 end;
-        v_wallet_units := least(v_gift_left, v_pass.quantity_remaining / v_wallet_cost);
+        v_wallet_units := least(v_gift_left, v_pass.credits_remaining / v_wallet_cost);
         if v_wallet_units > 0 then
-          v_pass.quantity_remaining := v_pass.quantity_remaining - v_wallet_units * v_wallet_cost;
+          v_pass.credits_remaining := v_pass.credits_remaining - v_wallet_units * v_wallet_cost;
           v_credits_used := v_credits_used + v_wallet_units * v_wallet_cost;
           v_discount := v_discount + v_wallet_units * v_unit;
         end if;
@@ -537,7 +537,7 @@ begin
 
   if v_pass.id is not null then
     update public.event_passes
-       set quantity_remaining    = v_pass.quantity_remaining,
+       set credits_remaining   = v_pass.credits_remaining,
            food_token_available = v_pass.food_token_available,
            richard_used         = v_pass.richard_used
      where id = v_pass.id;
@@ -579,8 +579,8 @@ begin
     -- Crédits de forfait et jeton food (comportement de 0020)
     if coalesce(old.credit_units_used, 0) > 0 or coalesce(old.food_token_used, false) then
       update public.event_passes
-         set quantity_remaining = least(quantity_total,
-                                       quantity_remaining + coalesce(old.credit_units_used, 0)),
+         set credits_remaining = least(credits_total,
+                                       credits_remaining + coalesce(old.credit_units_used, 0)),
              food_token_available = food_token_available or coalesce(old.food_token_used, false)
        where event_id = new.event_id and customer_id = new.customer_id;
 
