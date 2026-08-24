@@ -417,6 +417,7 @@ supabase link --project-ref VOTRE_REF_PROJET
 supabase functions deploy notify
 supabase functions deploy reminders --no-verify-jwt
 supabase functions deploy translate-menu
+supabase functions deploy client-assistant
 ```
 
 `reminders` est appelée par un cron, pas par un utilisateur : elle se protège elle-même avec
