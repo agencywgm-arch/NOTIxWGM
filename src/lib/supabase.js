@@ -47,6 +47,7 @@ const ERROR_KEYS = [
   'scan_point_orphan',
   'missing_profile',
   'missing_phone',
+  'invalid_phone',
   'phone_already_used',
   'missing_postal_code',
   'invalid_birthdate',

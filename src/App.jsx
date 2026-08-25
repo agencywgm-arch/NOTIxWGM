@@ -13,7 +13,7 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import QRCode from 'qrcode'
 import { supabase, isConfigured, frError, errorKey, BASE_PATH, scanUrl } from './lib/supabase.js'
-import { C, S, FONT, GRADIENT, eur, timeFR, dateFR, phoneFR, normalizePhoneFR } from './lib/theme.js'
+import { C, S, FONT, GRADIENT, eur, timeFR, dateFR, phoneFR, normalizePhone, isValidPhone } from './lib/theme.js'
 import { dict, useT, trProduct, LANG_LABEL } from './lib/i18n.js'
 import {
   canvasesToPdfBlob,
@@ -1509,6 +1509,9 @@ function IdentifyScreen({ lang, onVerified }) {
     setErr('')
     if (!firstName.trim() || !lastName.trim()) return setErr(t.errNames)
     if (!phone.trim()) return setErr(t.errPhone)
+    // La base refuse désormais un numéro illisible (0035) : on le dit ici,
+    // avec un exemple, plutôt que de laisser remonter une erreur serveur.
+    if (!isValidPhone(phone)) return setErr(t.errPhoneInvalid)
     if (!postalCode.trim()) return setErr(t.errPostal)
     if (!birthdate) return setErr(t.errBirth)
     if (!birthdateIsValid(birthdate)) return setErr(t.errBirthInvalid)
@@ -1523,7 +1526,7 @@ function IdentifyScreen({ lang, onVerified }) {
       const { error: e2 } = await supabase.rpc('upsert_me', {
         p_first_name: firstName.trim(),
         p_last_name: lastName.trim(),
-        p_phone: normalizePhoneFR(phone) || phone.trim(),
+        p_phone: normalizePhone(phone),
         p_postal_code: postalCode.trim(),
         p_birthdate: birthdate,
         p_email: email.trim() || null,
@@ -1589,7 +1592,7 @@ function IdentifyScreen({ lang, onVerified }) {
             type="tel"
             value={phone}
             onChange={(e) => setPhone(e.target.value)}
-            onBlur={() => setPhone((v) => normalizePhoneFR(v) || v)}
+            onBlur={() => setPhone((v) => normalizePhone(v) || v)}
             autoComplete="tel"
             placeholder="06 12 34 56 78"
           />
@@ -3669,6 +3672,7 @@ function ClientProfileSheet({
 
   async function save() {
     if (!phone.trim()) return showToast(t.errPhone, 'error')
+    if (!isValidPhone(phone)) return showToast(t.errPhoneInvalid, 'error')
     if (!postalCode.trim()) return showToast(t.errPostal, 'error')
     if (!birthdate) return showToast(t.errBirth, 'error')
     if (!birthdateIsValid(birthdate)) return showToast(t.errBirthInvalid, 'error')
@@ -3676,7 +3680,7 @@ function ClientProfileSheet({
     setBusy(true)
     try {
       const { error } = await supabase.rpc('update_my_optional_profile', {
-        p_phone: normalizePhoneFR(phone) || phone.trim(),
+        p_phone: normalizePhone(phone),
         p_postal_code: postalCode.trim(),
         p_birthdate: birthdate,
         p_email: email.trim() || '',
@@ -3797,7 +3801,7 @@ function ClientProfileSheet({
           type="tel"
           value={phone}
           onChange={(e) => setPhone(e.target.value)}
-          onBlur={() => setPhone((v) => normalizePhoneFR(v) || v)}
+          onBlur={() => setPhone((v) => normalizePhone(v) || v)}
           autoComplete="tel"
           placeholder="06 12 34 56 78"
         />

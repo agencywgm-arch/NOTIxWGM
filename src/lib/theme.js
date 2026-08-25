@@ -191,34 +191,94 @@ export const dateFR = (d) =>
     minute: '2-digit',
   }).format(new Date(d))
 
-/** Téléphone FR lisible : 06 12 34 56 78 */
+/**
+ * Téléphone lisible. Les numéros sont stockés en E.164 (+33612345678, voir
+ * 0035) ; on les rend respirables sans jamais les réécrire :
+ *   +33612345678 → +33 6 12 34 56 78
+ *   +34600123456 → +34 600 123 456   (étranger : groupes de 3)
+ *
+ * Une valeur illisible est renvoyée telle quelle plutôt que découpée
+ * n'importe comment — une coquille visible se corrige, une coquille
+ * maquillée en joli numéro ne se voit plus.
+ */
 export const phoneFR = (p) => {
-  const d = String(p || '').replace(/\D/g, '')
-  const local = d.startsWith('33') ? '0' + d.slice(2) : d
-  return local.replace(/(\d{2})(?=\d)/g, '$1 ').trim()
+  const raw = String(p || '').trim()
+  if (!raw) return ''
+
+  const e164 = normalizePhone(raw)
+  if (!e164) return raw
+
+  if (e164.startsWith('+33') && e164.length === 12) {
+    const n = e164.slice(3) // 9 chiffres : 612345678
+    return `+33 ${n[0]} ${n.slice(1, 3)} ${n.slice(3, 5)} ${n.slice(5, 7)} ${n.slice(7, 9)}`
+  }
+  // Étranger : indicatif à part, puis groupes de trois.
+  const cc = e164.slice(1, 3)
+  const rest = e164.slice(3)
+  return `+${cc} ${rest.replace(/(\d{3})(?=\d)/g, '$1 ')}`.trim()
 }
 
 /**
- * Ramène un numéro FR saisi ou pré-rempli par le navigateur à un format
- * unique : 10 chiffres commençant par 0 (ex. 0612345678).
+ * Ramène un numéro à E.164 : « +33612345678 ».
+ *
+ * MÊMES RÈGLES que public.normalize_phone() (migration 0035). La base fait
+ * désormais autorité — c'est elle qui garantit le format, y compris pour ce
+ * qui ne passe pas par ce navigateur. Cette version sert à l'affichage
+ * immédiat et à la validation avant envoi ; les deux doivent rester
+ * d'accord, sinon un numéro accepté à l'écran serait refusé au serveur.
  *
  * Retour terrain : « l'autofill est inconstant — parfois +33, parfois 06,
  * parfois il supprime le zéro. » Ce n'est pas cosmétique : le téléphone est
  * l'ANCRE D'IDENTITÉ de la fiche client (voir upsert_me), comparée en
  * égalité stricte. +33612345678, 0612345678 et 612345678 désignent la même
- * personne mais créeraient trois fiches distinctes si on les stockait tels
- * quels — la personne perdrait ses crédits et son historique à la prochaine
- * saisie qui tombe sur une variante différente.
+ * personne mais créeraient trois fiches distinctes.
  *
- * Gère : +33 / 0033 / 33 en préfixe international, le zéro initial manquant
- * (le bug observé), et les espaces/points/tirets de mise en forme. Un numéro
- * qui ne ressemble à aucun de ces formats est renvoyé tel quel, chiffres
- * seuls — mieux vaut une valeur inhabituelle que masquer un vrai problème.
+ * E.164 plutôt que « 06… » parce que c'est le format qu'attendent tous les
+ * opérateurs SMS : stocker autre chose obligerait à convertir au moment
+ * d'envoyer, donc à re-normaliser dans un troisième endroit.
+ *
+ * Renvoie null si la saisie n'est reconnaissable comme aucun format connu.
  */
-export const normalizePhoneFR = (p) => {
-  let d = String(p || '').replace(/\D/g, '')
-  if (d.startsWith('0033')) d = d.slice(4)
-  else if (d.startsWith('33') && d.length === 11) d = d.slice(2)
-  if (d.length === 9 && !d.startsWith('0')) d = '0' + d
-  return d
+export const normalizePhone = (p) => {
+  const raw = String(p ?? '').trim()
+  if (!raw) return null
+
+  // Un « + » ne compte que s'il ouvre le numéro.
+  const hasPlus = raw.startsWith('+') || raw.startsWith('0033')
+  const d = raw.replace(/\D/g, '')
+  if (!d) return null
+
+  // « 0033 6… » et « 0033 (0)6… » désignent le même numéro : même résultat.
+  if (d.startsWith('0033')) {
+    let n = d.slice(4)
+    if (n.length === 10 && n.startsWith('0')) n = n.slice(1)
+    return n.length === 9 && !n.startsWith('0') ? `+33${n}` : null
+  }
+  // Déjà international et non français : on n'y touche pas.
+  if (hasPlus && !d.startsWith('33')) {
+    return d.length >= 8 && d.length <= 15 ? `+${d}` : null
+  }
+  // +33 (0)6 12 34 56 78 — écriture très répandue. Le zéro entre parenthèses
+  // est une commodité de lecture, il ne fait pas partie du numéro composé.
+  let fr = d
+  if (fr.startsWith('330') && fr.length === 12) fr = '33' + fr.slice(3)
+
+  // En France, le chiffre qui suit le 0 de service va de 1 à 9 : « +330… »
+  // n'existe pas et trahit une saisie de test ou une coquille.
+  if (fr.startsWith('33') && fr.length === 11) {
+    return fr[2] === '0' ? null : `+33${fr.slice(2)}`
+  }
+  if (fr.length === 10 && fr.startsWith('0')) {
+    return fr[1] === '0' ? null : `+33${fr.slice(1)}`
+  }
+  // Le zéro initial que l'autofill escamote parfois.
+  if (fr.length === 9 && !fr.startsWith('0')) return `+33${fr}`
+
+  return null
 }
+
+/** Ancien nom, conservé le temps que les appels existants soient repris. */
+export const normalizePhoneFR = normalizePhone
+
+/** La saisie est-elle exploitable ? Sert à guider avant l'envoi. */
+export const isValidPhone = (p) => normalizePhone(p) !== null
