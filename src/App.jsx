@@ -302,6 +302,8 @@ const UNIVERSES = [
 ]
 
 const ORDER_STATUS = {
+  // Food en attente d'encaissement : le chrono n'a pas démarré (0036/0037).
+  AWAITING_PAYMENT: { label: 'En attente de règlement', short: 'À régler', color: C.warn, step: 0 },
   RECEIVED: { label: 'Reçue', short: 'Reçue', color: C.indigo, step: 1 },
   IN_PREP: { label: 'En préparation', short: 'En prépa', color: C.warn, step: 2 },
   READY: { label: 'Prête à retirer', short: 'Prête', color: C.terracotta, step: 3 },
@@ -404,6 +406,7 @@ const tr = trProduct
 // Libellés de statut côté client : mêmes étapes que ORDER_STATUS (qui reste en
 // français pour l'espace staff), traduites via le dictionnaire.
 const ST_KEY = {
+  AWAITING_PAYMENT: 'stAwaitingPayment',
   RECEIVED: 'stReceived',
   IN_PREP: 'stInPrep',
   READY: 'stReady',
@@ -412,7 +415,7 @@ const ST_KEY = {
   UNPAID: 'stUnpaid',
   CANCELLED: 'stCancelled',
 }
-const ST_SHORT_KEY = { ...ST_KEY, IN_PREP: 'stInPrepShort', READY: 'stReadyShort' }
+const ST_SHORT_KEY = { ...ST_KEY, IN_PREP: 'stInPrepShort', READY: 'stReadyShort', AWAITING_PAYMENT: 'stAwaitingPaymentShort' }
 
 const statusLabel = (st, lang, short = false) =>
   dict(lang)[(short ? ST_SHORT_KEY : ST_KEY)[st]] || ORDER_STATUS[st]?.label || st
@@ -1901,6 +1904,27 @@ function OrderingApp({
     setPromoCode('')
   }
 
+  /**
+   * Annulation par le client (note du 23/08, §2bis.2). L'arbitrage de la
+   * course avec le staff est fait par le serveur (cancel_my_order) : ici on
+   * se contente de traduire son verdict. `already_in_prep` n'est pas une
+   * panne — c'est le staff qui a gagné la course, et le client doit le
+   * comprendre plutôt que de voir une erreur.
+   */
+  async function cancelOrder(order) {
+    const { error } = await supabase.rpc('cancel_my_order', { p_order: order.id })
+    await loadOrders()
+    if (error) {
+      const inPrep = String(error.message || '').includes('already_in_prep')
+      showToast(inPrep ? t.cancelTooLate : clientError(error, lang), inPrep ? 'info' : 'error')
+      return
+    }
+    // Les crédits et cadeaux consommés sont rendus par le serveur : on
+    // resynchronise pour que le solde affiché redevienne juste.
+    await Promise.all([loadPass(), loadGifts()])
+    showToast(t.cancelDone, 'ok')
+  }
+
   // ---- Chargement ---------------------------------------------------------
   const loadOrders = useCallback(async () => {
     const { data } = await supabase
@@ -1960,6 +1984,15 @@ function OrderingApp({
   // repli dès que ce cas est détecté, pour que « pas de push » ne veuille
   // jamais dire « pas de mise à jour ».
   const [realtimeDown, setRealtimeDown] = useState(false)
+
+  // Le canal est monté UNE fois par (client, soirée). `realtimeDown` ne figure
+  // volontairement pas dans les dépendances : il est écrit par le callback de
+  // souscription, donc l'inclure fermait une boucle — une erreur de canal
+  // basculait le drapeau, l'effet se rejouait, se désabonnait, se
+  // réabonnait, échouait à nouveau… En Wi-Fi de salle capricieux, cela
+  // pouvait marteler le serveur, et surtout PERDRE les événements arrivés
+  // pendant chaque cycle. C'est le même mécanisme qui portera la réception
+  // des commandes : il doit être stable avant tout test de charge.
   useEffect(() => {
     if (!customer?.id || !event?.id) return
     const ch = supabase
@@ -1983,14 +2016,16 @@ function OrderingApp({
         () => loadProducts()
       )
       .subscribe((status) => {
-        setRealtimeDown(status === 'CHANNEL_ERROR' || status === 'TIMED_OUT' || status === 'CLOSED')
+        const down = status === 'CHANNEL_ERROR' || status === 'TIMED_OUT' || status === 'CLOSED'
+        // Mise à jour conditionnelle : sans elle, chaque reconnexion
+        // provoquait un rendu inutile de tout l'écran de commande.
+        setRealtimeDown((prev) => (prev === down ? prev : down))
+        // Une reconnexion a pu manquer des événements : on resynchronise.
+        if (status === 'SUBSCRIBED') {
+          loadOrders()
+          loadMessages()
+        }
       })
-
-    const msgPoll = setInterval(() => loadMessages(), 6000)
-    const restPoll = setInterval(() => {
-      loadOrders()
-      loadProducts()
-    }, realtimeDown ? 6000 : 20000)
 
     const onSw = (e) => {
       if (e.data?.type === 'NOTI_PUSH') loadOrders()
@@ -1999,11 +2034,28 @@ function OrderingApp({
 
     return () => {
       supabase.removeChannel(ch)
-      clearInterval(msgPoll)
-      clearInterval(restPoll)
       navigator.serviceWorker?.removeEventListener('message', onSw)
     }
-  }, [customer?.id, event?.id, venue?.id, loadOrders, loadMessages, loadProducts, realtimeDown])
+  }, [customer?.id, event?.id, venue?.id, loadOrders, loadMessages, loadProducts])
+
+  // Repli en interrogation périodique, dans son propre effet : sa cadence
+  // dépend de l'état du canal, mais il ne doit surtout pas emporter le canal
+  // avec lui à chaque changement de cadence.
+  useEffect(() => {
+    if (!customer?.id || !event?.id) return
+    const msgPoll = setInterval(() => loadMessages(), 6000)
+    const restPoll = setInterval(
+      () => {
+        loadOrders()
+        loadProducts()
+      },
+      realtimeDown ? 6000 : 20000
+    )
+    return () => {
+      clearInterval(msgPoll)
+      clearInterval(restPoll)
+    }
+  }, [customer?.id, event?.id, loadOrders, loadMessages, loadProducts, realtimeDown])
 
   // ---- Sonnerie douce quand une commande passe à « prête » ----------------
   useEffect(() => {
@@ -2197,13 +2249,23 @@ function OrderingApp({
     }
     if (error) throw error
 
+    // place_order() renvoie désormais UNE OU DEUX commandes (0037) : un panier
+    // mixte est scindé, les boissons partant en préparation pendant que la
+    // food attend la caisse. `data` est donc un tableau.
+    const placed = Array.isArray(data) ? data : data ? [data] : []
+
     // Le serveur ignore silencieusement un code invalide plutôt que de bloquer
     // la commande (canal dégradé) — on prévient quand même le client ici.
-    // data.promo_code n'est renseigné par place_order() QUE si le code % /
-    // montant a réellement été reconnu et appliqué (indépendant du forfait).
-    if (promoCode && !data?.promo_code) {
+    // promo_code n'est renseigné QUE si le code % / montant a réellement été
+    // reconnu et appliqué (indépendant du forfait) ; sur un panier scindé il
+    // ne l'est que sur la première commande, d'où le `some`.
+    if (promoCode && !placed.some((o) => o?.promo_code)) {
       showToast(t.codeNotApplied, 'error')
     }
+
+    // Panier scindé : le dire tout de suite, sinon le client découvre deux
+    // codes de retrait sans comprendre pourquoi.
+    if (placed.length > 1) showToast(t.orderSplitFood, 'info')
 
     setCart([])
     setCartCheckout(false)
@@ -2530,6 +2592,7 @@ function OrderingApp({
             orders={orders}
             focusOrder={focusOrder}
             onFocusDone={() => setFocusOrder(null)}
+            onCancel={cancelOrder}
             event={event}
             venue={venue}
             customer={customer}
@@ -3959,6 +4022,53 @@ function CheckoutSheet({ open, lang, event, cart, pass, promoCode, subtotal, pre
   const [preview, setPreview] = useState(null)
   const [busy, setBusy] = useState(false)
 
+  // Délai de grâce (note du 23/08, §2bis.1). Le point qui fait tout l'intérêt
+  // du mécanisme : pendant ces 5 secondes, RIEN n'est envoyé au serveur, donc
+  // rien n'apparaît sur la tablette du bar. Envoyer puis annuler produirait
+  // exactement le bruit qu'on cherche à éviter en plein rush.
+  const GRACE_MS = 5000
+  const [pending, setPending] = useState(false)
+  const [elapsed, setElapsed] = useState(0)
+  const graceStart = useRef(0)
+  const graceRaf = useRef(0)
+  const graceTimer = useRef(0)
+
+  const stopGrace = useCallback(() => {
+    cancelAnimationFrame(graceRaf.current)
+    clearTimeout(graceTimer.current)
+    setPending(false)
+    setElapsed(0)
+  }, [])
+
+  // Une feuille qu'on referme (geste, bouton précédent) ne doit pas laisser
+  // partir une commande que le client croyait avoir abandonnée.
+  useEffect(() => {
+    if (!open) stopGrace()
+  }, [open, stopGrace])
+  useEffect(() => () => stopGrace(), [stopGrace])
+
+  function startGrace() {
+    if (pending) return
+    setPending(true)
+    graceStart.current = Date.now()
+    const tick = () => {
+      setElapsed(Date.now() - graceStart.current)
+      graceRaf.current = requestAnimationFrame(tick)
+    }
+    graceRaf.current = requestAnimationFrame(tick)
+    // L'envoi est porté par un minuteur, pas par la boucle d'animation : le
+    // navigateur la suspend quand l'écran se verrouille, et la commande ne
+    // serait jamais partie. Le comportement retenu est l'envoi malgré tout.
+    graceTimer.current = setTimeout(async () => {
+      cancelAnimationFrame(graceRaf.current)
+      setPending(false)
+      setElapsed(0)
+      setBusy(true)
+      await onSubmit({ note })
+      setBusy(false)
+    }, GRACE_MS)
+  }
+
   // Retour terrain, décision majeure du point équipe (2.3) : « sur le modèle
   // d'Uber Eats ou Bolt, à la validation du panier, afficher le solde de
   // crédits et le reste à payer ». Et la règle qui va avec, non négociable :
@@ -4067,17 +4177,65 @@ function CheckoutSheet({ open, lang, event, cart, pass, promoCode, subtotal, pre
         </Banner>
       </div>
 
-      <button
-        disabled={busy}
-        onClick={async () => {
-          setBusy(true)
-          await onSubmit({ note })
-          setBusy(false)
-        }}
-        style={{ ...S.btn, opacity: busy ? 0.6 : 1, minHeight: 58 }}
-      >
-        {busy ? t.sending : t.send}
-      </button>
+      {pending ? (
+        <div
+          style={{
+            border: `1.5px solid ${C.terracotta}`,
+            borderRadius: 16,
+            padding: 16,
+            background: 'rgba(185,106,76,.06)',
+          }}
+        >
+          <div style={{ fontSize: 14, fontWeight: 600, marginBottom: 4 }}>{t.graceTitle}</div>
+          <div style={{ fontSize: 12.5, color: C.dim, marginBottom: 12, lineHeight: 1.5 }}>
+            {t.graceSub(Math.max(1, Math.ceil((GRACE_MS - elapsed) / 1000)))}
+          </div>
+
+          {/* Récapitulatif : c'est le moment où l'on relit ce qu'on a tapé. */}
+          <div style={{ display: 'grid', gap: 4, marginBottom: 12 }}>
+            {cart.map((l) => (
+              <div key={l.key} style={{ display: 'flex', justifyContent: 'space-between', gap: 10, fontSize: 13 }}>
+                <span>
+                  {l.quantity}× {tr(l.product, lang).name}
+                  {l.variantLabel ? ` · ${l.variantLabel}` : ''}
+                </span>
+                <span style={{ ...S.money, fontSize: 13, whiteSpace: 'nowrap' }}>{eur(lineTotal(l))}</span>
+              </div>
+            ))}
+          </div>
+
+          <div
+            style={{
+              height: 8,
+              borderRadius: 999,
+              background: 'rgba(28,42,74,.10)',
+              overflow: 'hidden',
+              marginBottom: 12,
+            }}
+          >
+            <div
+              style={{
+                width: `${Math.min(100, (elapsed / GRACE_MS) * 100)}%`,
+                height: '100%',
+                borderRadius: 999,
+                background: C.terracotta,
+              }}
+            />
+          </div>
+
+          <button onClick={stopGrace} style={{ ...S.btnGhost, minHeight: 52, borderColor: C.terracotta, color: C.terracotta }}>
+            {t.graceCancel}
+          </button>
+        </div>
+      ) : (
+        <button
+          disabled={busy}
+          onClick={startGrace}
+          style={{ ...S.btn, opacity: busy ? 0.6 : 1, minHeight: 58 }}
+        >
+          {busy ? t.sending : t.send}
+        </button>
+      )}
     </Sheet>
   )
 }
@@ -4222,6 +4380,7 @@ function MyOrders({
   onBackToMenu,
   focusOrder,
   onFocusDone,
+  onCancel,
 }) {
   const t = useT(lang)
   const [now, setNow] = useState(Date.now())
@@ -4287,6 +4446,7 @@ function MyOrders({
           lang={lang}
           now={now}
           onReview={() => onReview(o)}
+          onCancel={onCancel}
         />
         </div>
       ))}
@@ -4298,7 +4458,7 @@ function MyOrders({
   )
 }
 
-function OrderCard({ order, event, venue, customer, lang, now, onReview }) {
+function OrderCard({ order, event, venue, customer, lang, now, onReview, onCancel }) {
   const t = useT(lang)
   const st = ORDER_STATUS[order.status] || ORDER_STATUS.RECEIVED
   const items = order.order_items || []
@@ -4311,6 +4471,9 @@ function OrderCard({ order, event, venue, customer, lang, now, onReview }) {
   // compteur figé à 00:00 laissait le client sans nouvelle — on assume le
   // retard avec une phrase légère, plutôt que par un silence.
   const pending = order.status === 'RECEIVED' || order.status === 'IN_PREP'
+  const awaitingPayment = order.status === 'AWAITING_PAYMENT'
+  // Annulable tant que le bar n'a pas lancé la préparation (§2bis.2).
+  const cancellable = order.status === 'RECEIVED' || awaitingPayment
   const lateMin = order.estimated_ready_at && pending ? Math.floor(-etaMs / 60000) : -1
   const isLate = lateMin >= 1
   const delayNote = useMemo(() => {
@@ -4437,6 +4600,17 @@ function OrderCard({ order, event, venue, customer, lang, now, onReview }) {
           </div>
         )}
 
+        {/* Attente de règlement : le chrono ne tourne pas, et il faut le dire
+            explicitement — sinon le client attend devant le bar une commande
+            que personne n'a commencée. */}
+        {awaitingPayment && (
+          <div style={{ marginBottom: 14 }}>
+            <Banner tone="warn">
+              <strong>{t.awaitingPaymentTitle}</strong> {t.awaitingPaymentSub}
+            </Banner>
+          </div>
+        )}
+
         {/* Progression */}
         {!['CANCELLED'].includes(order.status) && (
           <div style={{ display: 'flex', gap: 5, marginBottom: 16 }}>
@@ -4553,6 +4727,21 @@ function OrderCard({ order, event, venue, customer, lang, now, onReview }) {
           {order.status === 'PAID' && (
             <button onClick={onReview} style={{ ...S.btnGhost, minHeight: 44, fontSize: 12, borderColor: C.indigo, color: C.indigo }}>
               {t.rateService}
+            </button>
+          )}
+          {/* Le bouton disparaît de lui-même dès que le bar lance la
+              préparation : `order.status` vient du temps réel, aucun
+              rechargement n'est nécessaire (§2bis.2). Si le client tape
+              malgré tout au moment exact du basculement, le serveur
+              tranche — voir cancel_my_order. */}
+          {cancellable && onCancel && (
+            <button
+              onClick={() => {
+                if (confirm(t.cancelConfirm)) onCancel(order)
+              }}
+              style={{ ...S.btnGhost, minHeight: 44, fontSize: 12, borderColor: C.danger, color: C.danger }}
+            >
+              {t.cancelOrder}
             </button>
           )}
         </div>
@@ -5223,7 +5412,7 @@ function StaffApp({ session }) {
           <NoEvent venue={venue} onCreated={loadEvents} showToast={showToast} />
         ) : (
           <>
-            {activeTab === 'bar' && <BarTab event={event} venue={venue} onEventChange={loadEvents} showToast={showToast} />}
+            {activeTab === 'bar' && <BarTab event={event} venue={venue} session={session} onEventChange={loadEvents} showToast={showToast} />}
             {activeTab === 'caisse' && <CaisseTab event={event} venue={venue} showToast={showToast} />}
             {activeTab === 'orga' && <OrgaTab event={event} venue={venue} showToast={showToast} onEventChange={loadEvents} />}
             {activeTab === 'carte' && <CarteTab venue={venue} showToast={showToast} />}
@@ -5780,6 +5969,225 @@ function OrderNotesSheet({ order, onClose, onSaved, showToast }) {
 }
 
 /**
+ * Écran de réception en cadrans (note du 23/08, §1) — le mode de service.
+ *
+ * Ce que la grille corrige : en pic, 40 tickets en liste verticale obligent à
+ * faire défiler pour savoir ce qui reste, et l'ordre d'arrivée se perd. Ici
+ * tout tient à l'écran, chaque cadran porte son rang, et « Fait » suffit.
+ *
+ * Trois partis pris directement issus du §4 (charge cognitive) :
+ *  · aucune animation d'arrivée, aucun clignotement. Un cadran qui pulse
+ *    quand 40 tombent d'un coup amplifie exactement la panique qu'on veut
+ *    éviter. Le neuf se signale par un liseré, rien de plus.
+ *  · le nombre en attente est écrit en toutes lettres, sans code couleur
+ *    d'alerte : « lisible mais pas alarmant ».
+ *  · le total et le détail sont TOUJOURS visibles, jamais derrière un menu —
+ *    c'est ce qui rend la ressaisie en caisse rapide (§3), et une ressaisie
+ *    laborieuse est bâclée puis abandonnée.
+ */
+function BarCadrans({ orders, meId, now, onDone, onClaim, onDetail }) {
+  // Premier arrivé, premier servi — l'ordre est celui de la création, et le
+  // rang est affiché pour qu'il ne soit jamais ambigu.
+  const list = useMemo(
+    () =>
+      [...orders]
+        .filter((o) => ['RECEIVED', 'IN_PREP', 'READY', 'AWAITING_PAYMENT'].includes(o.status))
+        .sort((a, b) => new Date(a.created_at) - new Date(b.created_at)),
+    [orders]
+  )
+
+  if (list.length === 0) {
+    return <Empty emoji="✨" title="Rien à préparer" sub="Les nouvelles commandes apparaissent ici." />
+  }
+
+  // « Densité d'information adaptée à la charge » (§1.1). Plus il y a de
+  // commandes, plus les cadrans se resserrent — l'objectif est de tout voir
+  // sans défiler. On ne retire jamais le code, les articles ni le total :
+  // ce sont eux qu'on lit, et le total sert la ressaisie en caisse (§3).
+  const dense = list.length > 12
+  const veryDense = list.length > 24
+  const col = veryDense ? 176 : dense ? 206 : 240
+  const pad = veryDense ? 9 : dense ? 10 : 12
+  const codeSize = veryDense ? 17 : dense ? 19 : 21
+  const itemSize = veryDense ? 11.5 : dense ? 12.5 : 13
+  const btnH = veryDense ? 44 : dense ? 48 : 52
+
+  return (
+    <>
+      <div style={{ ...S.label, marginBottom: 10 }}>
+        {list.length} commande{list.length > 1 ? 's' : ''} en cours
+      </div>
+
+      <div
+        style={{
+          display: 'grid',
+          // La grille se recompose d'elle-même quand un cadran disparaît :
+          // c'est le comportement demandé, et il est natif ici — aucune
+          // gymnastique de positionnement à maintenir.
+          gridTemplateColumns: `repeat(auto-fill, minmax(${col}px, 1fr))`,
+          gap: dense ? 8 : 10,
+          alignItems: 'start',
+        }}
+      >
+        {list.map((o, i) => {
+          const st = ORDER_STATUS[o.status] || ORDER_STATUS.RECEIVED
+          const mine = o.claimed_by && o.claimed_by === meId
+          const taken = o.claimed_by && !mine
+          const waiting = Math.max(0, Math.floor((now - new Date(o.created_at).getTime()) / 60000))
+          const awaiting = o.status === 'AWAITING_PAYMENT'
+
+          return (
+            <div
+              key={o.id}
+              style={{
+                borderRadius: 14,
+                background: taken ? 'rgba(28,42,74,.04)' : C.paper,
+                border: `2px solid ${mine ? C.ok : taken ? C.lineHi : st.color}44`,
+                borderLeftWidth: 5,
+                borderLeftColor: mine ? C.ok : taken ? C.lineHi : st.color,
+                padding: pad,
+                opacity: taken ? 0.72 : 1,
+                display: 'flex',
+                flexDirection: 'column',
+                gap: 8,
+              }}
+            >
+              {/* Rang + code + attente : ce qu'on lit en vision périphérique */}
+              <div style={{ display: 'flex', alignItems: 'baseline', gap: 8 }}>
+                <span style={{ fontSize: 11, color: C.faint, fontFamily: FONT.label }}>#{i + 1}</span>
+                <span style={{ fontFamily: FONT.label, fontWeight: 600, fontSize: codeSize, letterSpacing: 2 }}>
+                  {o.pickup_code}
+                </span>
+                <span style={{ marginLeft: 'auto', fontSize: 11.5, color: waiting >= RELANCE_MIN ? C.terracotta : C.faint }}>
+                  {waiting} min
+                </span>
+              </div>
+
+              <div style={{ fontSize: 10.5, fontFamily: FONT.label, letterSpacing: 0.6, color: st.color }}>
+                {st.short.toUpperCase()}
+                {o.flag ? ` · ${flagOf(o.flag)?.emoji ?? ''}` : ''}
+              </div>
+
+              {/* Détail complet, sans clic : la ressaisie en caisse se fait
+                  les yeux sur ce cadran (§3). */}
+              <div style={{ display: 'grid', gap: 3 }}>
+                {(o.order_items || []).map((it) => (
+                  <div key={it.id} style={{ fontSize: itemSize, lineHeight: 1.35 }}>
+                    <strong style={{ fontWeight: 700 }}>{it.quantity}×</strong> {it.name_snapshot}
+                    {it.variant_label ? (
+                      <span style={{ color: C.faint }}> · {it.variant_label}</span>
+                    ) : null}
+                    {(it.detail?.options || []).length > 0 && (
+                      <span style={{ color: C.faint }}>
+                        {' '}
+                        · {(it.detail.options || []).map((x) => x.name).join(', ')}
+                      </span>
+                    )}
+                  </div>
+                ))}
+              </div>
+
+              {o.note && (
+                <div style={{ fontSize: 11.5, color: C.dim, fontStyle: 'italic', lineHeight: 1.4 }}>
+                  « {o.note} »
+                </div>
+              )}
+
+              <div
+                style={{
+                  display: 'flex',
+                  justifyContent: 'space-between',
+                  alignItems: 'baseline',
+                  paddingTop: 6,
+                  borderTop: `1px solid ${C.line}`,
+                }}
+              >
+                <span style={{ fontSize: 10.5, color: C.faint, fontFamily: FONT.label }}>
+                  {o.customers?.first_name || ''}
+                </span>
+                <span style={{ ...S.money, fontWeight: 700, fontSize: dense ? 15.5 : 17, color: C.terracotta }}>
+                  {eur(o.total)}
+                </span>
+              </div>
+
+              {awaiting ? (
+                <div
+                  style={{
+                    fontSize: 11.5,
+                    color: C.goldDark,
+                    background: `${C.gold}1f`,
+                    border: `1px solid ${C.gold}66`,
+                    borderRadius: 10,
+                    padding: '8px 10px',
+                    lineHeight: 1.4,
+                  }}
+                >
+                  🍽️ Food — à encaisser en caisse avant préparation.
+                </div>
+              ) : (
+                <div style={{ display: 'flex', gap: 6 }}>
+                  <button
+                    onClick={() => onDone(o)}
+                    style={{
+                      flex: 1,
+                      minHeight: btnH,
+                      borderRadius: 12,
+                      border: 'none',
+                      cursor: 'pointer',
+                      fontFamily: FONT.label,
+                      fontWeight: 600,
+                      letterSpacing: 0.8,
+                      fontSize: 13,
+                      textTransform: 'uppercase',
+                      background: st.color,
+                      color: '#fff',
+                    }}
+                  >
+                    {o.status === 'READY' ? 'Retirée' : 'Fait'}
+                  </button>
+                  <button
+                    onClick={() => onClaim(o)}
+                    title={mine ? 'Vous préparez cette commande' : taken ? 'Prise par un collègue' : 'Je prends cette commande'}
+                    style={{
+                      width: btnH,
+                      minHeight: btnH,
+                      borderRadius: 12,
+                      cursor: 'pointer',
+                      fontSize: 18,
+                      border: `1.5px solid ${mine ? C.ok : C.lineHi}`,
+                      background: mine ? `${C.ok}14` : C.paper,
+                      color: mine ? C.ok : C.dim,
+                    }}
+                  >
+                    {mine ? '🙋' : taken ? '🔒' : '✋'}
+                  </button>
+                  <button
+                    onClick={() => onDetail(o)}
+                    title="Détail, commentaire, ticket"
+                    style={{
+                      width: 42,
+                      minHeight: btnH,
+                      borderRadius: 12,
+                      cursor: 'pointer',
+                      fontSize: 15,
+                      border: `1.5px solid ${C.lineHi}`,
+                      background: C.paper,
+                      color: C.dim,
+                    }}
+                  >
+                    ⋯
+                  </button>
+                </div>
+              )}
+            </div>
+          )
+        })}
+      </div>
+    </>
+  )
+}
+
+/**
  * Détail des articles offerts sur une commande — ce que le bar doit servir
  * sans encaisser, et au titre de quel code.
  */
@@ -5838,7 +6246,7 @@ function GiftBanner({ orderId }) {
   )
 }
 
-function BarTab({ event, venue, onEventChange, showToast }) {
+function BarTab({ event, venue, session, onEventChange, showToast }) {
   const [orders, setOrders] = useState([])
   const [loading, setLoading] = useState(true)
   const [prep, setPrep] = useState(event.default_prep_min ?? 1)
@@ -5853,6 +6261,12 @@ function BarTab({ event, venue, onEventChange, showToast }) {
   // Même recherche qu'en Caisse et en Clients : au comptoir, on a le ticket
   // sous les yeux, pas le nom. Filtre les quatre colonnes d'un coup.
   const [q, setQ] = useState('')
+  // Note du 23/08, §1 : en pic, une liste verticale de 40 tickets est
+  // ingérable. Le mode cadrans est le mode de service par défaut ; le mode
+  // colonnes reste disponible pour le suivi complet du cycle (retour arrière,
+  // commentaires, ticket…), qui n'a pas sa place en plein rush.
+  const [mode, setMode] = useState(() => LS.get('noti:barMode', 'cadrans'))
+  useEffect(() => LS.set('noti:barMode', mode), [mode])
   const [ack, setAck] = useState(() => new Set(LS.get(`noti:ack:${event.id}`, [])))
   // Sonnerie choisie par l'établissement, mémorisée sur la tablette du bar :
   // c'est un réglage de poste, pas une donnée de soirée.
@@ -5868,11 +6282,15 @@ function BarTab({ event, venue, onEventChange, showToast }) {
   useEffect(() => setPrep(event.default_prep_min ?? 1), [event.default_prep_min])
 
   const load = useCallback(async () => {
+    // Les annulées SONT chargées, contrairement à avant. Sans elles, une
+    // commande annulée par le client se contentait de disparaître de la
+    // liste : impossible de distinguer « annulée » de « jamais vue », donc
+    // impossible de prévenir le barman qui la préparait. Elles sont écartées
+    // de l'affichage juste en dessous.
     const { data } = await supabase
       .from('orders')
       .select('*, order_items ( * ), customers ( first_name, last_name, phone, tags )')
       .eq('event_id', event.id)
-      .neq('status', 'CANCELLED')
       .order('created_at', { ascending: true })
     setOrders(data || [])
     setLoading(false)
@@ -5887,7 +6305,13 @@ function BarTab({ event, venue, onEventChange, showToast }) {
         { event: '*', schema: 'public', table: 'orders', filter: `event_id=eq.${event.id}` },
         () => load()
       )
-      .subscribe()
+      // Une coupure de WebSocket fait manquer les commandes arrivées pendant
+      // le trou. Sans resynchronisation à la reconnexion, elles n'apparaissent
+      // qu'au prochain sondage — jusqu'à 20 s d'attente pour un client, et une
+      // commande qu'on croit perdue. « Zéro perte » se joue ici.
+      .subscribe((status) => {
+        if (status === 'SUBSCRIBED') load()
+      })
     const poll = setInterval(load, 20000)
     return () => {
       supabase.removeChannel(ch)
@@ -5900,6 +6324,7 @@ function BarTab({ event, venue, onEventChange, showToast }) {
   // ticket ferait taire la sonnerie d'une commande non vue.
   const needle = q.trim().toLowerCase()
   const matches = (o) => {
+    if (o.status === 'CANCELLED') return false
     if (!needle) return true
     const identity = `${o.customers?.first_name || ''} ${o.customers?.last_name || ''} ${o.customers?.phone || ''} ${o.pickup_code || ''}`
     return identity.toLowerCase().includes(needle)
@@ -5940,6 +6365,47 @@ function BarTab({ event, venue, onEventChange, showToast }) {
       LS.set(`noti:ack:${event.id}`, [...next])
       return next
     })
+  }
+
+  /**
+   * Annulation par le client : le cadran disparaît tout seul (le temps réel
+   * fait le travail), mais un ticket qui s'évapore pendant qu'on prépare est
+   * précisément le cas dangereux. On le DIT, avec le code de retrait —
+   * « critique en situation de rush pour ne pas préparer une commande
+   * annulée » (§2bis.2).
+   */
+  const seenStatus = useRef(new Map())
+  useEffect(() => {
+    const prev = seenStatus.current
+    // Premier chargement : on mémorise sans annoncer un historique entier.
+    if (prev.size === 0) {
+      for (const o of orders) prev.set(o.id, o.status)
+      return
+    }
+    for (const o of orders) {
+      const before = prev.get(o.id)
+      if (before && before !== 'CANCELLED' && o.status === 'CANCELLED') {
+        showToast(`${o.pickup_code} vient d'être annulée par le client — ne la préparez pas.`, 'warn')
+        vibrate([120, 60, 120])
+      }
+      prev.set(o.id, o.status)
+    }
+  }, [orders, showToast])
+
+  /**
+   * Prise en charge (§1.5) : « l'outil ne doit pas dépendre uniquement de la
+   * discipline humaine ». L'arbitrage est côté serveur — deux barmans qui
+   * tapent en même temps, un seul l'obtient.
+   */
+  async function toggleClaim(order) {
+    unlockAudio()
+    const mine = order.claimed_by && order.claimed_by === session?.user?.id
+    const { error } = await supabase.rpc(mine ? 'release_order' : 'claim_order', { p_order: order.id })
+    if (error) {
+      const taken = String(error.message || '').includes('already_claimed')
+      showToast(taken ? 'Un collègue vient de prendre cette commande.' : frError(error), taken ? 'info' : 'error')
+    }
+    load()
   }
 
   async function move(order, status, opts = {}) {
@@ -6192,6 +6658,37 @@ function BarTab({ event, venue, onEventChange, showToast }) {
         )}
       </div>
 
+      {/* Bascule de mode. Position fixe et libellés constants : en situation
+          de stress, l'opérateur agit par mémoire spatiale (§4). */}
+      <div style={{ display: 'flex', gap: 6, marginBottom: 12 }} className="no-print">
+        {[
+          ['cadrans', 'Cadrans'],
+          ['colonnes', 'Suivi détaillé'],
+        ].map(([k, label]) => (
+          <button
+            key={k}
+            onClick={() => setMode(k)}
+            aria-pressed={mode === k}
+            style={{
+              flex: 1,
+              minHeight: 46,
+              borderRadius: 12,
+              border: 'none',
+              cursor: 'pointer',
+              fontFamily: FONT.label,
+              fontSize: 12,
+              fontWeight: 600,
+              letterSpacing: 0.7,
+              textTransform: 'uppercase',
+              background: mode === k ? C.navy : 'rgba(28,42,74,.06)',
+              color: mode === k ? '#fff' : C.dim,
+            }}
+          >
+            {label}
+          </button>
+        ))}
+      </div>
+
       <div style={{ position: 'relative', marginBottom: 14 }} className="no-print">
         <input
           style={{ ...S.input, paddingRight: needle ? 40 : undefined }}
@@ -6232,7 +6729,21 @@ function BarTab({ event, venue, onEventChange, showToast }) {
         </div>
       )}
 
-      <div style={{ display: 'flex', gap: 12, overflowX: 'auto', paddingBottom: 8 }}>
+      {mode === 'cadrans' && (
+        <BarCadrans
+          orders={shown}
+          meId={session?.user?.id}
+          now={now}
+          onDone={(o) => {
+            acknowledge([o.id])
+            move(o, o.status === 'READY' ? 'PICKED_UP' : 'READY')
+          }}
+          onClaim={toggleClaim}
+          onDetail={setDetail}
+        />
+      )}
+
+      <div style={{ display: mode === 'colonnes' ? 'flex' : 'none', gap: 12, overflowX: 'auto', paddingBottom: 8 }}>
         {[
           // `prev` : un tap de trop sur « Prête » notifiait le client, qui
           // venait attendre devant le bar — exactement ce que l'outil est censé
@@ -6695,8 +7206,23 @@ function CaisseTab({ event, venue, showToast }) {
         { event: 'INSERT', schema: 'public', table: 'event_entries', filter: `event_id=eq.${event.id}` },
         () => loadEntries()
       )
-      .subscribe()
-    return () => supabase.removeChannel(ch)
+      .subscribe((status) => {
+        if (status === 'SUBSCRIBED') {
+          load()
+          loadEntries()
+        }
+      })
+    // La caisse n'avait AUCUN repli : une coupure de WebSocket la figeait
+    // jusqu'au prochain changement d'onglet. En fin de soirée, c'est l'écran
+    // sur lequel on compte l'argent — il ne peut pas être muet.
+    const poll = setInterval(() => {
+      load()
+      loadEntries()
+    }, 20000)
+    return () => {
+      supabase.removeChannel(ch)
+      clearInterval(poll)
+    }
   }, [event.id, load, loadEntries])
 
   const needle = q.trim().toLowerCase()
@@ -6716,6 +7242,22 @@ function CaisseTab({ event, venue, showToast }) {
     }
     return [...map.entries()]
   }, [visible])
+
+  const awaitingFood = orders
+    .filter((o) => o.status === 'AWAITING_PAYMENT')
+    .sort((a, b) => new Date(a.created_at) - new Date(b.created_at))
+
+  async function startFood(o) {
+    const { error } = await supabase.rpc('start_food_prep', { p_order: o.id })
+    if (error) {
+      // Un collègue vient de l'encaisser : ce n'est pas une panne.
+      const done = String(error.message || '').includes('not_awaiting_payment')
+      showToast(done ? 'Déjà encaissée — la préparation a démarré.' : frError(error), done ? 'info' : 'error')
+    } else {
+      showToast(`${o.pickup_code} : préparation lancée.`, 'ok')
+    }
+    load()
+  }
 
   const selectedOrders = orders.filter((o) => selected.includes(o.id))
   const visibleIds = new Set(visible.map((o) => o.id))
@@ -6758,6 +7300,70 @@ function CaisseTab({ event, venue, showToast }) {
           <strong>suivi</strong> : cochez ce qui a été réglé.
         </Banner>
       </div>
+
+      {/* Food en attente de règlement : le chrono de préparation ne démarre
+          qu'ici (note du 23/08, §2). Placé tout en haut parce que c'est la
+          seule action de cet écran qui fait ATTENDRE quelqu'un. */}
+      {awaitingFood.length > 0 && (
+        <div style={{ ...S.card, padding: 14, marginBottom: 14, border: `2px solid ${C.gold}` }}>
+          <div style={{ ...S.label, marginBottom: 4 }}>
+            🍽️ {awaitingFood.length} commande{awaitingFood.length > 1 ? 's' : ''} food à encaisser
+          </div>
+          <div style={{ fontSize: 11.5, color: C.dim, marginBottom: 12, lineHeight: 1.5 }}>
+            La préparation ne démarre qu'après encaissement. Le client le sait — son compteur ne
+            tourne pas encore.
+          </div>
+          <div style={{ display: 'grid', gap: 8 }}>
+            {awaitingFood.map((o) => (
+              <div
+                key={o.id}
+                style={{
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: 10,
+                  padding: 10,
+                  borderRadius: 12,
+                  background: C.paper,
+                  border: `1px solid ${C.line}`,
+                }}
+              >
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <div style={{ fontFamily: FONT.label, fontWeight: 600, letterSpacing: 1.4 }}>
+                    {o.pickup_code}
+                    <span style={{ color: C.dim, fontWeight: 400, letterSpacing: 0, marginLeft: 8, fontSize: 12 }}>
+                      {o.customers?.first_name} {o.customers?.last_name}
+                    </span>
+                  </div>
+                  <div style={{ fontSize: 11.5, color: C.faint, marginTop: 2 }}>
+                    {(o.order_items || []).map((it) => `${it.quantity}× ${it.name_snapshot}`).join(' · ')}
+                  </div>
+                </div>
+                <div style={{ ...S.money, fontWeight: 700, color: C.terracotta }}>{eur(o.total)}</div>
+                <button
+                  onClick={() => startFood(o)}
+                  style={{
+                    minHeight: 46,
+                    padding: '0 14px',
+                    borderRadius: 12,
+                    border: 'none',
+                    cursor: 'pointer',
+                    background: C.ok,
+                    color: '#fff',
+                    fontFamily: FONT.label,
+                    fontWeight: 600,
+                    fontSize: 12,
+                    letterSpacing: 0.6,
+                    textTransform: 'uppercase',
+                    whiteSpace: 'nowrap',
+                  }}
+                >
+                  Encaissé → préparer
+                </button>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
 
       <div style={{ display: 'flex', gap: 8, marginBottom: 14 }}>
         {[
@@ -7464,7 +8070,9 @@ function OrgaTab({ event, venue, showToast, onEventChange }) {
       .channel(`orga-${event.id}`)
       .on('postgres_changes', { event: '*', schema: 'public', table: 'orders', filter: `event_id=eq.${event.id}` }, load)
       .on('postgres_changes', { event: '*', schema: 'public', table: 'attendances', filter: `event_id=eq.${event.id}` }, load)
-      .subscribe()
+      .subscribe((status) => {
+        if (status === 'SUBSCRIBED') load()
+      })
     const poll = setInterval(load, 25000)
     return () => {
       supabase.removeChannel(ch)
