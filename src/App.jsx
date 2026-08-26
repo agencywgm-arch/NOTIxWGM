@@ -5991,7 +5991,7 @@ function OrderNotesSheet({ order, onClose, onSaved, showToast }) {
  *    c'est ce qui rend la ressaisie en caisse rapide (§3), et une ressaisie
  *    laborieuse est bâclée puis abandonnée.
  */
-function BarCadrans({ orders, meId, now, onDone, onClaim, onDetail }) {
+function BarCadrans({ orders, now, onDone, onDetail }) {
   // Premier arrivé, premier servi — l'ordre est celui de la création, et le
   // rang est affiché pour qu'il ne soit jamais ambigu.
   const list = useMemo(
@@ -6037,8 +6037,6 @@ function BarCadrans({ orders, meId, now, onDone, onClaim, onDetail }) {
       >
         {list.map((o, i) => {
           const st = ORDER_STATUS[o.status] || ORDER_STATUS.RECEIVED
-          const mine = o.claimed_by && o.claimed_by === meId
-          const taken = o.claimed_by && !mine
           const waiting = Math.max(0, Math.floor((now - new Date(o.created_at).getTime()) / 60000))
           const awaiting = o.status === 'AWAITING_PAYMENT'
 
@@ -6047,12 +6045,11 @@ function BarCadrans({ orders, meId, now, onDone, onClaim, onDetail }) {
               key={o.id}
               style={{
                 borderRadius: 14,
-                background: taken ? 'rgba(28,42,74,.04)' : C.paper,
-                border: `2px solid ${alpha(mine ? C.ok : taken ? C.lineHi : st.color, 27)}`,
+                background: C.paper,
+                border: `2px solid ${alpha(st.color, 27)}`,
                 borderLeftWidth: 5,
-                borderLeftColor: mine ? C.ok : taken ? C.lineHi : st.color,
+                borderLeftColor: st.color,
                 padding: pad,
-                opacity: taken ? 0.72 : 1,
                 display: 'flex',
                 flexDirection: 'column',
                 gap: 8,
@@ -6150,22 +6147,6 @@ function BarCadrans({ orders, meId, now, onDone, onClaim, onDetail }) {
                     }}
                   >
                     {o.status === 'READY' ? 'Retirée' : 'Fait'}
-                  </button>
-                  <button
-                    onClick={() => onClaim(o)}
-                    title={mine ? 'Vous préparez cette commande' : taken ? 'Prise par un collègue' : 'Je prends cette commande'}
-                    style={{
-                      width: btnH,
-                      minHeight: btnH,
-                      borderRadius: 12,
-                      cursor: 'pointer',
-                      fontSize: 18,
-                      border: `1.5px solid ${mine ? C.ok : C.lineHi}`,
-                      background: mine ? `${alpha(C.ok, 8)}` : C.paper,
-                      color: mine ? C.ok : C.dim,
-                    }}
-                  >
-                    {mine ? '🙋' : taken ? '🔒' : '✋'}
                   </button>
                   <button
                     onClick={() => onDetail(o)}
@@ -6397,22 +6378,6 @@ function BarTab({ event, venue, session, onEventChange, showToast }) {
       prev.set(o.id, o.status)
     }
   }, [orders, showToast])
-
-  /**
-   * Prise en charge (§1.5) : « l'outil ne doit pas dépendre uniquement de la
-   * discipline humaine ». L'arbitrage est côté serveur — deux barmans qui
-   * tapent en même temps, un seul l'obtient.
-   */
-  async function toggleClaim(order) {
-    unlockAudio()
-    const mine = order.claimed_by && order.claimed_by === session?.user?.id
-    const { error } = await supabase.rpc(mine ? 'release_order' : 'claim_order', { p_order: order.id })
-    if (error) {
-      const taken = String(error.message || '').includes('already_claimed')
-      showToast(taken ? 'Un collègue vient de prendre cette commande.' : frError(error), taken ? 'info' : 'error')
-    }
-    load()
-  }
 
   async function move(order, status, opts = {}) {
     unlockAudio()
@@ -6738,13 +6703,11 @@ function BarTab({ event, venue, session, onEventChange, showToast }) {
       {mode === 'cadrans' && (
         <BarCadrans
           orders={shown}
-          meId={session?.user?.id}
           now={now}
           onDone={(o) => {
             acknowledge([o.id])
             move(o, o.status === 'READY' ? 'PICKED_UP' : 'READY')
           }}
-          onClaim={toggleClaim}
           onDetail={setDetail}
         />
       )}
