@@ -15,7 +15,7 @@
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link
-      href="https://fonts.googleapis.com/css2?family=Playfair+Display:wght@500;600;700&family=Great+Vibes&family=Oswald:wght@400;500;600&family=Jost:wght@300;400;500;600&display=swap"
+      href="https://fonts.googleapis.com/css2?family=Playfair+Display:wght@500;600;700&family=Great+Vibes&family=Oswald:wght@400;500;600&family=Jost:wght@300;400;500;600&family=Figtree:wght@400;500;600;700&display=swap"
       rel="stylesheet"
     />
 
@@ -51,7 +51,7 @@
       }
 
       /* ====================================================================
-         ESPACE ÉQUIPE — rendu épuré, noir et blanc
+         ESPACE ÉQUIPE — direction Wegemo
          --------------------------------------------------------------------
          Le parcours CLIENT garde la charte (crème, terracotta, Playfair) :
          il ne redéfinit aucune de ces variables, donc les valeurs de repli
@@ -62,73 +62,72 @@
          compris les composants partagés avec le client (feuilles modales,
          champs, bandeaux), qu'il aurait sinon fallu dupliquer.
 
-         Sur la couleur : le décor est monochrome, mais les états gardent les
-         teintes système d'iOS (rouge, vert, orange) — c'est ainsi que
-         l'iPhone lui-même procède. Passer « impayé » et « réglé » au même
-         gris ferait perdre au bar une lecture qu'il fait d'un coup d'œil.
+         Repris du design system Wegemo (autre outil de back-office) : fond
+         gris clair, surfaces blanches, bordures noires quasi-transparentes
+         plutôt que des gris pleins, une seule famille de police (la
+         hiérarchie se fait par poids et taille, jamais par changement de
+         police), et des accents saturés façon iOS — chaque statut de
+         commande a sa propre couleur au lieu de tout aplatir en noir/gris.
          ==================================================================== */
       .noti-staff {
-        /* Fonds : gris système iOS pour la page, blanc pur pour les cartes */
-        --n-cream: #f2f2f7;
+        /* Fonds : gris clair pour la page, blanc pur pour les cartes */
+        --n-cream: #f5f5f7;
         --n-creamSoft: #fafafa;
         --n-paper: #ffffff;
 
-        /* Marque → noir. Un seul accent, comme sur iOS. */
-        --n-terracotta: #000000;
-        --n-terracottaSoft: #d1d1d6;
-        --n-navy: #000000;
-        --n-indigo: #1c1c1e;
+        /* Accent principal → bleu iOS, réservé aux actions/statuts en cours. */
+        --n-terracotta: #0071e3;
+        --n-terracottaSoft: #cfe5fb;
+        --n-navy: #1d1d1f;
+        --n-indigo: #bf5af2;
 
         /* Le dégradé signature n'a pas sa place ici : aplat neutre. */
-        --n-gradient: #f2f2f7;
-        --n-rose: #f2f2f7;
-        --n-peach: #f2f2f7;
+        --n-gradient: #f5f5f7;
+        --n-rose: #f5f5f7;
+        --n-peach: #f5f5f7;
 
-        /* États. Deux couleurs seulement, et elles portent de l'argent ou un
-           risque : vert « réglé », rouge « impayé / incident / annulation ».
-           Tout le reste passe en valeurs de gris — les étapes du service
-           (reçue, en prépa, prête) restent distinctes par leur valeur, et
-           sont de toute façon écrites en toutes lettres sur le cadran. */
+        /* États. Vert « réglé », rouge « impayé / incident / annulation »,
+           orange pour ce qui attend une action. Chaque teinte porte un sens
+           précis, jamais décorative. */
         --n-ok: #34c759;
-        --n-danger: #ff3b30;
-        --n-warn: #636366;
-        --n-gold: #8e8e93;
-        --n-goldDark: #3a3a3c;
+        --n-danger: #ff375f;
+        --n-warn: #ff9f0a;
+        /* Distinct du violet (info/VIP) et de l'orange (en attente) : l'ambre
+           reste la seule couleur qui dit « offert / crédité », comme côté
+           client. */
+        --n-gold: #c9a24b;
+        --n-goldDark: #8a6a20;
 
-        /* Texte : noir franc, gris système pour le secondaire */
-        --n-text: #000000;
-        --n-dim: #3c3c43;
-        --n-faint: #8e8e93;
+        /* Texte : encre Apple, gris pour le secondaire et le tertiaire */
+        --n-text: #1d1d1f;
+        --n-dim: #6e6e73;
+        --n-faint: #aeaeb2;
 
-        /* Séparateurs iOS */
-        --n-line: rgba(60, 60, 67, 0.13);
-        --n-lineHi: rgba(60, 60, 67, 0.29);
+        /* Bordures : du noir en transparence, jamais un gris opaque */
+        --n-line: rgba(0, 0, 0, 0.08);
+        --n-lineHi: rgba(0, 0, 0, 0.14);
 
-        /* Typographie système : la police de l'appareil, pas la nôtre */
-        --n-fontDisplay: -apple-system, BlinkMacSystemFont, 'SF Pro Display', 'Segoe UI', Roboto,
-          sans-serif;
-        --n-fontScript: -apple-system, BlinkMacSystemFont, 'SF Pro Display', 'Segoe UI', Roboto,
-          sans-serif;
-        --n-fontLabel: -apple-system, BlinkMacSystemFont, 'SF Pro Text', 'Segoe UI', Roboto,
-          sans-serif;
-        --n-fontBody: -apple-system, BlinkMacSystemFont, 'SF Pro Text', 'Segoe UI', Roboto,
-          sans-serif;
+        /* Typographie : une seule famille pour tout le staff */
+        --n-fontDisplay: 'Figtree', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+        --n-fontScript: 'Figtree', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+        --n-fontLabel: 'Figtree', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+        --n-fontBody: 'Figtree', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
 
-        /* Angles resserrés : francs et réguliers, pas généreux */
-        --n-radiusCard: 12px;
-        --n-radiusControl: 10px;
+        /* Angles généreux, façon Wegemo : Surface 18px, contrôles 12px */
+        --n-radiusCard: 18px;
+        --n-radiusControl: 12px;
 
         letter-spacing: normal;
       }
 
-      /* Oswald étirait les intitulés en capitales espacées ; en système, cet
-         espacement devient du bruit. On le neutralise sur les libellés. */
+      /* Les libellés en capitales espacées (Oswald) perdent leur raison
+         d'être en Figtree ; on neutralise l'espacement hérité. */
       .noti-staff [style*='uppercase'] {
         letter-spacing: 0.02em;
       }
 
       .noti-staff ::-webkit-scrollbar-thumb {
-        background: #c7c7cc;
+        background: #d2d2d7;
       }
       #boot {
         display: flex;
