@@ -6014,7 +6014,7 @@ function BarCadrans({ orders, meId, now, onDone, onClaim, onDetail }) {
   const veryDense = list.length > 24
   const col = veryDense ? 176 : dense ? 206 : 240
   const pad = veryDense ? 9 : dense ? 10 : 12
-  const codeSize = veryDense ? 17 : dense ? 19 : 21
+  const codeSize = veryDense ? 24 : dense ? 27 : 30
   const itemSize = veryDense ? 11.5 : dense ? 12.5 : 13
   const btnH = veryDense ? 44 : dense ? 48 : 52
 
@@ -6796,8 +6796,8 @@ function BarTab({ event, venue, session, onEventChange, showToast }) {
                       <div
                         style={{
                           fontFamily: FONT.label,
-                          fontSize: 20,
-                          fontWeight: 600,
+                          fontSize: 30,
+                          fontWeight: 700,
                           letterSpacing: 2,
                           color: C.navy,
                         }}
