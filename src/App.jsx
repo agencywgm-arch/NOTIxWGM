@@ -5218,6 +5218,7 @@ function StaffLogin() {
 // ============================================================================
 
 const STAFF_TABS = [
+  { k: 'dashboard', t: 'Dashboard', e: '🏠' },
   { k: 'bar', t: 'Bar', e: '🍸' },
   { k: 'caisse', t: 'Caisse', e: '🧾' },
   { k: 'orga', t: 'Orga', e: '📡' },
@@ -5256,7 +5257,7 @@ function StaffApp({ session }) {
   const [venueId, setVenueId] = useState(LS.get('noti:venue', null))
   const [events, setEvents] = useState([])
   const [eventId, setEventId] = useState(LS.get('noti:event', null))
-  const [tab, setTab] = useState('bar')
+  const [tab, setTab] = useState('dashboard')
   const [switcher, setSwitcher] = useState(false)
   const [roles, setRoles] = useState({})
   const [toast, showToast] = useToast()
@@ -5417,6 +5418,7 @@ function StaffApp({ session }) {
           <NoEvent venue={venue} onCreated={loadEvents} showToast={showToast} />
         ) : (
           <>
+            {activeTab === 'dashboard' && <DashboardTab event={event} onNavigate={setTab} />}
             {activeTab === 'bar' && <BarTab event={event} venue={venue} session={session} onEventChange={loadEvents} showToast={showToast} />}
             {activeTab === 'caisse' && <CaisseTab event={event} venue={venue} showToast={showToast} />}
             {activeTab === 'orga' && <OrgaTab event={event} venue={venue} showToast={showToast} onEventChange={loadEvents} />}
@@ -7956,6 +7958,158 @@ function AffluenceCurveChart({ bars, capacity }) {
           ) : null
         )}
       </svg>
+    </div>
+  )
+}
+
+/**
+ * Vue d'ensemble : ce qui se passe maintenant, en un coup d'œil, sans avoir
+ * à ouvrir un onglet. Repris de la mise en page Wegemo (raccourcis en
+ * pastille, carte chiffre-clé, sections « en direct ») — mais avec les
+ * vraies données de l'événement en cours, pas une tendance sur 7 jours :
+ * une soirée Noti dure quelques heures, un historique calendaire n'a pas de
+ * sens ici.
+ */
+function DashboardTab({ event, onNavigate }) {
+  const [live, setLive] = useState(null)
+  const [pulse, setPulse] = useState(null)
+  const [affluence, setAffluence] = useState([])
+
+  const load = useCallback(async () => {
+    const [l, p, af] = await Promise.all([
+      supabase.from('v_event_live').select('*').eq('event_id', event.id).maybeSingle(),
+      supabase.from('v_event_pulse').select('*').eq('event_id', event.id).maybeSingle(),
+      supabase.from('v_event_affluence').select('*').eq('event_id', event.id).order('slot', { ascending: true }),
+    ])
+    setLive(l.data || null)
+    setPulse(p.data || null)
+    setAffluence(af.data || [])
+  }, [event.id])
+
+  useEffect(() => {
+    load()
+  }, [load])
+
+  useEffect(() => {
+    const ch = supabase
+      .channel(`dashboard-${event.id}`)
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'orders', filter: `event_id=eq.${event.id}` }, load)
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'attendances', filter: `event_id=eq.${event.id}` }, load)
+      .subscribe()
+    return () => supabase.removeChannel(ch)
+  }, [event.id, load])
+
+  const enCours = (live?.in_preparation || 0) + (live?.awaiting_pickup || 0)
+  const revenue = Number(live?.revenue_paid || 0) + Number(live?.revenue_pending || 0)
+  const slots = affluence.slice(-8)
+  const maxArrivals = Math.max(1, ...slots.map((s) => s.arrivals || 0))
+
+  const shortcut = (emoji, badgeBg, title, sub, k) => (
+    <button
+      onClick={() => onNavigate(k)}
+      style={{
+        ...S.card,
+        display: 'flex',
+        alignItems: 'center',
+        gap: 12,
+        padding: 14,
+        cursor: 'pointer',
+        textAlign: 'left',
+        border: `1px solid ${C.line}`,
+      }}
+    >
+      <div
+        style={{
+          width: 42,
+          height: 42,
+          borderRadius: 13,
+          background: badgeBg,
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+          fontSize: 19,
+          flexShrink: 0,
+        }}
+      >
+        {emoji}
+      </div>
+      <div>
+        <div style={{ fontWeight: 700, fontSize: 14.5 }}>{title}</div>
+        <div style={{ fontSize: 12, color: C.dim, marginTop: 1 }}>{sub}</div>
+      </div>
+    </button>
+  )
+
+  return (
+    <div style={{ display: 'grid', gap: 12 }}>
+      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
+        {shortcut('🍸', '#DFF3E3', 'Bar', `${enCours} en cours`, 'bar')}
+        {shortcut('📋', '#DDEBFB', 'Carte', 'Aperçu carte', 'carte')}
+      </div>
+
+      <div style={S.card}>
+        <div style={S.label}>CA de la soirée</div>
+        <div style={{ ...S.money, fontWeight: 700, fontSize: 32, marginTop: 4, letterSpacing: -0.5 }}>{eur(revenue)}</div>
+        {Number(live?.revenue_pending || 0) > 0 && (
+          <div style={{ fontSize: 12.5, color: C.dim, marginTop: 4 }}>
+            dont {eur(live.revenue_pending)} à encaisser
+          </div>
+        )}
+      </div>
+
+      <div style={S.card}>
+        <div style={{ fontWeight: 700, fontSize: 16 }}>Commandes en direct</div>
+        {enCours === 0 ? (
+          <Empty emoji="😌" title="Calme plat" />
+        ) : (
+          <div style={{ marginTop: 14, display: 'grid', gap: 8 }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 13.5 }}>
+              <span style={{ color: C.dim }}>En préparation</span>
+              <strong>{live.in_preparation}</strong>
+            </div>
+            <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 13.5 }}>
+              <span style={{ color: C.dim }}>Prêtes à retirer</span>
+              <strong>{live.awaiting_pickup}</strong>
+            </div>
+          </div>
+        )}
+      </div>
+
+      <div style={S.card}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 7, fontWeight: 700, fontSize: 16 }}>
+          <span style={{ width: 8, height: 8, borderRadius: 4, background: C.ok, flexShrink: 0 }} />
+          Scans en direct
+        </div>
+        {!pulse || Number(pulse.headcount || 0) === 0 ? (
+          <Empty emoji="👀" title="En attente du premier scan" />
+        ) : (
+          <>
+            <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 13.5, marginTop: 14 }}>
+              <span style={{ color: C.dim }}>Présents</span>
+              <strong>{pulse.headcount}</strong>
+            </div>
+            <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 13.5, marginTop: 6 }}>
+              <span style={{ color: C.dim }}>Arrivées (15 min)</span>
+              <strong>+{pulse.arrivals_15min || 0}</strong>
+            </div>
+            {slots.length > 1 && (
+              <div style={{ display: 'flex', alignItems: 'flex-end', gap: 5, height: 44, marginTop: 16 }}>
+                {slots.map((s, i) => (
+                  <div
+                    key={i}
+                    style={{
+                      flex: 1,
+                      height: `${Math.max(8, ((s.arrivals || 0) / maxArrivals) * 100)}%`,
+                      borderRadius: 3,
+                      background: i === slots.length - 1 ? C.text : C.lineHi,
+                    }}
+                  />
+                ))}
+              </div>
+            )}
+          </>
+        )}
+      </div>
     </div>
   )
 }
