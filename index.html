@@ -51,7 +51,7 @@
       }
 
       /* ====================================================================
-         ESPACE ÉQUIPE — direction Wegemo
+         ESPACE ÉQUIPE — noir et blanc épuré, façon Wegemo
          --------------------------------------------------------------------
          Le parcours CLIENT garde la charte (crème, terracotta, Playfair) :
          il ne redéfinit aucune de ces variables, donc les valeurs de repli
@@ -62,49 +62,51 @@
          compris les composants partagés avec le client (feuilles modales,
          champs, bandeaux), qu'il aurait sinon fallu dupliquer.
 
-         Repris du design system Wegemo (autre outil de back-office) : fond
-         gris clair, surfaces blanches, bordures noires quasi-transparentes
-         plutôt que des gris pleins, une seule famille de police (la
-         hiérarchie se fait par poids et taille, jamais par changement de
-         police), et des accents saturés façon iOS — chaque statut de
-         commande a sa propre couleur au lieu de tout aplatir en noir/gris.
+         Vu sur les vraies captures de Wegemo (pas le document de blueprint,
+         qui listait une palette bien plus saturée que ce qui est réellement
+         à l'écran) : fond gris clair, cartes blanches, texte noir/gris —
+         la couleur n'apparaît quasiment jamais sur le CHROME (fond de carte,
+         bordure, bouton). Elle est réservée à deux choses : un signal
+         argent/risque ponctuel (vert « réglé », rouge « impayé »), et de
+         petits badges pastel derrière une icône. Les boutons, eux, sont
+         strictement noir sur blanc ou blanc sur noir.
          ==================================================================== */
       .noti-staff {
         /* Fonds : gris clair pour la page, blanc pur pour les cartes */
-        --n-cream: #f5f5f7;
-        --n-creamSoft: #fafafa;
+        --n-cream: #f2f2f2;
+        --n-creamSoft: #f0f0f2;
         --n-paper: #ffffff;
 
-        /* Accent principal → bleu iOS, réservé aux actions/statuts en cours. */
-        --n-terracotta: #0071e3;
-        --n-terracottaSoft: #cfe5fb;
-        --n-navy: #1d1d1f;
-        --n-indigo: #bf5af2;
+        /* Accent principal → noir. Pas de bleu, pas de violet : un seul
+           accent, comme sur les captures. */
+        --n-terracotta: #000000;
+        --n-terracottaSoft: #e5e5ea;
+        --n-navy: #000000;
+        --n-indigo: #1c1c1e;
 
         /* Le dégradé signature n'a pas sa place ici : aplat neutre. */
-        --n-gradient: #f5f5f7;
-        --n-rose: #f5f5f7;
-        --n-peach: #f5f5f7;
+        --n-gradient: #f2f2f2;
+        --n-rose: #f2f2f2;
+        --n-peach: #f2f2f2;
 
-        /* États. Vert « réglé », rouge « impayé / incident / annulation »,
-           orange pour ce qui attend une action. Chaque teinte porte un sens
-           précis, jamais décorative. */
+        /* États. Deux couleurs seulement, et elles portent de l'argent ou un
+           risque : vert « réglé », rouge « impayé / incident / annulation ».
+           Tout le reste — y compris les étapes du service (reçue, en prépa,
+           prête) et le badge « offert » — reste en valeurs de gris : c'est
+           écrit en toutes lettres sur le cadran, la couleur n'y ajoute rien. */
         --n-ok: #34c759;
-        --n-danger: #ff375f;
-        --n-warn: #ff9f0a;
-        /* Distinct du violet (info/VIP) et de l'orange (en attente) : l'ambre
-           reste la seule couleur qui dit « offert / crédité », comme côté
-           client. */
-        --n-gold: #c9a24b;
-        --n-goldDark: #8a6a20;
+        --n-danger: #ff3b30;
+        --n-warn: #636366;
+        --n-gold: #8e8e93;
+        --n-goldDark: #3a3a3c;
 
-        /* Texte : encre Apple, gris pour le secondaire et le tertiaire */
-        --n-text: #1d1d1f;
+        /* Texte : noir franc, gris pour le secondaire et le tertiaire */
+        --n-text: #000000;
         --n-dim: #6e6e73;
         --n-faint: #aeaeb2;
 
         /* Bordures : du noir en transparence, jamais un gris opaque */
-        --n-line: rgba(0, 0, 0, 0.08);
+        --n-line: rgba(0, 0, 0, 0.07);
         --n-lineHi: rgba(0, 0, 0, 0.14);
 
         /* Typographie : une seule famille pour tout le staff */
@@ -113,9 +115,9 @@
         --n-fontLabel: 'Figtree', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
         --n-fontBody: 'Figtree', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
 
-        /* Angles généreux, façon Wegemo : Surface 18px, contrôles 12px */
-        --n-radiusCard: 18px;
-        --n-radiusControl: 12px;
+        /* Angles généreux, façon Wegemo : cartes 20px, contrôles 16px */
+        --n-radiusCard: 20px;
+        --n-radiusControl: 16px;
 
         letter-spacing: normal;
       }

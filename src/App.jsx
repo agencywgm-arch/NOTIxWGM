@@ -6134,7 +6134,7 @@ function BarCadrans({ orders, now, onDone, onDetail }) {
                     style={{
                       flex: 1,
                       minHeight: btnH,
-                      borderRadius: 12,
+                      borderRadius: 14,
                       border: 'none',
                       cursor: 'pointer',
                       fontFamily: FONT.label,
@@ -6142,7 +6142,7 @@ function BarCadrans({ orders, now, onDone, onDetail }) {
                       letterSpacing: 0.8,
                       fontSize: 13,
                       textTransform: 'uppercase',
-                      background: st.color,
+                      background: C.text,
                       color: '#fff',
                     }}
                   >
