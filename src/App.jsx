@@ -6014,11 +6014,11 @@ function BarCadrans({ orders, now, onDone, onDetail }) {
   // ce sont eux qu'on lit, et le total sert la ressaisie en caisse (§3).
   const dense = list.length > 12
   const veryDense = list.length > 24
-  const col = veryDense ? 176 : dense ? 206 : 240
-  const pad = veryDense ? 9 : dense ? 10 : 12
-  const codeSize = veryDense ? 24 : dense ? 27 : 30
-  const itemSize = veryDense ? 11.5 : dense ? 12.5 : 13
-  const btnH = veryDense ? 44 : dense ? 48 : 52
+  const col = veryDense ? 200 : dense ? 230 : 260
+  const pad = veryDense ? 11 : dense ? 12 : 14
+  const codeSize = veryDense ? 26 : dense ? 29 : 32
+  const itemSize = veryDense ? 13.5 : dense ? 14.5 : 15.5
+  const btnH = veryDense ? 48 : dense ? 52 : 56
 
   return (
     <>
@@ -6059,16 +6059,16 @@ function BarCadrans({ orders, now, onDone, onDetail }) {
             >
               {/* Rang + code + attente : ce qu'on lit en vision périphérique */}
               <div style={{ display: 'flex', alignItems: 'baseline', gap: 8 }}>
-                <span style={{ fontSize: 11, color: C.faint, fontFamily: FONT.label }}>#{i + 1}</span>
+                <span style={{ fontSize: 12, color: C.faint, fontFamily: FONT.label }}>#{i + 1}</span>
                 <span style={{ fontFamily: FONT.label, fontWeight: 600, fontSize: codeSize, letterSpacing: 2 }}>
                   {o.pickup_code}
                 </span>
-                <span style={{ marginLeft: 'auto', fontSize: 11.5, color: waiting >= RELANCE_MIN ? C.terracotta : C.faint }}>
+                <span style={{ marginLeft: 'auto', fontSize: 13, color: waiting >= RELANCE_MIN ? C.terracotta : C.faint }}>
                   {waiting} min
                 </span>
               </div>
 
-              <div style={{ fontSize: 10.5, fontFamily: FONT.label, letterSpacing: 0.6, color: st.color }}>
+              <div style={{ fontSize: 12, fontFamily: FONT.label, letterSpacing: 0.6, color: st.color, fontWeight: 600 }}>
                 {st.short.toUpperCase()}
                 {o.flag ? ` · ${flagOf(o.flag)?.emoji ?? ''}` : ''}
               </div>
@@ -6093,7 +6093,7 @@ function BarCadrans({ orders, now, onDone, onDetail }) {
               </div>
 
               {o.note && (
-                <div style={{ fontSize: 11.5, color: C.dim, fontStyle: 'italic', lineHeight: 1.4 }}>
+                <div style={{ fontSize: 13, color: C.dim, fontStyle: 'italic', lineHeight: 1.4 }}>
                   « {o.note} »
                 </div>
               )}
@@ -6107,10 +6107,10 @@ function BarCadrans({ orders, now, onDone, onDetail }) {
                   borderTop: `1px solid ${C.line}`,
                 }}
               >
-                <span style={{ fontSize: 10.5, color: C.faint, fontFamily: FONT.label }}>
+                <span style={{ fontSize: 13, fontWeight: 600, color: C.dim, fontFamily: FONT.label }}>
                   {o.customers?.first_name || ''}
                 </span>
-                <span style={{ ...S.money, fontWeight: 700, fontSize: dense ? 15.5 : 17, color: C.terracotta }}>
+                <span style={{ ...S.money, fontWeight: 700, fontSize: dense ? 17 : 19, color: C.terracotta }}>
                   {eur(o.total)}
                 </span>
               </div>
@@ -6118,7 +6118,7 @@ function BarCadrans({ orders, now, onDone, onDetail }) {
               {awaiting ? (
                 <div
                   style={{
-                    fontSize: 11.5,
+                    fontSize: 13,
                     color: C.goldDark,
                     background: `${alpha(C.gold, 12)}`,
                     border: `1px solid ${alpha(C.gold, 40)}`,
@@ -6142,7 +6142,7 @@ function BarCadrans({ orders, now, onDone, onDetail }) {
                       fontFamily: FONT.label,
                       fontWeight: 600,
                       letterSpacing: 0.8,
-                      fontSize: 13,
+                      fontSize: 14,
                       textTransform: 'uppercase',
                       background: C.text,
                       color: '#fff',
@@ -6154,11 +6154,11 @@ function BarCadrans({ orders, now, onDone, onDetail }) {
                     onClick={() => onDetail(o)}
                     title="Détail, commentaire, ticket"
                     style={{
-                      width: 42,
+                      width: 46,
                       minHeight: btnH,
                       borderRadius: 12,
                       cursor: 'pointer',
-                      fontSize: 15,
+                      fontSize: 16,
                       border: `1.5px solid ${C.lineHi}`,
                       background: C.paper,
                       color: C.dim,
