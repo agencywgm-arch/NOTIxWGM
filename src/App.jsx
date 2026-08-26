@@ -6544,93 +6544,6 @@ function BarTab({ event, venue, session, onEventChange, showToast }) {
         </div>
       )}
 
-      {/* Temps de préparation annoncé */}
-      <div style={{ ...S.card, padding: 14, marginBottom: 14 }}>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
-          <div style={{ flex: 1 }}>
-            <div style={S.label}>Temps annoncé</div>
-            <div style={{ fontSize: 12, color: C.dim }}>Appliqué aux nouvelles commandes</div>
-          </div>
-          <button onClick={() => savePrep(prep - 1)} style={stepBtn}>
-            −
-          </button>
-          <div style={{ ...S.money, fontSize: 22, fontWeight: 600, minWidth: 56, textAlign: 'center' }}>
-            {prep} min
-          </div>
-          <button onClick={() => savePrep(prep + 1)} style={stepBtn}>
-            +
-          </button>
-        </div>
-      </div>
-
-      {/* Sonnerie d'alerte — un club et un bar à cocktails n'ont pas les mêmes
-          attentes. On écoute avant de choisir. */}
-      <div style={{ ...S.card, padding: 14, marginBottom: 14 }} className="no-print">
-        <div style={{ ...S.label, marginBottom: 8 }}>🔔 Sonnerie des nouvelles commandes</div>
-        <div style={{ display: 'grid', gap: 6 }}>
-          {RINGTONES.map((r) => {
-            const on = ringtone === r.k
-            return (
-              <button
-                key={r.k}
-                onClick={() => {
-                  unlockAudio()
-                  setRingtone(r.k)
-                  previewRingtone(r.k)
-                }}
-                style={{
-                  ...S.chip,
-                  width: '100%',
-                  minHeight: 46,
-                  display: 'flex',
-                  alignItems: 'center',
-                  gap: 10,
-                  textAlign: 'left',
-                  whiteSpace: 'normal',
-                  borderColor: on ? C.terracotta : C.lineHi,
-                  background: on ? 'rgba(185,106,76,.08)' : 'transparent',
-                  color: on ? C.terracotta : C.dim,
-                }}
-              >
-                <span style={{ fontSize: 15 }}>{on ? '●' : '○'}</span>
-                <span style={{ flex: 1 }}>
-                  <span style={{ fontWeight: 600, fontSize: 13 }}>{r.label}</span>
-                  <span style={{ display: 'block', fontSize: 11, color: C.faint }}>{r.hint}</span>
-                </span>
-                <span style={{ fontSize: 13 }}>▶</span>
-              </button>
-            )
-          })}
-        </div>
-        <div style={{ fontSize: 11, color: C.faint, marginTop: 8, lineHeight: 1.5 }}>
-          Un tap sélectionne et fait écouter. Le réglage reste sur cette tablette.
-        </div>
-      </div>
-
-      <div style={{ display: 'flex', gap: 8, marginBottom: 14 }} className="no-print">
-        <button onClick={() => setSoldOutOpen(true)} style={{ ...S.btnGhost, minHeight: 44, fontSize: 12 }}>
-          Marquer un article épuisé
-        </button>
-        {pushSupported() && (
-          <button
-            onClick={async () => {
-              const ok = await subscribePush({ venueId: venue.id, eventId: event.id, role: 'staff' })
-              setStaffPush(ok)
-              showToast(ok ? 'Alertes activées sur cet appareil.' : 'Notifications refusées.', ok ? 'ok' : 'error')
-            }}
-            style={{
-              ...S.btnGhost,
-              minHeight: 44,
-              fontSize: 12,
-              borderColor: staffPush ? C.ok : C.terracotta,
-              color: staffPush ? C.ok : C.terracotta,
-            }}
-          >
-            {staffPush ? '✓ Alertes' : 'Alertes'}
-          </button>
-        )}
-      </div>
-
       {/* Bascule de mode. Position fixe et libellés constants : en situation
           de stress, l'opérateur agit par mémoire spatiale (§4). */}
       <div style={{ display: 'flex', gap: 6, marginBottom: 12 }} className="no-print">
@@ -6912,6 +6825,97 @@ function BarTab({ event, venue, session, onEventChange, showToast }) {
             </div>
           </div>
         ))}
+      </div>
+
+      {/* Réglages du poste — sous les commandes : ce n'est pas ce qu'on vient
+          faire ici en plein service, contrairement au traitement des
+          commandes qui doit rester la première chose visible à l'écran. */}
+      <div style={{ marginTop: 24, paddingTop: 18, borderTop: `1px solid ${C.line}` }} className="no-print">
+        <div style={{ ...S.label, marginBottom: 10 }}>Réglages du poste</div>
+
+        <div style={{ ...S.card, padding: 14, marginBottom: 10 }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+            <div style={{ flex: 1 }}>
+              <div style={{ fontWeight: 600, fontSize: 13.5 }}>Temps annoncé</div>
+              <div style={{ fontSize: 12, color: C.dim }}>Appliqué aux nouvelles commandes</div>
+            </div>
+            <button onClick={() => savePrep(prep - 1)} style={stepBtn}>
+              −
+            </button>
+            <div style={{ ...S.money, fontSize: 22, fontWeight: 600, minWidth: 56, textAlign: 'center' }}>
+              {prep} min
+            </div>
+            <button onClick={() => savePrep(prep + 1)} style={stepBtn}>
+              +
+            </button>
+          </div>
+        </div>
+
+        <div style={{ ...S.card, padding: 14, marginBottom: 10 }}>
+          <div style={{ fontWeight: 600, fontSize: 13.5, marginBottom: 8 }}>🔔 Sonnerie des nouvelles commandes</div>
+          <div style={{ display: 'grid', gap: 6 }}>
+            {RINGTONES.map((r) => {
+              const on = ringtone === r.k
+              return (
+                <button
+                  key={r.k}
+                  onClick={() => {
+                    unlockAudio()
+                    setRingtone(r.k)
+                    previewRingtone(r.k)
+                  }}
+                  style={{
+                    ...S.chip,
+                    width: '100%',
+                    minHeight: 46,
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: 10,
+                    textAlign: 'left',
+                    whiteSpace: 'normal',
+                    borderColor: on ? C.terracotta : C.lineHi,
+                    background: on ? 'rgba(185,106,76,.08)' : 'transparent',
+                    color: on ? C.terracotta : C.dim,
+                  }}
+                >
+                  <span style={{ fontSize: 15 }}>{on ? '●' : '○'}</span>
+                  <span style={{ flex: 1 }}>
+                    <span style={{ fontWeight: 600, fontSize: 13 }}>{r.label}</span>
+                    <span style={{ display: 'block', fontSize: 11, color: C.faint }}>{r.hint}</span>
+                  </span>
+                  <span style={{ fontSize: 13 }}>▶</span>
+                </button>
+              )
+            })}
+          </div>
+          <div style={{ fontSize: 11, color: C.faint, marginTop: 8, lineHeight: 1.5 }}>
+            Un tap sélectionne et fait écouter. Le réglage reste sur cette tablette.
+          </div>
+        </div>
+
+        <div style={{ display: 'flex', gap: 8 }}>
+          <button onClick={() => setSoldOutOpen(true)} style={{ ...S.btnGhost, minHeight: 44, fontSize: 12 }}>
+            Marquer un article épuisé
+          </button>
+          {pushSupported() && (
+            <button
+              onClick={async () => {
+                const ok = await subscribePush({ venueId: venue.id, eventId: event.id, role: 'staff' })
+                setStaffPush(ok)
+                showToast(ok ? 'Alertes activées sur cet appareil.' : 'Notifications refusées.', ok ? 'ok' : 'error')
+              }}
+              style={{
+                ...S.btnGhost,
+                minHeight: 44,
+                fontSize: 12,
+                borderColor: staffPush ? C.ok : C.terracotta,
+                color: staffPush ? C.ok : C.terracotta,
+              }}
+            >
+              {staffPush ? '✓ Alertes' : 'Alertes'}
+            </button>
+          )}
+        </div>
       </div>
 
       <SoldOutSheet open={soldOutOpen} venue={venue} onClose={() => setSoldOutOpen(false)} />
