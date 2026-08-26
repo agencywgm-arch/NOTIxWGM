@@ -13,7 +13,7 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import QRCode from 'qrcode'
 import { supabase, isConfigured, frError, errorKey, BASE_PATH, scanUrl } from './lib/supabase.js'
-import { C, S, FONT, GRADIENT, eur, timeFR, dateFR, phoneFR, normalizePhone, isValidPhone } from './lib/theme.js'
+import { C, S, FONT, GRADIENT, RADIUS, alpha, eur, timeFR, dateFR, phoneFR, normalizePhone, isValidPhone } from './lib/theme.js'
 import { dict, useT, trProduct, LANG_LABEL } from './lib/i18n.js'
 import {
   canvasesToPdfBlob,
@@ -877,7 +877,7 @@ function Banner({ tone = 'info', children }) {
     <div
       style={{
         background: map.bg,
-        border: `1.5px solid ${map.bd}55`,
+        border: `1.5px solid ${alpha(map.bd, 33)}`,
         color: map.fg,
         borderRadius: 14,
         padding: 14,
@@ -898,7 +898,7 @@ function PayAtBar({ compact = false, lang = 'fr' }) {
     <div
       style={{
         background: 'rgba(185,106,76,.10)',
-        border: `1.5px solid ${C.terracotta}55`,
+        border: `1.5px solid ${alpha(C.terracotta, 33)}`,
         borderRadius: 14,
         padding: compact ? 10 : 14,
         textAlign: 'center',
@@ -958,7 +958,7 @@ class ErrorBoundary extends React.Component {
           <div
             style={{
               background: 'rgba(192,57,43,.07)',
-              border: `1px solid ${C.danger}55`,
+              border: `1px solid ${alpha(C.danger, 33)}`,
               borderRadius: 12,
               padding: 12,
               fontSize: 11.5,
@@ -1021,7 +1021,11 @@ function AppInner() {
     )
   if (recovery) return <ResetPasswordScreen onDone={() => setRecovery(false)} />
   if (scanPointId) return <ClientApp scanPointId={scanPointId} session={session} />
-  return session ? <StaffApp session={session} /> : <StaffLogin />
+  // `noti-staff` porte la palette épurée de l'espace équipe (voir
+  // index.html). Le parcours client n'est pas enveloppé : il garde la charte.
+  return (
+    <div className="noti-staff">{session ? <StaffApp session={session} /> : <StaffLogin />}</div>
+  )
 }
 
 function ResetPasswordScreen({ onDone }) {
@@ -2334,7 +2338,7 @@ function OrderingApp({
           position: 'sticky',
           top: 0,
           zIndex: 50,
-          background: `${C.cream}f2`,
+          background: `${alpha(C.cream, 95)}`,
           backdropFilter: 'blur(10px)',
           borderBottom: `1px solid ${C.line}`,
           padding: '12px 16px 10px',
@@ -2537,7 +2541,7 @@ function OrderingApp({
                 display: 'flex',
                 alignItems: 'center',
                 gap: 8,
-                border: `1.5px solid ${urgentUnread.length ? C.danger : `${C.terracotta}55`}`,
+                border: `1.5px solid ${urgentUnread.length ? C.danger : `${alpha(C.terracotta, 33)}`}`,
                 background: urgentUnread.length ? 'rgba(192,57,43,.08)' : C.paper,
                 cursor: 'pointer',
                 color: C.text,
@@ -3050,7 +3054,7 @@ function ProductCard({ product, lang, disabled, onAdd, creditEligible = false })
                 fontWeight: 600,
                 letterSpacing: 1,
                 color: C.indigo,
-                border: `1px solid ${C.indigo}55`,
+                border: `1px solid ${alpha(C.indigo, 33)}`,
                 borderRadius: 999,
                 padding: '2px 8px',
               }}
@@ -3066,7 +3070,7 @@ function ProductCard({ product, lang, disabled, onAdd, creditEligible = false })
                 fontWeight: 600,
                 letterSpacing: 1,
                 color: C.danger,
-                border: `1px solid ${C.danger}55`,
+                border: `1px solid ${alpha(C.danger, 33)}`,
                 borderRadius: 999,
                 padding: '2px 8px',
               }}
@@ -3098,8 +3102,8 @@ function ProductCard({ product, lang, disabled, onAdd, creditEligible = false })
                 fontWeight: 700,
                 letterSpacing: 0.6,
                 color: C.goldDark,
-                background: `${C.gold}22`,
-                border: `1px solid ${C.gold}88`,
+                background: `${alpha(C.gold, 13)}`,
+                border: `1px solid ${alpha(C.gold, 53)}`,
                 borderRadius: 999,
                 padding: '2px 8px',
                 whiteSpace: 'nowrap',
@@ -3380,7 +3384,7 @@ function ScrollHint({ children, sticky = false, top = 0, style, barRef }) {
     color: C.terracotta,
     fontSize: 17,
     fontWeight: 700,
-    background: `linear-gradient(to ${side}, ${C.cream}00, ${C.cream}f2 62%)`,
+    background: `linear-gradient(to ${side}, ${alpha(C.cream, 0)}, ${alpha(C.cream, 95)} 62%)`,
     transition: 'opacity .18s',
   })
 
@@ -3391,7 +3395,7 @@ function ScrollHint({ children, sticky = false, top = 0, style, barRef }) {
         position: sticky ? 'sticky' : 'relative',
         top: sticky ? top : undefined,
         zIndex: sticky ? 40 : undefined,
-        background: sticky ? `${C.cream}f2` : undefined,
+        background: sticky ? `${alpha(C.cream, 95)}` : undefined,
         backdropFilter: sticky ? 'blur(10px)' : undefined,
         ...style,
       }}
@@ -3594,7 +3598,7 @@ function PromoCodeCard({ lang, pass, gifts, promoCode, onRedeemCode, onClearCode
   return (
     <>
     {giftCard}
-    <div style={{ ...S.card, padding: 14, border: `1.5px solid ${C.terracotta}55` }}>
+    <div style={{ ...S.card, padding: 14, border: `1.5px solid ${alpha(C.terracotta, 33)}` }}>
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
         <div>
           <div style={{ ...S.label, marginBottom: 2 }}>{t.activePass}</div>
@@ -4435,7 +4439,7 @@ function MyOrders({
           style={{
             borderRadius: 20,
             transition: 'box-shadow .4s',
-            boxShadow: focusOrder === o.id ? `0 0 0 3px ${C.terracotta}66` : 'none',
+            boxShadow: focusOrder === o.id ? `0 0 0 3px ${alpha(C.terracotta, 40)}` : 'none',
           }}
         >
         <OrderCard
@@ -4567,7 +4571,7 @@ function OrderCard({ order, event, venue, customer, lang, now, onReview, onCance
                 letterSpacing: 0.6,
                 textTransform: 'uppercase',
                 color: C.goldDark,
-                background: `${C.gold}26`,
+                background: `${alpha(C.gold, 15)}`,
                 border: `1px solid ${C.gold}`,
                 borderRadius: 999,
                 padding: '3px 9px',
@@ -4588,8 +4592,8 @@ function OrderCard({ order, event, venue, customer, lang, now, onReview, onCance
               padding: '11px 13px',
               marginBottom: 14,
               borderRadius: 14,
-              background: `${C.gold}18`,
-              border: `1px solid ${C.gold}66`,
+              background: `${alpha(C.gold, 9)}`,
+              border: `1px solid ${alpha(C.gold, 40)}`,
               fontSize: 13,
               lineHeight: 1.5,
               color: C.text,
@@ -5219,6 +5223,7 @@ const STAFF_TABS = [
   { k: 'orga', t: 'Orga', e: '📡' },
   { k: 'carte', t: 'Carte', e: '📋' },
   { k: 'clients', t: 'Clients', e: '👥' },
+  { k: 'historique', t: 'Historique', e: '🕓' },
   { k: 'qr', t: 'QR', e: '⬛' },
   { k: 'reglages', t: 'Réglages', e: '⚙️' },
 ]
@@ -5232,7 +5237,7 @@ const STAFF_TABS = [
 const ROLE_TABS = {
   owner: STAFF_TABS.map((t) => t.k),
   manager: STAFF_TABS.map((t) => t.k),
-  staff: ['bar', 'caisse', 'clients'],
+  staff: ['bar', 'caisse', 'clients', 'historique'],
 }
 
 const ROLE_LABEL = {
@@ -5374,7 +5379,7 @@ function StaffApp({ session }) {
           position: 'sticky',
           top: 0,
           zIndex: 60,
-          background: `${C.cream}f2`,
+          background: `${alpha(C.cream, 95)}`,
           backdropFilter: 'blur(10px)',
           borderBottom: `1px solid ${C.line}`,
           padding: '12px 16px',
@@ -5417,6 +5422,7 @@ function StaffApp({ session }) {
             {activeTab === 'orga' && <OrgaTab event={event} venue={venue} showToast={showToast} onEventChange={loadEvents} />}
             {activeTab === 'carte' && <CarteTab venue={venue} showToast={showToast} />}
             {activeTab === 'clients' && <ClientsTab event={event} showToast={showToast} />}
+            {activeTab === 'historique' && <HistoriqueTab event={event} showToast={showToast} />}
             {activeTab === 'qr' && <QrTab event={event} venue={venue} showToast={showToast} />}
             {activeTab === 'reglages' && (
               <ReglagesTab
@@ -5442,7 +5448,7 @@ function StaffApp({ session }) {
           right: 0,
           bottom: 0,
           zIndex: 60,
-          background: `${C.paper}f5`,
+          background: `${alpha(C.paper, 96)}`,
           backdropFilter: 'blur(12px)',
           borderTop: `1px solid ${C.line}`,
           display: 'flex',
@@ -5807,7 +5813,7 @@ function FlagDot({ flag, count }) {
         borderRadius: 999,
         fontSize: 10.5,
         fontWeight: 600,
-        background: `${f.color}1f`,
+        background: `${alpha(f.color, 12)}`,
         color: f.color,
       }}
     >
@@ -6042,7 +6048,7 @@ function BarCadrans({ orders, meId, now, onDone, onClaim, onDetail }) {
               style={{
                 borderRadius: 14,
                 background: taken ? 'rgba(28,42,74,.04)' : C.paper,
-                border: `2px solid ${mine ? C.ok : taken ? C.lineHi : st.color}44`,
+                border: `2px solid ${alpha(mine ? C.ok : taken ? C.lineHi : st.color, 27)}`,
                 borderLeftWidth: 5,
                 borderLeftColor: mine ? C.ok : taken ? C.lineHi : st.color,
                 padding: pad,
@@ -6115,8 +6121,8 @@ function BarCadrans({ orders, meId, now, onDone, onClaim, onDetail }) {
                   style={{
                     fontSize: 11.5,
                     color: C.goldDark,
-                    background: `${C.gold}1f`,
-                    border: `1px solid ${C.gold}66`,
+                    background: `${alpha(C.gold, 12)}`,
+                    border: `1px solid ${alpha(C.gold, 40)}`,
                     borderRadius: 10,
                     padding: '8px 10px',
                     lineHeight: 1.4,
@@ -6155,7 +6161,7 @@ function BarCadrans({ orders, meId, now, onDone, onClaim, onDetail }) {
                       cursor: 'pointer',
                       fontSize: 18,
                       border: `1.5px solid ${mine ? C.ok : C.lineHi}`,
-                      background: mine ? `${C.ok}14` : C.paper,
+                      background: mine ? `${alpha(C.ok, 8)}` : C.paper,
                       color: mine ? C.ok : C.dim,
                     }}
                   >
@@ -6217,7 +6223,7 @@ function GiftBanner({ orderId }) {
       style={{
         padding: 14,
         borderRadius: 14,
-        background: `${C.gold}14`,
+        background: `${alpha(C.gold, 8)}`,
         border: `2px solid ${C.gold}`,
       }}
     >
@@ -6761,7 +6767,7 @@ function BarTab({ event, venue, session, onEventChange, showToast }) {
                 gap: 8,
                 paddingBottom: 8,
                 marginBottom: 10,
-                borderBottom: `2px solid ${col.color}44`,
+                borderBottom: `2px solid ${alpha(col.color, 27)}`,
               }}
             >
               <div style={{ width: 8, height: 8, borderRadius: 4, background: col.color }} />
@@ -6823,9 +6829,9 @@ function BarTab({ event, venue, session, onEventChange, showToast }) {
                             borderRadius: 999,
                             fontSize: 11,
                             fontWeight: 700,
-                            background: `${C.gold}22`,
+                            background: `${alpha(C.gold, 13)}`,
                             color: C.goldDark,
-                            border: `1px solid ${C.gold}66`,
+                            border: `1px solid ${alpha(C.gold, 40)}`,
                           }}
                         >
                           🎁 {o.gift_count} CRÉDIT{o.gift_count > 1 ? 'S' : ''} · {eur(o.gift_total)} offert{o.gift_count > 1 ? 's' : ''}
@@ -7383,7 +7389,7 @@ function CaisseTab({ event, venue, showToast }) {
           non-staff, et entries reste à 0 tant qu'aucun code d'entrée n'a
           jamais été activé). */}
       {entries && (Number(entries.entries_count) > 0 || Number(entries.scan_count) > 0) && (
-        <div style={{ ...S.card, padding: 14, marginBottom: 14, border: `1.5px solid ${C.gold}88` }}>
+        <div style={{ ...S.card, padding: 14, marginBottom: 14, border: `1.5px solid ${alpha(C.gold, 53)}` }}>
           <div style={{ ...S.label, marginBottom: 10 }}>🎫 Entrées</div>
           <div style={{ display: 'flex', gap: 10 }}>
             <div style={{ flex: 1, textAlign: 'center' }}>
@@ -9204,8 +9210,8 @@ function ClientFicheSheet({ customerId, event, onClose, onMessage, onChanged, sh
                     style={{
                       padding: 11,
                       borderRadius: 12,
-                      background: `${C.gold}12`,
-                      border: `1px solid ${C.gold}55`,
+                      background: `${alpha(C.gold, 7)}`,
+                      border: `1px solid ${alpha(C.gold, 33)}`,
                     }}
                   >
                     <div style={{ display: 'flex', alignItems: 'baseline', gap: 8 }}>
@@ -9571,7 +9577,7 @@ function ForfaitFields({ f, set }) {
           borderRadius: 14,
           cursor: 'pointer',
           border: `1.5px solid ${f.is_entry_code ? C.gold : C.lineHi}`,
-          background: f.is_entry_code ? `${C.gold}18` : C.paper,
+          background: f.is_entry_code ? `${alpha(C.gold, 9)}` : C.paper,
           color: C.text,
           marginBottom: f.is_entry_code ? 10 : 14,
           textAlign: 'left',
@@ -9674,7 +9680,7 @@ function GiftFields({ f, set, venueId, showToast }) {
               padding: 12,
               borderRadius: 14,
               background: C.paper,
-              border: `1.5px solid ${C.terracotta}44`,
+              border: `1.5px solid ${alpha(C.terracotta, 27)}`,
             }}
           >
             <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 10 }}>
@@ -10652,6 +10658,311 @@ function ProductEditor({ product, venue, subcats, onClose, onSaved, showToast })
 
 const ALL_TAGS = ['vip', 'habitue', 'gros_panier', 'incident']
 
+/**
+ * Historique de la soirée — TOUTES les commandes, quel que soit leur sort.
+ *
+ * Les écrans de service (Bar, Caisse) montrent ce qu'il reste à faire, donc
+ * écartent volontairement les commandes annulées. Il fallait un endroit où
+ * elles reparaissent : quand un client revient une heure plus tard dire
+ * « et ma commande de tout à l'heure ? », le bar n'avait aucune trace à
+ * consulter.
+ *
+ * Les annulations y sont distinguées par leur origine (voir 0038) : le
+ * client s'est ravisé, ou le bar a dû annuler. Cette seconde ligne est celle
+ * qui mérite d'être regardée en fin de soirée.
+ */
+function HistoriqueTab({ event, showToast }) {
+  const [orders, setOrders] = useState([])
+  const [loading, setLoading] = useState(true)
+  const [q, setQ] = useState('')
+  const [filter, setFilter] = useState('tout')
+  const [detail, setDetail] = useState(null)
+  const [ficheFor, setFicheFor] = useState(null)
+
+  const load = useCallback(async () => {
+    const { data } = await supabase
+      .from('orders')
+      .select('*, order_items ( * ), customers ( first_name, last_name, phone )')
+      .eq('event_id', event.id)
+      .order('created_at', { ascending: false })
+    setOrders(data || [])
+    setLoading(false)
+  }, [event.id])
+
+  useEffect(() => {
+    load()
+    const ch = supabase
+      .channel(`histo-${event.id}`)
+      .on(
+        'postgres_changes',
+        { event: '*', schema: 'public', table: 'orders', filter: `event_id=eq.${event.id}` },
+        () => load()
+      )
+      .subscribe((status) => {
+        if (status === 'SUBSCRIBED') load()
+      })
+    return () => supabase.removeChannel(ch)
+  }, [event.id, load])
+
+  if (loading) return <Spinner />
+
+  const cancelled = orders.filter((o) => o.status === 'CANCELLED')
+  const byClient = cancelled.filter((o) => o.cancelled_by === 'client')
+  const byStaff = cancelled.filter((o) => o.cancelled_by !== 'client')
+  const served = orders.filter((o) => o.status !== 'CANCELLED')
+  const encaisse = orders
+    .filter((o) => o.status === 'PAID')
+    .reduce((s, o) => s + Number(o.total || 0), 0)
+  // Ce que les annulations du BAR ont coûté : la seule somme qui mérite
+  // qu'on s'y arrête en fin de soirée.
+  const perdu = byStaff.reduce((s, o) => s + Number(o.total || 0), 0)
+
+  const needle = q.trim().toLowerCase()
+  const shown = orders.filter((o) => {
+    if (filter === 'annulees' && o.status !== 'CANCELLED') return false
+    if (filter === 'servies' && o.status === 'CANCELLED') return false
+    if (!needle) return true
+    const hay = `${o.customers?.first_name || ''} ${o.customers?.last_name || ''} ${o.customers?.phone || ''} ${o.pickup_code || ''} ${(o.order_items || []).map((i) => i.name_snapshot).join(' ')}`
+    return hay.toLowerCase().includes(needle)
+  })
+
+  return (
+    <div>
+      <div style={{ display: 'flex', gap: 8, marginBottom: 14 }}>
+        {[
+          { t: 'Commandes', v: served.length, c: C.text },
+          { t: 'Annulées', v: cancelled.length, c: cancelled.length ? C.danger : C.faint },
+          { t: 'Encaissé', v: eur(encaisse), c: C.ok },
+        ].map((s) => (
+          <div key={s.t} style={{ ...S.card, flex: 1, padding: '12px 8px', textAlign: 'center' }}>
+            <div style={{ ...S.money, fontSize: 17, fontWeight: 600, color: s.c }}>{s.v}</div>
+            <div style={{ ...S.label, marginBottom: 0, marginTop: 3, fontSize: 9.5 }}>{s.t}</div>
+          </div>
+        ))}
+      </div>
+
+      {byStaff.length > 0 && (
+        <div style={{ marginBottom: 14 }}>
+          <Banner tone="danger">
+            <strong>
+              {byStaff.length} annulation{byStaff.length > 1 ? 's' : ''} par le bar
+            </strong>{' '}
+            — {eur(perdu)} non encaissés.
+            {byClient.length > 0 && ` (${byClient.length} annulée${byClient.length > 1 ? 's' : ''} par le client, sans conséquence.)`}
+          </Banner>
+        </div>
+      )}
+
+      <input
+        style={{ ...S.input, marginBottom: 10 }}
+        value={q}
+        onChange={(e) => setQ(e.target.value)}
+        placeholder="Nom, téléphone, code de retrait ou article…"
+      />
+
+      <div style={{ display: 'flex', gap: 6, marginBottom: 14, overflowX: 'auto' }}>
+        {[
+          ['tout', `Tout (${orders.length})`],
+          ['servies', `Servies (${served.length})`],
+          ['annulees', `Annulées (${cancelled.length})`],
+        ].map(([k, label]) => (
+          <button
+            key={k}
+            onClick={() => setFilter(k)}
+            style={{
+              ...S.chip,
+              whiteSpace: 'nowrap',
+              borderColor: filter === k ? C.terracotta : C.lineHi,
+              color: filter === k ? C.terracotta : C.dim,
+            }}
+          >
+            {label}
+          </button>
+        ))}
+      </div>
+
+      {shown.length === 0 && (
+        <Empty emoji="🕓" title={needle ? 'Aucune commande ne correspond' : 'Rien pour l’instant'} />
+      )}
+
+      <div style={{ display: 'grid', gap: 8 }}>
+        {shown.map((o) => {
+          const st = ORDER_STATUS[o.status] || ORDER_STATUS.RECEIVED
+          const annulee = o.status === 'CANCELLED'
+          const parClient = o.cancelled_by === 'client'
+          return (
+            <button
+              key={o.id}
+              onClick={() => setDetail(o)}
+              style={{
+                ...S.card,
+                padding: 12,
+                textAlign: 'left',
+                cursor: 'pointer',
+                color: C.text,
+                borderLeft: `4px solid ${annulee ? (parClient ? C.lineHi : C.danger) : C.line}`,
+                background: annulee ? C.creamSoft : C.paper,
+              }}
+            >
+              <div style={{ display: 'flex', alignItems: 'baseline', gap: 8 }}>
+                <span
+                  style={{
+                    fontFamily: FONT.label,
+                    fontWeight: 600,
+                    letterSpacing: 1.4,
+                    textDecoration: annulee ? 'line-through' : 'none',
+                    color: annulee ? C.faint : C.text,
+                  }}
+                >
+                  {o.pickup_code}
+                </span>
+                <span style={{ fontSize: 12, color: C.dim }}>
+                  {o.customers?.first_name} {o.customers?.last_name}
+                </span>
+                <span style={{ marginLeft: 'auto', fontSize: 11, color: C.faint }}>
+                  {timeFR(o.created_at)}
+                </span>
+              </div>
+
+              <div style={{ fontSize: 11.5, color: C.faint, marginTop: 3 }}>
+                {(o.order_items || []).map((it) => `${it.quantity}× ${it.name_snapshot}`).join(' · ')}
+              </div>
+
+              <div style={{ display: 'flex', alignItems: 'baseline', gap: 8, marginTop: 6 }}>
+                {annulee ? (
+                  <span style={{ fontSize: 11, fontWeight: 600, color: parClient ? C.faint : C.danger }}>
+                    {parClient ? 'Annulée par le client' : 'Annulée par le bar'}
+                    {o.cancelled_at ? ` · ${timeFR(o.cancelled_at)}` : ''}
+                  </span>
+                ) : (
+                  <span style={{ fontSize: 11, fontWeight: 600, color: st.color }}>
+                    {st.label}
+                  </span>
+                )}
+                <span
+                  style={{
+                    ...S.money,
+                    marginLeft: 'auto',
+                    fontWeight: 600,
+                    color: annulee ? C.faint : C.terracotta,
+                    textDecoration: annulee ? 'line-through' : 'none',
+                  }}
+                >
+                  {eur(o.total)}
+                </span>
+              </div>
+            </button>
+          )
+        })}
+      </div>
+
+      <Sheet
+        open={!!detail}
+        onClose={() => setDetail(null)}
+        title={detail ? `Commande ${detail.pickup_code}` : ''}
+      >
+        {detail && (
+          <>
+            {detail.status === 'CANCELLED' && (
+              <div style={{ marginBottom: 14 }}>
+                <Banner tone={detail.cancelled_by === 'client' ? 'info' : 'danger'}>
+                  Annulée par <strong>{detail.cancelled_by === 'client' ? 'le client' : 'le bar'}</strong>
+                  {detail.cancelled_at ? ` à ${timeFR(detail.cancelled_at)}` : ''}. Commande passée à{' '}
+                  {timeFR(detail.created_at)}.
+                </Banner>
+              </div>
+            )}
+
+            <button
+              onClick={() => {
+                const c = detail.customer_id
+                setDetail(null)
+                setFicheFor(c)
+              }}
+              disabled={!detail.customer_id}
+              style={{
+                width: '100%',
+                textAlign: 'left',
+                background: 'none',
+                border: `1px solid ${C.line}`,
+                borderRadius: RADIUS.control,
+                padding: '10px 12px',
+                marginBottom: 14,
+                cursor: detail.customer_id ? 'pointer' : 'default',
+              }}
+            >
+              <div style={{ fontSize: 13.5, display: 'flex', alignItems: 'center', gap: 6 }}>
+                <strong style={{ flex: 1 }}>
+                  {detail.customers?.first_name} {detail.customers?.last_name}
+                </strong>
+                {detail.customer_id && <span style={{ color: C.indigo, fontSize: 12 }}>Voir la fiche ›</span>}
+              </div>
+              <div style={{ color: C.dim, fontSize: 12.5, marginTop: 3 }}>
+                {phoneFR(detail.customers?.phone)}
+              </div>
+            </button>
+
+            <div style={{ display: 'grid', gap: 8, marginBottom: 16 }}>
+              {(detail.order_items || []).map((it) => (
+                <div
+                  key={it.id}
+                  style={{
+                    display: 'flex',
+                    justifyContent: 'space-between',
+                    padding: 11,
+                    borderRadius: RADIUS.control,
+                    background: C.paper,
+                    border: `1px solid ${C.line}`,
+                  }}
+                >
+                  <div>
+                    <div style={{ fontWeight: 500, fontSize: 14 }}>
+                      {it.quantity}× {it.name_snapshot}
+                    </div>
+                    {(it.variant_label || (it.detail?.options || []).length > 0) && (
+                      <div style={{ fontSize: 11.5, color: C.faint, marginTop: 3 }}>
+                        {[it.variant_label, ...(it.detail?.options || []).map((x) => x.name)]
+                          .filter(Boolean)
+                          .join(' · ')}
+                      </div>
+                    )}
+                  </div>
+                  <div style={{ ...S.money, fontWeight: 600 }}>
+                    {eur(Number(it.unit_price) * Number(it.quantity))}
+                  </div>
+                </div>
+              ))}
+            </div>
+
+            <div
+              style={{
+                display: 'flex',
+                justifyContent: 'space-between',
+                paddingTop: 12,
+                borderTop: `1px solid ${C.lineHi}`,
+                fontSize: 20,
+              }}
+            >
+              <span style={{ fontFamily: FONT.label, fontWeight: 600 }}>TOTAL</span>
+              <span style={{ ...S.money, fontWeight: 600, color: C.terracotta }}>
+                {eur(detail.total)}
+              </span>
+            </div>
+          </>
+        )}
+      </Sheet>
+
+      <ClientFicheSheet
+        customerId={ficheFor}
+        event={event}
+        onClose={() => setFicheFor(null)}
+        onChanged={load}
+        showToast={showToast}
+      />
+    </div>
+  )
+}
+
 function ClientsTab({ event, showToast }) {
   const [rows, setRows] = useState([])
   const [loading, setLoading] = useState(true)
@@ -10802,7 +11113,7 @@ function ClientsTab({ event, showToast }) {
                         padding: '2px 7px',
                         borderRadius: 999,
                         color: t === 'incident' ? C.danger : C.indigo,
-                        border: `1px solid ${t === 'incident' ? C.danger : C.indigo}44`,
+                        border: `1px solid ${alpha(t === 'incident' ? C.danger : C.indigo, 27)}`,
                       }}
                     >
                       {labelOf(t).toUpperCase()}
@@ -11164,7 +11475,7 @@ function TeamCard({ venue, session, showToast }) {
                       padding: 11,
                       borderRadius: 12,
                       background: 'rgba(201,130,31,.07)',
-                      border: `1px dashed ${C.warn}66`,
+                      border: `1px dashed ${alpha(C.warn, 40)}`,
                     }}
                   >
                     <div style={{ minWidth: 0, flex: 1 }}>

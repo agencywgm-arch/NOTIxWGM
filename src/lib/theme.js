@@ -6,49 +6,82 @@
 //          · Jost (corps)
 // ============================================================================
 
+/**
+ * Chaque teinte passe par une variable CSS, avec sa valeur de charte en
+ * repli. Le parcours CLIENT ne bouge pas d'un pixel : personne ne redéfinit
+ * ces variables, donc c'est toujours le repli qui s'applique.
+ *
+ * Ce détour sert l'espace STAFF, qui adopte un rendu épuré noir et blanc
+ * (voir `.noti-staff` dans index.html). Redéfinir les variables sur un
+ * conteneur suffit à retourner tout ce qu'il contient — y compris les
+ * composants PARTAGÉS avec le client (Sheet, Banner, Field, Empty…), qui
+ * auraient sinon fallu dupliquer, avec deux versions à maintenir en
+ * parallèle et l'assurance qu'elles divergent un jour.
+ */
+const v = (name, fallback) => `var(--n-${name}, ${fallback})`
+
 export const C = {
   // Fonds
-  cream: '#F7F1E9',
-  creamSoft: '#FBF7F2',
-  paper: '#FFFFFF',
+  cream: v('cream', '#F7F1E9'),
+  creamSoft: v('creamSoft', '#FBF7F2'),
+  paper: v('paper', '#FFFFFF'),
 
   // Couleurs de marque
-  terracotta: '#B96A4C',
-  terracottaSoft: '#E2C8B8',
-  navy: '#1C2A4A',
-  indigo: '#6A5FD6',
+  terracotta: v('terracotta', '#B96A4C'),
+  terracottaSoft: v('terracottaSoft', '#E2C8B8'),
+  navy: v('navy', '#1C2A4A'),
+  indigo: v('indigo', '#6A5FD6'),
 
   // Dégradé signature
-  rose: '#F3B6D8',
-  peach: '#F4A57A',
+  rose: v('rose', '#F3B6D8'),
+  peach: v('peach', '#F4A57A'),
 
   // Fonctionnel
-  ok: '#2E7D5B',
-  warn: '#C9821F',
-  danger: '#C0392B',
+  ok: v('ok', '#2E7D5B'),
+  warn: v('warn', '#C9821F'),
+  danger: v('danger', '#C0392B'),
 
   // Or — réservé aux cadeaux (articles offerts). Même teinte que l'accent des
   // illustrations produits, pour que « offert » se lise d'un coup d'œil au bar.
-  gold: '#C9A24B',
-  goldDark: '#8A6A20',
+  gold: v('gold', '#C9A24B'),
+  goldDark: v('goldDark', '#8A6A20'),
 
   // Texte
-  text: '#1C2A4A',
-  dim: '#5A6480',
-  faint: '#98A0B4',
+  text: v('text', '#1C2A4A'),
+  dim: v('dim', '#5A6480'),
+  faint: v('faint', '#98A0B4'),
 
   // Traits
-  line: 'rgba(28,42,74,0.10)',
-  lineHi: 'rgba(28,42,74,0.22)',
+  line: v('line', 'rgba(28,42,74,0.10)'),
+  lineHi: v('lineHi', 'rgba(28,42,74,0.22)'),
 }
 
-export const GRADIENT = `linear-gradient(120deg, ${C.rose}, ${C.peach})`
+/**
+ * Teinte translucide. Remplace la concaténation `${C.gold}66`, qui ne peut
+ * plus fonctionner : une variable CSS ne se laisse pas suffixer de deux
+ * caractères hexadécimaux. `color-mix` a l'avantage d'accepter aussi bien un
+ * hexadécimal qu'une variable, donc de marcher pour les couleurs calculées
+ * (celles d'un statut de commande, par exemple).
+ */
+export const alpha = (color, percent) =>
+  `color-mix(in srgb, ${color} ${percent}%, transparent)`
+
+export const GRADIENT = v('gradient', `linear-gradient(120deg, ${C.rose}, ${C.peach})`)
 
 export const FONT = {
-  display: "'Playfair Display', Georgia, serif",
-  script: "'Great Vibes', cursive",
-  label: "'Oswald', 'Jost', sans-serif",
-  body: "'Jost', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif",
+  display: v('fontDisplay', "'Playfair Display', Georgia, serif"),
+  script: v('fontScript', "'Great Vibes', cursive"),
+  label: v('fontLabel', "'Oswald', 'Jost', sans-serif"),
+  body: v('fontBody', "'Jost', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif"),
+}
+
+/**
+ * Rayon des angles. L'espace staff les resserre : l'esthétique iOS est faite
+ * d'angles francs et réguliers, pas des arrondis généreux du parcours client.
+ */
+export const RADIUS = {
+  card: v('radiusCard', '18px'),
+  control: v('radiusControl', '14px'),
 }
 
 export const S = {
@@ -62,7 +95,7 @@ export const S = {
   card: {
     background: C.paper,
     border: `1px solid ${C.line}`,
-    borderRadius: 18,
+    borderRadius: RADIUS.card,
     padding: 18,
   },
   h1: {
@@ -88,7 +121,7 @@ export const S = {
     gap: 8,
     width: '100%',
     minHeight: 54,
-    borderRadius: 14,
+    borderRadius: RADIUS.control,
     border: 'none',
     background: C.terracotta,
     color: '#fff',
@@ -106,7 +139,7 @@ export const S = {
     gap: 8,
     width: '100%',
     minHeight: 54,
-    borderRadius: 14,
+    borderRadius: RADIUS.control,
     border: 'none',
     background: C.indigo,
     color: '#fff',
@@ -124,7 +157,7 @@ export const S = {
     gap: 8,
     width: '100%',
     minHeight: 50,
-    borderRadius: 14,
+    borderRadius: RADIUS.control,
     border: `1.5px solid ${C.terracotta}`,
     background: 'transparent',
     color: C.terracotta,
@@ -138,7 +171,7 @@ export const S = {
   input: {
     width: '100%',
     minHeight: 50,
-    borderRadius: 12,
+    borderRadius: RADIUS.control,
     border: `1.5px solid ${C.lineHi}`,
     background: C.paper,
     color: C.text,

@@ -49,6 +49,87 @@
         background: #e2c8b8;
         border-radius: 3px;
       }
+
+      /* ====================================================================
+         ESPACE ÉQUIPE — rendu épuré, noir et blanc
+         --------------------------------------------------------------------
+         Le parcours CLIENT garde la charte (crème, terracotta, Playfair) :
+         il ne redéfinit aucune de ces variables, donc les valeurs de repli
+         inscrites dans theme.js s'appliquent telles quelles.
+
+         Ici on ne retouche AUCUN composant : on redéfinit la palette sur le
+         conteneur de l'espace équipe, et tout ce qu'il contient suit — y
+         compris les composants partagés avec le client (feuilles modales,
+         champs, bandeaux), qu'il aurait sinon fallu dupliquer.
+
+         Sur la couleur : le décor est monochrome, mais les états gardent les
+         teintes système d'iOS (rouge, vert, orange) — c'est ainsi que
+         l'iPhone lui-même procède. Passer « impayé » et « réglé » au même
+         gris ferait perdre au bar une lecture qu'il fait d'un coup d'œil.
+         ==================================================================== */
+      .noti-staff {
+        /* Fonds : gris système iOS pour la page, blanc pur pour les cartes */
+        --n-cream: #f2f2f7;
+        --n-creamSoft: #fafafa;
+        --n-paper: #ffffff;
+
+        /* Marque → noir. Un seul accent, comme sur iOS. */
+        --n-terracotta: #000000;
+        --n-terracottaSoft: #d1d1d6;
+        --n-navy: #000000;
+        --n-indigo: #1c1c1e;
+
+        /* Le dégradé signature n'a pas sa place ici : aplat neutre. */
+        --n-gradient: #f2f2f7;
+        --n-rose: #f2f2f7;
+        --n-peach: #f2f2f7;
+
+        /* États. Deux couleurs seulement, et elles portent de l'argent ou un
+           risque : vert « réglé », rouge « impayé / incident / annulation ».
+           Tout le reste passe en valeurs de gris — les étapes du service
+           (reçue, en prépa, prête) restent distinctes par leur valeur, et
+           sont de toute façon écrites en toutes lettres sur le cadran. */
+        --n-ok: #34c759;
+        --n-danger: #ff3b30;
+        --n-warn: #636366;
+        --n-gold: #8e8e93;
+        --n-goldDark: #3a3a3c;
+
+        /* Texte : noir franc, gris système pour le secondaire */
+        --n-text: #000000;
+        --n-dim: #3c3c43;
+        --n-faint: #8e8e93;
+
+        /* Séparateurs iOS */
+        --n-line: rgba(60, 60, 67, 0.13);
+        --n-lineHi: rgba(60, 60, 67, 0.29);
+
+        /* Typographie système : la police de l'appareil, pas la nôtre */
+        --n-fontDisplay: -apple-system, BlinkMacSystemFont, 'SF Pro Display', 'Segoe UI', Roboto,
+          sans-serif;
+        --n-fontScript: -apple-system, BlinkMacSystemFont, 'SF Pro Display', 'Segoe UI', Roboto,
+          sans-serif;
+        --n-fontLabel: -apple-system, BlinkMacSystemFont, 'SF Pro Text', 'Segoe UI', Roboto,
+          sans-serif;
+        --n-fontBody: -apple-system, BlinkMacSystemFont, 'SF Pro Text', 'Segoe UI', Roboto,
+          sans-serif;
+
+        /* Angles resserrés : francs et réguliers, pas généreux */
+        --n-radiusCard: 12px;
+        --n-radiusControl: 10px;
+
+        letter-spacing: normal;
+      }
+
+      /* Oswald étirait les intitulés en capitales espacées ; en système, cet
+         espacement devient du bruit. On le neutralise sur les libellés. */
+      .noti-staff [style*='uppercase'] {
+        letter-spacing: 0.02em;
+      }
+
+      .noti-staff ::-webkit-scrollbar-thumb {
+        background: #c7c7cc;
+      }
       #boot {
         display: flex;
         align-items: center;
