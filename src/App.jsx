@@ -6724,7 +6724,7 @@ function BarTab({ event, venue, session, onEventChange, showToast }) {
           { title: 'Prêtes', list: readyShown, color: C.terracotta, action: 'Retirée', next: 'PICKED_UP', prev: 'IN_PREP' },
           { title: 'Retirées', list: pickedUp, color: C.ok, action: 'Réglée', next: 'PAID', prev: 'READY' },
         ].map((col) => (
-          <div key={col.title} style={{ minWidth: 268, flex: '1 0 268px' }}>
+          <div key={col.title} style={{ minWidth: 300, flex: '1 0 300px' }}>
             <div
               style={{
                 display: 'flex',
@@ -6752,8 +6752,8 @@ function BarTab({ event, venue, session, onEventChange, showToast }) {
                   style={{
                     background: C.paper,
                     border: `1.5px solid ${!ack.has(o.id) && o.status === 'RECEIVED' ? C.terracotta : C.line}`,
-                    borderRadius: 14,
-                    padding: 13,
+                    borderRadius: 16,
+                    padding: 18,
                   }}
                 >
                   <div style={{ display: 'flex', justifyContent: 'space-between', gap: 8 }}>
@@ -6761,7 +6761,7 @@ function BarTab({ event, venue, session, onEventChange, showToast }) {
                       <div
                         style={{
                           fontFamily: FONT.label,
-                          fontSize: 30,
+                          fontSize: 34,
                           fontWeight: 700,
                           letterSpacing: 2,
                           color: C.navy,
@@ -6769,10 +6769,10 @@ function BarTab({ event, venue, session, onEventChange, showToast }) {
                       >
                         {o.pickup_code}
                       </div>
-                      <div style={{ fontSize: 12.5, marginTop: 2, fontWeight: 500 }}>
+                      <div style={{ fontSize: 15, marginTop: 3, fontWeight: 600 }}>
                         {o.customers?.first_name} {o.customers?.last_name}
                       </div>
-                      <div style={{ fontSize: 11, color: C.faint, marginTop: 1 }}>
+                      <div style={{ fontSize: 12.5, color: C.faint, marginTop: 1 }}>
                         {timeFR(o.created_at)}
                         {(o.customers?.tags || []).includes('vip') && (
                           <span style={{ color: C.indigo, fontWeight: 600 }}> · VIP</span>
@@ -6790,9 +6790,9 @@ function BarTab({ event, venue, session, onEventChange, showToast }) {
                             display: 'inline-flex',
                             alignItems: 'center',
                             gap: 4,
-                            padding: '3px 9px',
+                            padding: '4px 10px',
                             borderRadius: 999,
-                            fontSize: 11,
+                            fontSize: 12.5,
                             fontWeight: 700,
                             background: `${alpha(C.gold, 13)}`,
                             color: C.goldDark,
@@ -6803,13 +6803,13 @@ function BarTab({ event, venue, session, onEventChange, showToast }) {
                         </div>
                       )}
                     </div>
-                    <div style={{ ...S.money, fontWeight: 600, color: C.terracotta }}>{eur(o.total)}</div>
+                    <div style={{ ...S.money, fontWeight: 700, fontSize: 20, color: C.terracotta }}>{eur(o.total)}</div>
                   </div>
 
-                  <div style={{ marginTop: 9, display: 'grid', gap: 3 }}>
+                  <div style={{ marginTop: 11, display: 'grid', gap: 5 }}>
                     {(o.order_items || []).slice(0, 5).map((it) => (
-                      <div key={it.id} style={{ fontSize: 12.5, color: C.dim }}>
-                        <strong style={{ color: C.text, fontWeight: 600 }}>{it.quantity}×</strong>{' '}
+                      <div key={it.id} style={{ fontSize: 15, lineHeight: 1.35, color: C.dim }}>
+                        <strong style={{ color: C.text, fontWeight: 700 }}>{it.quantity}×</strong>{' '}
                         {it.name_snapshot}
                         {it.variant_label ? ` (${it.variant_label})` : ''}
                         {(it.detail?.options || []).length > 0 && (
@@ -6823,7 +6823,7 @@ function BarTab({ event, venue, session, onEventChange, showToast }) {
                     {(o.order_items || []).length > 5 && (
                       <button
                         onClick={() => setDetail(o)}
-                        style={{ background: 'none', border: 'none', color: C.indigo, fontSize: 12, padding: 0, textAlign: 'left', cursor: 'pointer' }}
+                        style={{ background: 'none', border: 'none', color: C.indigo, fontSize: 13.5, padding: 0, textAlign: 'left', cursor: 'pointer' }}
                       >
                         + {(o.order_items || []).length - 5} autres…
                       </button>
@@ -6833,19 +6833,19 @@ function BarTab({ event, venue, session, onEventChange, showToast }) {
                   {o.note && (
                     <div
                       style={{
-                        marginTop: 9,
-                        padding: 8,
+                        marginTop: 10,
+                        padding: 10,
                         borderRadius: 10,
                         background: 'rgba(201,130,31,.10)',
                         color: C.warn,
-                        fontSize: 11.5,
+                        fontSize: 13.5,
                       }}
                     >
                       {o.note}
                     </div>
                   )}
 
-                  <div style={{ display: 'flex', gap: 6, marginTop: 11 }}>
+                  <div style={{ display: 'flex', gap: 6, marginTop: 13 }}>
                     <button
                       onClick={() => {
                         acknowledge([o.id])
@@ -6853,14 +6853,14 @@ function BarTab({ event, venue, session, onEventChange, showToast }) {
                       }}
                       style={{
                         flex: 1,
-                        minHeight: 44,
-                        borderRadius: 12,
+                        minHeight: 48,
+                        borderRadius: 13,
                         border: 'none',
                         cursor: 'pointer',
                         fontFamily: FONT.label,
                         fontWeight: 600,
                         letterSpacing: 0.8,
-                        fontSize: 13,
+                        fontSize: 14,
                         textTransform: 'uppercase',
                         background: col.color,
                         color: '#fff',
@@ -6873,14 +6873,14 @@ function BarTab({ event, venue, session, onEventChange, showToast }) {
                         onClick={() => move(o, col.prev, { back: true })}
                         title={`Revenir à « ${statusLabel(col.prev, 'fr')} »`}
                         style={{
-                          width: 44,
-                          minHeight: 44,
-                          borderRadius: 12,
+                          width: 48,
+                          minHeight: 48,
+                          borderRadius: 13,
                           border: `1.5px solid ${C.lineHi}`,
                           background: C.paper,
                           color: C.dim,
                           cursor: 'pointer',
-                          fontSize: 17,
+                          fontSize: 18,
                           lineHeight: 1,
                         }}
                       >
@@ -6892,18 +6892,18 @@ function BarTab({ event, venue, session, onEventChange, showToast }) {
                       title="Commenter / signaler cette commande"
                       style={{
                         ...stepBtn,
-                        width: 44,
-                        height: 44,
-                        fontSize: 15,
+                        width: 48,
+                        height: 48,
+                        fontSize: 16,
                         borderColor: o.flag ? flagOf(o.flag)?.color : undefined,
                       }}
                     >
                       {o.flag ? flagOf(o.flag)?.emoji : '💬'}
                     </button>
-                    <button onClick={() => printTicket(o)} title="Imprimer le ticket (optionnel)" style={{ ...stepBtn, width: 44, height: 44, fontSize: 15 }}>
+                    <button onClick={() => printTicket(o)} title="Imprimer le ticket (optionnel)" style={{ ...stepBtn, width: 48, height: 48, fontSize: 16 }}>
                       🖨
                     </button>
-                    <button onClick={() => setDetail(o)} style={{ ...stepBtn, width: 44, height: 44, fontSize: 15 }}>
+                    <button onClick={() => setDetail(o)} style={{ ...stepBtn, width: 48, height: 48, fontSize: 16 }}>
                       ⋯
                     </button>
                   </div>
