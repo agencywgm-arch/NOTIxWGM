@@ -5261,6 +5261,23 @@ function StaffApp({ session }) {
   const [switcher, setSwitcher] = useState(false)
   const [roles, setRoles] = useState({})
   const [toast, showToast] = useToast()
+  // Plein écran (tablette/ordinateur au bar, écran dédié qui reste allumé
+  // toute la soirée) : masque la barre d'adresse, gagne le peu de place
+  // qu'elle prend. Absent d'iOS Safari (l'API n'y existe pas hors vidéo) —
+  // le bouton ne s'affiche donc que si le navigateur la supporte.
+  const [fullscreen, setFullscreen] = useState(false)
+  useEffect(() => {
+    const onChange = () => setFullscreen(!!document.fullscreenElement)
+    document.addEventListener('fullscreenchange', onChange)
+    return () => document.removeEventListener('fullscreenchange', onChange)
+  }, [])
+  function toggleFullscreen() {
+    if (document.fullscreenElement) {
+      document.exitFullscreen?.()
+    } else {
+      document.documentElement.requestFullscreen?.().catch(() => {})
+    }
+  }
 
   const loadVenues = useCallback(async () => {
     // Une invitation adressée à cet e-mail devient une adhésion dès la première
@@ -5410,6 +5427,29 @@ function StaffApp({ session }) {
             {event && !event.is_active ? ' · soirée clôturée' : ''} · changer
           </div>
         </button>
+        {typeof document !== 'undefined' && document.fullscreenEnabled && (
+          <button
+            onClick={toggleFullscreen}
+            title={fullscreen ? 'Quitter le plein écran' : 'Passer en plein écran'}
+            className="no-print"
+            style={{
+              width: 38,
+              height: 38,
+              flexShrink: 0,
+              borderRadius: 12,
+              border: `1.5px solid ${C.lineHi}`,
+              background: C.paper,
+              color: C.dim,
+              cursor: 'pointer',
+              fontSize: 16,
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+            }}
+          >
+            {fullscreen ? '⤡' : '⛶'}
+          </button>
+        )}
         <Logo size={0.6} />
       </div>
 
@@ -6135,10 +6175,14 @@ function BarCadrans({ orders, now, onDone, onDetail }) {
                     onClick={() => onDone(o)}
                     style={{
                       flex: 1,
+                      minWidth: 0,
                       minHeight: btnH,
                       borderRadius: 14,
                       border: 'none',
                       cursor: 'pointer',
+                      overflow: 'hidden',
+                      whiteSpace: 'nowrap',
+                      textOverflow: 'ellipsis',
                       fontFamily: FONT.label,
                       fontWeight: 600,
                       letterSpacing: 0.8,
@@ -6548,7 +6592,7 @@ function BarTab({ event, venue, session, onEventChange, showToast }) {
           de stress, l'opérateur agit par mémoire spatiale (§4). */}
       <div style={{ display: 'flex', gap: 6, marginBottom: 12 }} className="no-print">
         {[
-          ['cadrans', 'Cadrans'],
+          ['cadrans', 'Vue Rush'],
           ['colonnes', 'Suivi détaillé'],
         ].map(([k, label]) => (
           <button
@@ -6632,7 +6676,7 @@ function BarTab({ event, venue, session, onEventChange, showToast }) {
           // `prev` : un tap de trop sur « Prête » notifiait le client, qui
           // venait attendre devant le bar — exactement ce que l'outil est censé
           // éviter. Mieux vaut pouvoir revenir en arrière et ne pas s'en servir.
-          { title: 'Reçues', list: receivedShown, color: C.indigo, action: 'En préparation', next: 'IN_PREP', prev: null },
+          { title: 'Reçues', list: receivedShown, color: C.indigo, action: 'En prépa', next: 'IN_PREP', prev: null },
           { title: 'En préparation', list: inPrep, color: C.warn, action: 'Prête', next: 'READY', prev: 'RECEIVED' },
           { title: 'Prêtes', list: readyShown, color: C.terracotta, action: 'Retirée', next: 'PICKED_UP', prev: 'IN_PREP' },
           { title: 'Retirées', list: pickedUp, color: C.ok, action: 'Réglée', next: 'PAID', prev: 'READY' },
@@ -6766,10 +6810,14 @@ function BarTab({ event, venue, session, onEventChange, showToast }) {
                       }}
                       style={{
                         flex: 1,
+                        minWidth: 0,
                         minHeight: 48,
                         borderRadius: 13,
                         border: 'none',
                         cursor: 'pointer',
+                        overflow: 'hidden',
+                        whiteSpace: 'nowrap',
+                        textOverflow: 'ellipsis',
                         fontFamily: FONT.label,
                         fontWeight: 600,
                         letterSpacing: 0.8,
