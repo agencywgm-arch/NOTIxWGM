@@ -4909,20 +4909,29 @@ async function renderRecapCanvas({ venue, event, order, items, customer }) {
     y += Math.max(h, 30) + 16
   }
 
-  // Totaux + TVA
+  // Totaux + TVA — les trois libellés (Sous-total, TVA, TOTAL) restent
+  // alignés à droite sur le MÊME x, quelle que soit leur police : c'était
+  // le bug (le grand total utilisait un ancrage 20 px plus à gauche que
+  // les deux lignes au-dessus, donc son bord droit décrochait visuellement
+  // du reste de la colonne). Rester en aligné-à-droite plutôt que passer en
+  // aligné-à-gauche est volontaire : ça garde le libellé — même en gros
+  // caractères gras pour TOTAL — naturellement à distance de la valeur à
+  // droite, qui elle aussi grossit pour ce total final.
+  const labelX = W - 300
+  const valueX = W - 90
   y = Math.max(y + 24, H - 420)
   ctx.textAlign = 'right'
   ctx.fillStyle = '#5A6480'
   ctx.font = '400 20px Jost, sans-serif'
-  ctx.fillText('Sous-total', W - 300, y)
+  ctx.fillText('Sous-total', labelX, y)
   ctx.fillStyle = '#1C2A4A'
-  ctx.fillText(eur(order.subtotal ?? order.total), W - 90, y)
+  ctx.fillText(eur(order.subtotal ?? order.total), valueX, y)
   y += 34
 
   if (Number(order.discount) > 0) {
     ctx.fillStyle = '#2E7D5B'
-    ctx.fillText(order.promo_code || 'Remise', W - 300, y)
-    ctx.fillText(`−${eur(order.discount)}`, W - 90, y)
+    ctx.fillText(order.promo_code || 'Remise', labelX, y)
+    ctx.fillText(`−${eur(order.discount)}`, valueX, y)
     y += 34
   }
 
@@ -4935,18 +4944,19 @@ async function renderRecapCanvas({ venue, event, order, items, customer }) {
   ctx.font = '400 16px Jost, sans-serif'
   for (const r of Object.keys(vat).sort()) {
     const ttc = vat[r]
-    ctx.fillText(`dont TVA ${r} %`, W - 300, y)
-    ctx.fillText(eur(ttc - ttc / (1 + Number(r) / 100)), W - 90, y)
+    ctx.fillText(`dont TVA ${r} %`, labelX, y)
+    ctx.fillText(eur(ttc - ttc / (1 + Number(r) / 100)), valueX, y)
     y += 26
   }
 
   y += 16
   ctx.fillStyle = '#1C2A4A'
   ctx.font = '500 30px Oswald, sans-serif'
-  ctx.fillText('TOTAL', W - 320, y)
+  ctx.fillText('TOTAL', labelX, y)
   ctx.fillStyle = '#B96A4C'
   ctx.font = '600 40px Jost, sans-serif'
-  ctx.fillText(eur(order.total), W - 90, y + 2)
+  ctx.fillText(eur(order.total), valueX, y + 2)
+  ctx.textAlign = 'left'
 
   // Mention de règlement
   ctx.textAlign = 'center'
