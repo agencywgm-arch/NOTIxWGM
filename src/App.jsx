@@ -7266,15 +7266,90 @@ function CaisseTab({ event, venue, showToast }) {
   const cashed = cashedOrders + entriesTotal
   const unpaid = orders.filter((o) => o.status === 'UNPAID')
   const scanDelta = entries ? Math.max(0, Number(entries.scan_count || 0) - Number(entries.entries_count || 0)) : null
+  // Retirée = servie, donc l'argent est dû tout de suite — c'est la commande
+  // la plus urgente à encaisser, avant qu'elle ne se noie dans la liste.
+  const readyToCash = orders
+    .filter((o) => o.status === 'PICKED_UP')
+    .sort((a, b) => new Date(a.created_at) - new Date(b.created_at))
+
+  function quickPay(orderId) {
+    setSelected([orderId])
+    setPayOpen(true)
+  }
 
   return (
     <div style={{ paddingBottom: selected.length ? 120 : 0 }}>
       <div style={{ marginBottom: 14 }}>
         <Banner tone="info">
           L’encaissement se fait au bar, sur votre système habituel. Ici, on ne fait que le{' '}
-          <strong>suivi</strong> : cochez ce qui a été réglé.
+          <strong>suivi</strong> : cochez ce qui a été réglé — à n’importe quelle étape, même une
+          commande encore en préparation.
         </Banner>
       </div>
+
+      {/* Retirées mais pas encore encaissées : le service est fait, l'argent
+          ne l'est pas encore. C'est la case la plus urgente de cet écran, elle
+          passe donc avant même le total du jour. */}
+      {readyToCash.length > 0 && (
+        <div style={{ ...S.card, padding: 14, marginBottom: 14, border: `2px solid ${C.text}` }}>
+          <div style={{ ...S.label, marginBottom: 4 }}>
+            🧾 {readyToCash.length} commande{readyToCash.length > 1 ? 's' : ''} servie
+            {readyToCash.length > 1 ? 's' : ''}, pas encore encaissée{readyToCash.length > 1 ? 's' : ''}
+          </div>
+          <div style={{ fontSize: 11.5, color: C.dim, marginBottom: 12, lineHeight: 1.5 }}>
+            Le client est déjà servi — le règlement peut se faire à tout moment.
+          </div>
+          <div style={{ display: 'grid', gap: 8 }}>
+            {readyToCash.map((o) => (
+              <div
+                key={o.id}
+                style={{
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: 10,
+                  padding: 10,
+                  borderRadius: 12,
+                  background: C.paper,
+                  border: `1px solid ${C.line}`,
+                }}
+              >
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <div style={{ fontFamily: FONT.label, fontWeight: 600, letterSpacing: 1.4 }}>
+                    {o.pickup_code}
+                    <span style={{ color: C.dim, fontWeight: 400, letterSpacing: 0, marginLeft: 8, fontSize: 12 }}>
+                      {o.customers?.first_name} {o.customers?.last_name}
+                    </span>
+                  </div>
+                  <div style={{ fontSize: 11.5, color: C.faint, marginTop: 2 }}>
+                    {(o.order_items || []).map((it) => `${it.quantity}× ${it.name_snapshot}`).join(' · ')}
+                  </div>
+                </div>
+                <div style={{ ...S.money, fontWeight: 700, color: C.terracotta }}>{eur(o.total)}</div>
+                <button
+                  onClick={() => quickPay(o.id)}
+                  style={{
+                    minHeight: 46,
+                    padding: '0 14px',
+                    borderRadius: 12,
+                    border: 'none',
+                    cursor: 'pointer',
+                    background: C.text,
+                    color: '#fff',
+                    fontFamily: FONT.label,
+                    fontWeight: 600,
+                    fontSize: 12,
+                    letterSpacing: 0.6,
+                    textTransform: 'uppercase',
+                    whiteSpace: 'nowrap',
+                  }}
+                >
+                  Marquer réglé
+                </button>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
 
       {/* Food en attente de règlement : le chrono de préparation ne démarre
           qu'ici (note du 23/08, §2). Placé tout en haut parce que c'est la
@@ -7512,13 +7587,28 @@ function CaisseTab({ event, venue, showToast }) {
                       {paid ? '✓' : sel ? '✓' : ''}
                     </div>
                     <div style={{ flex: 1, minWidth: 0 }}>
-                      <div style={{ fontFamily: FONT.label, fontWeight: 600, letterSpacing: 1.4 }}>
-                        {o.pickup_code}
-                        <span style={{ color: st.color, fontSize: 10.5, marginLeft: 8, letterSpacing: 0.5 }}>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                        <span style={{ fontFamily: FONT.label, fontWeight: 600, letterSpacing: 1.4 }}>
+                          {o.pickup_code}
+                        </span>
+                        <span
+                          style={{
+                            fontFamily: FONT.label,
+                            fontSize: 10,
+                            fontWeight: 700,
+                            letterSpacing: 0.4,
+                            color: st.color,
+                            background: `${alpha(st.color, 12)}`,
+                            border: `1px solid ${alpha(st.color, 35)}`,
+                            borderRadius: 999,
+                            padding: '2px 8px',
+                            whiteSpace: 'nowrap',
+                          }}
+                        >
                           {st.short.toUpperCase()}
                         </span>
                       </div>
-                      <div style={{ fontSize: 11.5, color: C.faint, marginTop: 2 }}>
+                      <div style={{ fontSize: 11.5, color: C.faint, marginTop: 4 }}>
                         {(o.order_items || []).map((it) => `${it.quantity}× ${it.name_snapshot}`).join(' · ').slice(0, 80)}
                       </div>
                     </div>
