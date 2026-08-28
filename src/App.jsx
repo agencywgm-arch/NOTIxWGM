@@ -1866,23 +1866,21 @@ function IdentifyScreen({ lang, onVerified }) {
           />
         </Field>
 
-        <div style={{ display: 'flex', gap: 10 }}>
-          <div style={{ flex: 1 }}>
-            <Field label={t.postalCode}>
-              <input
-                style={S.input}
-                inputMode="numeric"
-                value={postalCode}
-                onChange={(e) => setPostalCode(e.target.value)}
-                autoComplete="postal-code"
-                placeholder="75011"
-              />
-            </Field>
-          </div>
-          <div style={{ flex: 1.35 }}>
-            <BirthdateField label={t.birthdate} value={birthdate} onChange={setBirthdate} />
-          </div>
-        </div>
+        {/* Retour terrain : sur une ligne partagée, le code postal se
+            retrouvait écrasé à côté des trois cases de la date de naissance.
+            Chacun a sa propre ligne, comme dans l'espace client. */}
+        <Field label={t.postalCode}>
+          <input
+            style={S.input}
+            inputMode="numeric"
+            value={postalCode}
+            onChange={(e) => setPostalCode(e.target.value)}
+            autoComplete="postal-code"
+            placeholder="75011"
+          />
+        </Field>
+
+        <BirthdateField label={t.birthdate} value={birthdate} onChange={setBirthdate} />
 
         {showOptional ? (
           <>
