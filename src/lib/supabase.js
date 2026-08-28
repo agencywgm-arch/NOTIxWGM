@@ -32,6 +32,28 @@ export function scanUrl(scanPointId) {
 }
 
 /**
+ * Un QR imprimé depuis un déploiement d'aperçu Vercel (un lien différent à
+ * chaque déploiement de branche/PR) casse dès que cet aperçu expire — c'est
+ * arrivé une fois en soirée. `scanUrl()` fige `window.location.origin` au
+ * moment de la génération : générer depuis le mauvais lien y grave l'erreur
+ * pour de bon, sur le papier.
+ *
+ * Détection sans connaître à l'avance le vrai domaine de prod : chaque
+ * déploiement Vercel reçoit un identifiant aléatoire (9-10 caractères,
+ * lettres ET chiffres mélangés, ex. « 4wp5dmqbv ») inséré dans le nom
+ * d'hôte — le domaine de production stable n'en a pas.
+ */
+export function isPreviewDeployment() {
+  if (typeof window === 'undefined') return false
+  const host = window.location.hostname
+  if (!host.endsWith('.vercel.app')) return false
+  return host
+    .split('.')[0]
+    .split('-')
+    .some((seg) => /^[a-z0-9]{8,12}$/.test(seg) && /[0-9]/.test(seg) && /[a-z]/.test(seg))
+}
+
+/**
  * Clé stable d'une erreur métier, indépendante de la langue : le parcours
  * client la traduit via son dictionnaire (voir lib/i18n.js), l'espace staff
  * garde frError() ci-dessous.

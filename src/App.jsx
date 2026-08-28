@@ -12,7 +12,7 @@
 
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import QRCode from 'qrcode'
-import { supabase, isConfigured, frError, errorKey, BASE_PATH, scanUrl } from './lib/supabase.js'
+import { supabase, isConfigured, frError, errorKey, BASE_PATH, scanUrl, isPreviewDeployment } from './lib/supabase.js'
 import { C, S, FONT, GRADIENT, RADIUS, alpha, eur, timeFR, dateFR, phoneFR, normalizePhone, isValidPhone } from './lib/theme.js'
 import { dict, useT, trProduct, LANG_LABEL } from './lib/i18n.js'
 import { phoneVerificationAvailable, sendPhoneCode, confirmPhoneCode } from './lib/firebase.js'
@@ -11799,8 +11799,20 @@ function QrTab({ event, venue, showToast }) {
 
   if (loading) return <Spinner />
 
+  const onPreview = isPreviewDeployment()
+
   return (
     <div>
+      {onPreview && (
+        <div style={{ marginBottom: 14 }}>
+          <Banner tone="danger">
+            ⚠️ Vous êtes sur un <strong>lien d'aperçu</strong> (URL de déploiement, pas le site
+            définitif) — les QR générés ici vont casser dès que cet aperçu expirera. Ouvrez
+            l'app depuis l'adresse de production habituelle avant d'exporter ou d'imprimer.
+          </Banner>
+        </div>
+      )}
+
       <div style={{ marginBottom: 14 }}>
         <Banner tone="info">
           Phase 1 : un QR à l’<strong>entrée</strong>, un QR au <strong>bar</strong>. Aucun QR sur
@@ -11809,7 +11821,12 @@ function QrTab({ event, venue, showToast }) {
       </div>
 
       <div style={{ display: 'flex', gap: 8, marginBottom: 14 }}>
-        <button disabled={busy || !points.length} onClick={exportAll} style={{ ...S.btn, minHeight: 48 }}>
+        <button
+          disabled={busy || !points.length || onPreview}
+          onClick={exportAll}
+          title={onPreview ? "Indisponible sur un lien d'aperçu — ouvrez le site de production" : undefined}
+          style={{ ...S.btn, minHeight: 48, opacity: onPreview ? 0.5 : 1 }}
+        >
           {busy ? '…' : 'Exporter les affiches (PDF)'}
         </button>
       </div>
@@ -11851,7 +11868,15 @@ function QrTab({ event, venue, showToast }) {
               ) : (
                 <div style={{ height: 216 }} />
               )}
-              <div style={{ fontSize: 11, color: C.faint, marginTop: 10, wordBreak: 'break-all' }}>
+              <div
+                style={{
+                  fontSize: 11,
+                  color: onPreview ? C.danger : C.faint,
+                  fontWeight: onPreview ? 600 : 400,
+                  marginTop: 10,
+                  wordBreak: 'break-all',
+                }}
+              >
                 {scanUrl(preview.id)}
               </div>
             </div>
@@ -11869,11 +11894,13 @@ function QrTab({ event, venue, showToast }) {
 
             <div style={{ display: 'grid', gap: 8 }}>
               <button
+                disabled={onPreview}
+                title={onPreview ? "Indisponible sur un lien d'aperçu — ouvrez le site de production" : undefined}
                 onClick={async () => {
                   const canvas = await renderQrPoster(venue, event, preview, 1080, 1350)
                   await canvasToPng(canvas, `noti-qr-${preview.kind}.png`, 'QR Noti Calling')
                 }}
-                style={S.btn}
+                style={{ ...S.btn, opacity: onPreview ? 0.5 : 1 }}
               >
                 Télécharger l’affiche (PNG)
               </button>
