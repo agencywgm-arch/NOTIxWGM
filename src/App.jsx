@@ -15,6 +15,7 @@ import QRCode from 'qrcode'
 import { supabase, isConfigured, frError, errorKey, BASE_PATH, scanUrl } from './lib/supabase.js'
 import { C, S, FONT, GRADIENT, RADIUS, alpha, eur, timeFR, dateFR, phoneFR, normalizePhone, isValidPhone } from './lib/theme.js'
 import { dict, useT, trProduct, LANG_LABEL } from './lib/i18n.js'
+import { phoneVerificationAvailable, sendPhoneCode, confirmPhoneCode } from './lib/firebase.js'
 import {
   canvasesToPdfBlob,
   shareOrDownload,
@@ -638,6 +639,125 @@ function Field({ label, children, hint }) {
       <label style={S.label}>{label}</label>
       {children}
       {hint && <div style={{ fontSize: 11.5, color: C.faint, marginTop: 6 }}>{hint}</div>}
+    </div>
+  )
+}
+
+/**
+ * Vérification SMS du numéro (facultative, qualité des données — pas une
+ * sécurité de connexion). `phone` est la valeur en cours de saisie dans le
+ * formulaire parent : tant qu'elle diffère du numéro enregistré, on demande
+ * d'enregistrer d'abord — vérifier un numéro non sauvegardé n'aurait pas de
+ * sens, et confirmerait un numéro que la fiche client ne porte pas encore.
+ */
+function PhoneVerifyBlock({ lang, customer, phone, showToast, onVerified }) {
+  const t = useT(lang)
+  const [step, setStep] = useState('idle') // idle | sending | sent | confirming
+  const [code, setCode] = useState('')
+  const confirmationRef = useRef(null)
+
+  if (!phoneVerificationAvailable || !customer?.phone) return null
+
+  const saved = customer.phone
+  const unsaved = normalizePhone(phone) !== normalizePhone(saved)
+  const verified = customer.phone_verified_at && customer.phone_verified_number === saved
+
+  if (verified && !unsaved) {
+    return (
+      <div style={{ fontSize: 12.5, color: C.ok, fontWeight: 600, marginTop: -10, marginBottom: 16 }}>
+        ✓ {t.phoneVerified}
+      </div>
+    )
+  }
+
+  if (unsaved) {
+    return (
+      <div style={{ fontSize: 11.5, color: C.faint, marginTop: -10, marginBottom: 16 }}>
+        {t.phoneVerifyUnsaved}
+      </div>
+    )
+  }
+
+  function mapFirebaseError(e, forCode) {
+    const code = e?.code || ''
+    if (code.includes('invalid-phone-number')) return t.phoneVerifyErrInvalid
+    if (code.includes('too-many-requests')) return t.phoneVerifyErrRate
+    if (forCode && (code.includes('invalid-verification-code') || code.includes('code-expired'))) {
+      return t.phoneVerifyErrCode
+    }
+    return t.phoneVerifyErrGeneric
+  }
+
+  async function send() {
+    setStep('sending')
+    try {
+      confirmationRef.current = await sendPhoneCode(normalizePhone(saved), 'noti-recaptcha-container')
+      setCode('')
+      setStep('sent')
+    } catch (e) {
+      console.error('[Noti] envoi code vérification', e)
+      showToast(mapFirebaseError(e, false), 'error')
+      setStep('idle')
+    }
+  }
+
+  async function confirm() {
+    if (!confirmationRef.current) return
+    setStep('confirming')
+    try {
+      await confirmPhoneCode(confirmationRef.current, code)
+      const { error } = await supabase.rpc('mark_phone_verified')
+      if (error) throw error
+      showToast(t.phoneVerifySuccess, 'ok')
+      setCode('')
+      setStep('idle')
+      await onVerified?.()
+    } catch (e) {
+      console.error('[Noti] confirmation code vérification', e)
+      showToast(mapFirebaseError(e, true), 'error')
+      setStep('sent')
+    }
+  }
+
+  return (
+    <div style={{ marginTop: -10, marginBottom: 16 }}>
+      <div id="noti-recaptcha-container" />
+      {step === 'idle' || step === 'sending' ? (
+        <>
+          <div style={{ fontSize: 11.5, color: C.faint, marginBottom: 8 }}>{t.phoneVerifyIntro}</div>
+          <button onClick={send} disabled={step === 'sending'} style={{ ...S.btnGhost, minHeight: 40, fontSize: 12 }}>
+            {step === 'sending' ? t.phoneVerifySending : t.phoneVerify}
+          </button>
+        </>
+      ) : (
+        <>
+          <div style={{ fontSize: 11.5, color: C.dim, marginBottom: 8 }}>{t.phoneVerifyCodeSent}</div>
+          <div style={{ display: 'flex', gap: 8 }}>
+            <input
+              style={{ ...S.input, flex: 1, textAlign: 'center', letterSpacing: 4, fontSize: 20 }}
+              inputMode="numeric"
+              maxLength={6}
+              value={code}
+              onChange={(e) => setCode(e.target.value.replace(/\D/g, '').slice(0, 6))}
+              placeholder="000000"
+            />
+            <button
+              onClick={confirm}
+              disabled={code.length !== 6 || step === 'confirming'}
+              style={{ ...S.btn, minHeight: 50, width: 120, opacity: code.length !== 6 ? 0.5 : 1 }}
+            >
+              {step === 'confirming' ? t.phoneVerifyConfirming : t.phoneVerifyConfirm}
+            </button>
+          </div>
+          <button
+            onClick={send}
+            disabled={step === 'confirming'}
+            style={{ background: 'none', border: 'none', padding: '8px 0 0', color: C.indigo, fontSize: 11.5, cursor: 'pointer' }}
+          >
+            {t.phoneVerifyResend}
+          </button>
+        </>
+      )}
     </div>
   )
 }
@@ -2842,6 +2962,7 @@ function OrderingApp({
           await onReloadCustomer?.()
           showToast(t.profileSaved, 'ok')
         }}
+        onReloadCustomer={onReloadCustomer}
         showToast={showToast}
       />
 
@@ -3711,6 +3832,7 @@ function ClientProfileSheet({
   customer,
   onClose,
   onSaved,
+  onReloadCustomer,
   showToast,
   credits = 0,
   orders = [],
@@ -3873,6 +3995,14 @@ function ClientProfileSheet({
           placeholder="06 12 34 56 78"
         />
       </Field>
+
+      <PhoneVerifyBlock
+        lang={lang}
+        customer={customer}
+        phone={phone}
+        showToast={showToast}
+        onVerified={onReloadCustomer}
+      />
 
       {/* Retour terrain : sur une ligne partagée, le code postal se
           retrouvait écrasé à côté des trois cases de la date de naissance.
