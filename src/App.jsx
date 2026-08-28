@@ -21,6 +21,7 @@ import {
   shareOrDownload,
   downloadBlob,
   makeCanvas,
+  ensureFontsReady,
   roundRect,
   wrapText,
   loadImage,
@@ -5133,6 +5134,7 @@ async function renderRecapCanvas({ venue, event, order, items, customer }) {
   const W = 1240
   const H = 1754
   const { canvas, ctx } = makeCanvas(W, H, 1)
+  await ensureFontsReady()
 
   ctx.fillStyle = '#FFFFFF'
   ctx.fillRect(0, 0, W, H)
@@ -12453,6 +12455,7 @@ function NewEventSheet({ open, venue, onClose, onCreated, showToast }) {
 
 async function renderQrPoster(venue, event, point, W = 1080, H = 1350) {
   const { canvas, ctx } = makeCanvas(W, H, 1)
+  await ensureFontsReady()
   const qr = await loadImage(
     await QRCode.toDataURL(scanUrl(point.id), {
       width: 900,
@@ -12532,6 +12535,7 @@ async function renderTicketCanvas({ venue, event, order }) {
   const W = 576 // 80 mm à 180 dpi
   const H = 1200
   const { canvas, ctx } = makeCanvas(W, H, 1)
+  await ensureFontsReady()
   ctx.fillStyle = '#FFFFFF'
   ctx.fillRect(0, 0, W, H)
 
@@ -12610,6 +12614,7 @@ async function renderReportCanvas({ venue, event, report }) {
   const W = 1240
   const H = 1754
   const { canvas, ctx } = makeCanvas(W, H, 1)
+  await ensureFontsReady()
   ctx.fillStyle = '#FFFFFF'
   ctx.fillRect(0, 0, W, H)
 
