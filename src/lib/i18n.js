@@ -110,6 +110,10 @@ export const T = {
     phoneVerifyErrRate: 'Trop de tentatives sur ce numéro — réessayez dans quelques minutes.',
     phoneVerifyErrCode: 'Ce code ne correspond pas. Vérifiez les 6 chiffres reçus par SMS.',
     phoneVerifyErrGeneric: 'La vérification a échoué. Réessayez dans un instant.',
+    phoneVerifyRequiredIntro:
+      'Votre numéro doit être vérifié avant de commander — un code à 6 chiffres va être envoyé par SMS.',
+    phoneVerifyBypassed:
+      'La vérification SMS est momentanément indisponible — votre commande part quand même.',
 
     // Reconnaissance
     gladToSeeYou: 'Ravi de vous revoir',
@@ -421,6 +425,8 @@ export const T = {
     phoneVerifyErrRate: 'Too many attempts on this number — try again in a few minutes.',
     phoneVerifyErrCode: 'That code doesn’t match. Check the 6 digits received by SMS.',
     phoneVerifyErrGeneric: 'Verification failed. Try again in a moment.',
+    phoneVerifyRequiredIntro: 'Your number must be verified before ordering — a 6-digit code will be sent by SMS.',
+    phoneVerifyBypassed: 'SMS verification is temporarily unavailable — your order is going through anyway.',
 
     gladToSeeYou: 'Good to see you again',
     backAgain: 'Welcome back',
@@ -716,6 +722,8 @@ export const T = {
     phoneVerifyErrRate: 'Demasiados intentos con este número — vuelve a intentarlo en unos minutos.',
     phoneVerifyErrCode: 'Ese código no coincide. Revisa los 6 dígitos recibidos por SMS.',
     phoneVerifyErrGeneric: 'La verificación falló. Vuelve a intentarlo en un momento.',
+    phoneVerifyRequiredIntro: 'Tu número debe verificarse antes de pedir — se enviará un código de 6 dígitos por SMS.',
+    phoneVerifyBypassed: 'La verificación por SMS no está disponible por ahora — tu pedido se envía de todos modos.',
 
     gladToSeeYou: 'Encantados de verte de nuevo',
     backAgain: 'Bienvenido de nuevo',

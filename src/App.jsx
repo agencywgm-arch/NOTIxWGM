@@ -763,6 +763,147 @@ function PhoneVerifyBlock({ lang, customer, phone, showToast, onVerified }) {
 }
 
 /**
+ * Vérification OBLIGATOIRE avant l'envoi d'une commande (uniquement quand
+ * Firebase est configuré — sinon ce composant n'est jamais monté). Distincte
+ * de `PhoneVerifyBlock` (facultative, écran de profil) : ici il n'y a rien à
+ * enregistrer avant de vérifier (le téléphone est déjà acquis dès
+ * l'identification), et une erreur qui n'est PAS imputable au client — panne
+ * réseau, service Firebase indisponible, code d'erreur inconnu — laisse
+ * passer la commande plutôt que de bloquer toute la soirée sur un incident
+ * technique. Seules les erreurs de saisie (numéro invalide, mauvais code,
+ * trop de tentatives) gardent la porte fermée.
+ */
+function PhoneVerifyGate({ lang, customer, onVerified, onBypass }) {
+  const t = useT(lang)
+  const [step, setStep] = useState('intro') // intro | sending | sent | confirming
+  const [code, setCode] = useState('')
+  const [error, setError] = useState('')
+  const confirmationRef = useRef(null)
+
+  function classify(e, forCode) {
+    const code = e?.code || ''
+    if (code.includes('invalid-phone-number')) return { message: t.phoneVerifyErrInvalid, blocking: true }
+    if (code.includes('too-many-requests')) return { message: t.phoneVerifyErrRate, blocking: true }
+    if (forCode && (code.includes('invalid-verification-code') || code.includes('code-expired'))) {
+      return { message: t.phoneVerifyErrCode, blocking: true }
+    }
+    // Tout le reste (réseau, panne Firebase, erreur interne, code inconnu) :
+    // un incident technique n'est pas une faute du client.
+    return { message: null, blocking: false }
+  }
+
+  async function send() {
+    setError('')
+    setStep('sending')
+    try {
+      confirmationRef.current = await sendPhoneCode(normalizePhone(customer.phone), 'noti-recaptcha-checkout')
+      setCode('')
+      setStep('sent')
+    } catch (e) {
+      console.error('[Noti] envoi code vérification (commande)', e)
+      const { message, blocking } = classify(e, false)
+      if (blocking) {
+        setError(message)
+        setStep('intro')
+      } else {
+        onBypass()
+      }
+    }
+  }
+
+  async function confirm() {
+    if (!confirmationRef.current) return
+    setError('')
+    setStep('confirming')
+    try {
+      await confirmPhoneCode(confirmationRef.current, code)
+      const { error: rpcError } = await supabase.rpc('mark_phone_verified')
+      if (rpcError) throw rpcError
+      await onVerified()
+    } catch (e) {
+      console.error('[Noti] confirmation code vérification (commande)', e)
+      const { message, blocking } = classify(e, true)
+      if (blocking) {
+        setError(message)
+        setStep('sent')
+      } else {
+        onBypass()
+      }
+    }
+  }
+
+  return (
+    <div
+      style={{
+        border: `1.5px solid ${C.terracotta}`,
+        borderRadius: 16,
+        padding: 16,
+        background: 'rgba(185,106,76,.06)',
+      }}
+    >
+      <div id="noti-recaptcha-checkout" />
+      <div style={{ fontSize: 14, fontWeight: 600, marginBottom: 8 }}>{t.phoneVerify}</div>
+
+      {error && (
+        <div style={{ marginBottom: 12 }}>
+          <Banner tone="danger">{error}</Banner>
+        </div>
+      )}
+
+      {step === 'intro' || step === 'sending' ? (
+        <>
+          <div style={{ fontSize: 12.5, color: C.dim, marginBottom: 12, lineHeight: 1.5 }}>
+            {t.phoneVerifyRequiredIntro}
+          </div>
+          <button
+            onClick={send}
+            disabled={step === 'sending'}
+            style={{ ...S.btn, minHeight: 52, opacity: step === 'sending' ? 0.6 : 1 }}
+          >
+            {step === 'sending' ? t.phoneVerifySending : t.phoneVerifySend}
+          </button>
+        </>
+      ) : (
+        <>
+          <div style={{ fontSize: 12.5, color: C.dim, marginBottom: 12 }}>{t.phoneVerifyCodeSent}</div>
+          <input
+            style={{ ...S.input, textAlign: 'center', letterSpacing: 4, fontSize: 20, marginBottom: 10 }}
+            inputMode="numeric"
+            maxLength={6}
+            value={code}
+            onChange={(e) => setCode(e.target.value.replace(/\D/g, '').slice(0, 6))}
+            placeholder="000000"
+            autoFocus
+          />
+          <button
+            onClick={confirm}
+            disabled={code.length !== 6 || step === 'confirming'}
+            style={{ ...S.btn, minHeight: 52, opacity: code.length !== 6 ? 0.5 : 1, marginBottom: 8 }}
+          >
+            {step === 'confirming' ? t.phoneVerifyConfirming : t.phoneVerifyConfirm}
+          </button>
+          <button
+            onClick={send}
+            disabled={step === 'confirming'}
+            style={{
+              display: 'block',
+              margin: '0 auto',
+              background: 'none',
+              border: 'none',
+              color: C.indigo,
+              fontSize: 11.5,
+              cursor: 'pointer',
+            }}
+          >
+            {t.phoneVerifyResend}
+          </button>
+        </>
+      )}
+    </div>
+  )
+}
+
+/**
  * Date de naissance en trois cases JJ / MM / AAAA.
  *
  * Retour terrain : « faire défiler jusqu'aux années 90 est long et pénible ».
@@ -2933,6 +3074,9 @@ function OrderingApp({
         subtotal={subtotal}
         creditsTotal={creditsTotal}
         prepMin={event.default_prep_min ?? 1}
+        customer={customer}
+        onReloadCustomer={onReloadCustomer}
+        showToast={showToast}
         onClose={() => setCartCheckout(false)}
         onSubmit={async (payload) => {
           try {
@@ -4150,11 +4294,31 @@ function CartSheet({ open, cart, lang, subtotal, onClose, onQty, onCheckout }) {
 }
 
 // ----------------------------------------------------------------- Validation
-function CheckoutSheet({ open, lang, event, cart, pass, promoCode, subtotal, prepMin, creditsTotal = 0, onClose, onSubmit }) {
+function CheckoutSheet({
+  open,
+  lang,
+  event,
+  cart,
+  pass,
+  promoCode,
+  subtotal,
+  prepMin,
+  creditsTotal = 0,
+  customer,
+  onReloadCustomer,
+  showToast,
+  onClose,
+  onSubmit,
+}) {
   const t = useT(lang)
   const [note, setNote] = useState('')
   const [preview, setPreview] = useState(null)
   const [busy, setBusy] = useState(false)
+  // Vérification obligatoire avant envoi : ne s'active que si Firebase est
+  // configuré ET que le numéro actuel n'est pas déjà vérifié (0039).
+  const [verifying, setVerifying] = useState(false)
+  const phoneVerified = customer?.phone_verified_at && customer.phone_verified_number === customer?.phone
+  const needsVerification = phoneVerificationAvailable && !phoneVerified
 
   // Délai de grâce (note du 23/08, §2bis.1). Le point qui fait tout l'intérêt
   // du mécanisme : pendant ces 5 secondes, RIEN n'est envoyé au serveur, donc
@@ -4177,7 +4341,10 @@ function CheckoutSheet({ open, lang, event, cart, pass, promoCode, subtotal, pre
   // Une feuille qu'on referme (geste, bouton précédent) ne doit pas laisser
   // partir une commande que le client croyait avoir abandonnée.
   useEffect(() => {
-    if (!open) stopGrace()
+    if (!open) {
+      stopGrace()
+      setVerifying(false)
+    }
   }, [open, stopGrace])
   useEffect(() => () => stopGrace(), [stopGrace])
 
@@ -4361,10 +4528,25 @@ function CheckoutSheet({ open, lang, event, cart, pass, promoCode, subtotal, pre
             {t.graceCancel}
           </button>
         </div>
+      ) : verifying ? (
+        <PhoneVerifyGate
+          lang={lang}
+          customer={customer}
+          onVerified={async () => {
+            await onReloadCustomer?.()
+            setVerifying(false)
+            startGrace()
+          }}
+          onBypass={() => {
+            showToast?.(t.phoneVerifyBypassed, 'info')
+            setVerifying(false)
+            startGrace()
+          }}
+        />
       ) : (
         <button
           disabled={busy}
-          onClick={startGrace}
+          onClick={() => (needsVerification ? setVerifying(true) : startGrace())}
           style={{ ...S.btn, opacity: busy ? 0.6 : 1, minHeight: 58 }}
         >
           {busy ? t.sending : t.send}
