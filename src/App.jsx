@@ -11897,10 +11897,22 @@ function QrTab({ event, venue, showToast }) {
                 disabled={onPreview}
                 title={onPreview ? "Indisponible sur un lien d'aperçu — ouvrez le site de production" : undefined}
                 onClick={async () => {
+                  const canvas = await renderQrPoster(venue, event, preview, 1240, 1754)
+                  const blob = canvasesToPdfBlob([canvas], { quality: 0.95 })
+                  await shareOrDownload(blob, `noti-qr-${preview.kind}.pdf`, 'QR Noti Calling')
+                }}
+                style={{ ...S.btn, opacity: onPreview ? 0.5 : 1 }}
+              >
+                Télécharger l’affiche (PDF)
+              </button>
+              <button
+                disabled={onPreview}
+                title={onPreview ? "Indisponible sur un lien d'aperçu — ouvrez le site de production" : undefined}
+                onClick={async () => {
                   const canvas = await renderQrPoster(venue, event, preview, 1080, 1350)
                   await canvasToPng(canvas, `noti-qr-${preview.kind}.png`, 'QR Noti Calling')
                 }}
-                style={{ ...S.btn, opacity: onPreview ? 0.5 : 1 }}
+                style={{ ...S.btnGhost, opacity: onPreview ? 0.5 : 1 }}
               >
                 Télécharger l’affiche (PNG)
               </button>
