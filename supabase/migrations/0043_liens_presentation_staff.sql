@@ -94,13 +94,12 @@ $$;
  * authentifiée (y compris anonyme) : la validité tient au lien lui-même,
  * pas à qui l'appelle.
  */
--- Les paramètres de sortie ne portent PAS les mêmes noms que les colonnes
--- manipulées à l'intérieur (venue_id, role) : sinon PL/pgSQL les confond
--- avec les colonnes de la requête INSERT ... ON CONFLICT plus bas et
--- Postgres refuse d'exécuter la fonction avec « column reference ... is
--- ambiguous ». Rencontré en le déployant : voir 0044 pour le correctif.
+-- Renvoie un scalaire, jamais « returns table(venue_id, role) » : des
+-- paramètres de sortie portant le nom des colonnes manipulées plus bas
+-- entrent en collision avec elles côté PL/pgSQL (« column reference
+-- "venue_id" is ambiguous »). Voir 0045 pour le détail.
 create or replace function public.redeem_presentation_link(p_link uuid)
-returns table(out_venue_id uuid, out_role text)
+returns uuid
 language plpgsql volatile security definer set search_path = public
 as $$
 declare
@@ -111,8 +110,8 @@ begin
   end if;
 
   select * into v_link from public.presentation_links where id = p_link;
-  if v_link is null then raise exception 'unknown_order'; end if;
-  if v_link.revoked_at is not null then raise exception 'invalid_pass_code'; end if;
+  if not found then raise exception 'unknown_link'; end if;
+  if v_link.revoked_at is not null then raise exception 'link_revoked'; end if;
 
   insert into public.staff_members (venue_id, user_id, role, presentation_link_id)
   values (v_link.venue_id, auth.uid(), v_link.role, p_link)
@@ -120,7 +119,7 @@ begin
     set role = excluded.role, presentation_link_id = excluded.presentation_link_id
     where public.staff_members.role <> 'owner';
 
-  return query select v_link.venue_id, v_link.role;
+  return v_link.venue_id;
 end;
 $$;
 

@@ -90,6 +90,8 @@ const ERROR_KEYS = [
   'no_food_token',
   'no_pass',
   'unknown_order',
+  'unknown_link',
+  'link_revoked',
   'forbidden',
 ]
 
@@ -136,6 +138,8 @@ export function frError(err) {
   if (m.includes('no_food_token')) return 'Aucun jeton food disponible à convertir.'
   if (m.includes('no_pass')) return 'Aucun forfait actif pour cette soirée.'
   if (m.includes('unknown_order')) return 'Commande introuvable.'
+  if (m.includes('unknown_link')) return 'Ce lien de présentation n’existe plus.'
+  if (m.includes('link_revoked')) return 'Ce lien de présentation a été révoqué.'
   if (m.includes('invalid_flag')) return 'Type de signalement inconnu.'
   if (m.includes('empty_note')) return 'Le commentaire ne peut pas être vide.'
 
