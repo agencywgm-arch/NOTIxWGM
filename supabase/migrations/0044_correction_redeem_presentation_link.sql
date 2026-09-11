@@ -8,7 +8,11 @@
 --  pas.
 -- ============================================================================
 
-create or replace function public.redeem_presentation_link(p_link uuid)
+-- CREATE OR REPLACE refuse de renommer les paramètres de sortie d'une
+-- fonction existante (42P13) : il faut d'abord la supprimer.
+drop function if exists public.redeem_presentation_link(uuid);
+
+create function public.redeem_presentation_link(p_link uuid)
 returns table(out_venue_id uuid, out_role text)
 language plpgsql volatile security definer set search_path = public
 as $$
