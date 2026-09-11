@@ -1382,6 +1382,10 @@ function ResetPasswordScreen({ onDone }) {
 function PresentationEntry({ linkId, session }) {
   const [status, setStatus] = useState('working') // working | error | ready
   const [err, setErr] = useState('')
+  // La session anonyme tout juste ouverte, gardée ici : l'événement qui la
+  // remonte à AppInner peut arriver après ce premier rendu, et l'espace
+  // équipe monté avec une session nulle obligeait à recharger la page.
+  const [opened, setOpened] = useState(null)
   const ranRef = useRef(false)
 
   useEffect(() => {
@@ -1390,16 +1394,23 @@ function PresentationEntry({ linkId, session }) {
     let cancelled = false
     ;(async () => {
       try {
-        if (!session) {
-          const { error } = await supabase.auth.signInAnonymously()
+        let live = session
+        if (!live) {
+          const { data, error } = await supabase.auth.signInAnonymously()
           if (error) throw error
+          live = data.session
         }
+        if (!live) throw new Error('not_authenticated')
+
         const { data, error } = await supabase.rpc('redeem_presentation_link', { p_link: linkId })
         if (error) throw error
         if (typeof data !== 'string') throw new Error('unknown_link')
         LS.set('noti:venue', data)
         LS.del('noti:event')
-        if (!cancelled) setStatus('ready')
+        if (!cancelled) {
+          setOpened(live)
+          setStatus('ready')
+        }
       } catch (e) {
         if (!cancelled) {
           setErr(frError(e))
@@ -1435,9 +1446,11 @@ function PresentationEntry({ linkId, session }) {
     )
   }
 
+  // `session` dès qu'AppInner l'a reçue (elle suit les renouvellements de
+  // jeton), sinon celle qu'on vient d'ouvrir.
   return (
     <div className="noti-staff">
-      <StaffApp session={session} />
+      <StaffApp session={session || opened} />
     </div>
   )
 }
@@ -12623,7 +12636,9 @@ function ReglagesTab({ venue, event, session, role, onReload, showToast }) {
       </div>
 
       {role === 'owner' && <TeamCard venue={venue} session={session} showToast={showToast} />}
-      {role === 'owner' && <PresentationLinksCard venue={venue} showToast={showToast} />}
+      {(role === 'owner' || role === 'manager') && (
+        <PresentationLinksCard venue={venue} showToast={showToast} />
+      )}
 
       <div style={{ ...S.card, marginBottom: 14 }}>
         <div style={{ ...S.h2, marginBottom: 14 }}>Lieu & mentions légales</div>
