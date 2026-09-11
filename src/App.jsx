@@ -1397,8 +1397,8 @@ function PresentationEntry({ linkId, session }) {
         const { data, error } = await supabase.rpc('redeem_presentation_link', { p_link: linkId })
         if (error) throw error
         const row = Array.isArray(data) ? data[0] : data
-        if (!row?.venue_id) throw new Error('unknown_order')
-        LS.set('noti:venue', row.venue_id)
+        if (!row?.out_venue_id) throw new Error('unknown_order')
+        LS.set('noti:venue', row.out_venue_id)
         LS.del('noti:event')
         if (!cancelled) setStatus('ready')
       } catch (e) {

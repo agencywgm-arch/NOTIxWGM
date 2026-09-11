@@ -94,8 +94,13 @@ $$;
  * authentifiée (y compris anonyme) : la validité tient au lien lui-même,
  * pas à qui l'appelle.
  */
+-- Les paramètres de sortie ne portent PAS les mêmes noms que les colonnes
+-- manipulées à l'intérieur (venue_id, role) : sinon PL/pgSQL les confond
+-- avec les colonnes de la requête INSERT ... ON CONFLICT plus bas et
+-- Postgres refuse d'exécuter la fonction avec « column reference ... is
+-- ambiguous ». Rencontré en le déployant : voir 0044 pour le correctif.
 create or replace function public.redeem_presentation_link(p_link uuid)
-returns table(venue_id uuid, role text)
+returns table(out_venue_id uuid, out_role text)
 language plpgsql volatile security definer set search_path = public
 as $$
 declare
