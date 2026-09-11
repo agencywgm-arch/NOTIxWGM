@@ -12,7 +12,7 @@
 
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import QRCode from 'qrcode'
-import { supabase, isConfigured, frError, errorKey, BASE_PATH, scanUrl, isPreviewDeployment } from './lib/supabase.js'
+import { supabase, isConfigured, frError, errorKey, BASE_PATH, scanUrl, isPreviewDeployment, presentationUrl } from './lib/supabase.js'
 import { C, S, FONT, GRADIENT, RADIUS, alpha, eur, timeFR, dateFR, phoneFR, normalizePhone, isValidPhone } from './lib/theme.js'
 import { dict, useT, trProduct, LANG_LABEL } from './lib/i18n.js'
 import { phoneVerificationAvailable, sendPhoneCode, confirmPhoneCode } from './lib/firebase.js'
@@ -62,6 +62,12 @@ function useRoute() {
 /** /s/{scan_point_id} */
 function parseScanRoute(route) {
   const m = route.match(/^\/s\/([0-9a-fA-F-]{36})\/?$/)
+  return m ? m[1] : null
+}
+
+/** /staff-preview/{presentation_link_id} */
+function parsePresentationRoute(route) {
+  const m = route.match(/^\/staff-preview\/([0-9a-fA-F-]{36})\/?$/)
   return m ? m[1] : null
 }
 
@@ -1254,6 +1260,7 @@ export default function App() {
 function AppInner() {
   const route = useRoute()
   const scanPointId = parseScanRoute(route)
+  const presentationLinkId = parsePresentationRoute(route)
   const [session, setSession] = useState(undefined)
   const [recovery, setRecovery] = useState(false)
 
@@ -1283,6 +1290,7 @@ function AppInner() {
     )
   if (recovery) return <ResetPasswordScreen onDone={() => setRecovery(false)} />
   if (scanPointId) return <ClientApp scanPointId={scanPointId} session={session} />
+  if (presentationLinkId) return <PresentationEntry linkId={presentationLinkId} session={session} />
   // `noti-staff` porte la palette épurée de l'espace équipe (voir
   // index.html). Le parcours client n'est pas enveloppé : il garde la charte.
   return (
@@ -1361,6 +1369,76 @@ function ResetPasswordScreen({ onDone }) {
           )}
         </div>
       </div>
+    </div>
+  )
+}
+
+/**
+ * Point d'entrée d'un lien de présentation staff — /staff-preview/{id}.
+ * Aucune connexion requise : on ouvre une session anonyme (même mécanisme
+ * que le client qui scanne un QR) et on l'échange contre un accès staff via
+ * redeem_presentation_link() — voir 0043_liens_presentation_staff.sql.
+ */
+function PresentationEntry({ linkId, session }) {
+  const [status, setStatus] = useState('working') // working | error | ready
+  const [err, setErr] = useState('')
+  const ranRef = useRef(false)
+
+  useEffect(() => {
+    if (ranRef.current) return
+    ranRef.current = true
+    let cancelled = false
+    ;(async () => {
+      try {
+        if (!session) {
+          const { error } = await supabase.auth.signInAnonymously()
+          if (error) throw error
+        }
+        const { data, error } = await supabase.rpc('redeem_presentation_link', { p_link: linkId })
+        if (error) throw error
+        const row = Array.isArray(data) ? data[0] : data
+        if (!row?.venue_id) throw new Error('unknown_order')
+        LS.set('noti:venue', row.venue_id)
+        LS.del('noti:event')
+        if (!cancelled) setStatus('ready')
+      } catch (e) {
+        if (!cancelled) {
+          setErr(frError(e))
+          setStatus('error')
+        }
+      }
+    })()
+    return () => {
+      cancelled = true
+    }
+  }, [linkId, session])
+
+  if (status === 'working') {
+    return (
+      <div style={S.page}>
+        <Spinner />
+      </div>
+    )
+  }
+
+  if (status === 'error') {
+    return (
+      <div style={{ ...S.page, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 22 }}>
+        <div style={{ width: '100%', maxWidth: 420 }}>
+          <div style={{ textAlign: 'center', marginBottom: 26 }}>
+            <Logo size={1.2} />
+          </div>
+          <div style={S.card}>
+            <Banner tone="danger">Ce lien de présentation n’est plus valide. {err}</Banner>
+          </div>
+        </div>
+      </div>
+    )
+  }
+
+  return (
+    <div className="noti-staff">
+      <StaffApp session={session} />
     </div>
   )
 }
@@ -12160,6 +12238,177 @@ function TeamCard({ venue, session, showToast }) {
   )
 }
 
+const PRESENTATION_ROLE_LABEL = { manager: 'Manager', staff: 'Équipe (accès bar)' }
+
+/**
+ * Liens d'invitation directe vers l'espace staff, sans connexion — pour
+ * faire une démo avec les vraies données du lieu (voir 0043). Réservé au
+ * propriétaire : le rôle qu'un lien accorde est plafonné à manager/staff
+ * côté SQL, jamais owner.
+ */
+function PresentationLinksCard({ venue, showToast }) {
+  const [links, setLinks] = useState([])
+  const [loading, setLoading] = useState(true)
+  const [label, setLabel] = useState('')
+  const [role, setRole] = useState('manager')
+  const [busy, setBusy] = useState(false)
+  const onPreview = isPreviewDeployment()
+
+  const load = useCallback(async () => {
+    const { data } = await supabase
+      .from('presentation_links')
+      .select('*')
+      .eq('venue_id', venue.id)
+      .is('revoked_at', null)
+      .order('created_at', { ascending: false })
+    setLinks(data || [])
+    setLoading(false)
+  }, [venue.id])
+
+  useEffect(() => {
+    load()
+  }, [load])
+
+  async function create() {
+    setBusy(true)
+    const { error } = await supabase.rpc('create_presentation_link', {
+      p_venue: venue.id,
+      p_role: role,
+      p_label: label.trim() || null,
+    })
+    setBusy(false)
+    if (error) {
+      showToast(frError(error), 'error')
+      return false
+    }
+    setLabel('')
+    load()
+    return true
+  }
+
+  async function revoke(id) {
+    if (!confirm('Révoquer ce lien ? Toute personne qui l’a déjà ouvert perdra l’accès immédiatement.')) return
+    const { error } = await supabase.rpc('revoke_presentation_link', { p_link: id })
+    if (error) return showToast(frError(error), 'error')
+    showToast('Lien révoqué.', 'ok')
+    load()
+  }
+
+  return (
+    <div style={{ ...S.card, marginBottom: 14 }}>
+      <div style={{ ...S.h2, marginBottom: 6 }}>Liens de présentation</div>
+      <div style={{ fontSize: 12, color: C.dim, marginBottom: 14, lineHeight: 1.55 }}>
+        Pour montrer l’outil sans faire créer de compte : la personne ouvre le lien et arrive
+        directement dans l’espace équipe, sur les <strong>vraies données</strong> de ce lieu. Valable
+        indéfiniment jusqu’à ce que vous le révoquiez.
+      </div>
+
+      {onPreview && (
+        <div style={{ marginBottom: 14 }}>
+          <Banner tone="danger">
+            ⚠️ Vous êtes sur un lien d’aperçu Vercel — un lien généré ici casserait comme les QR.
+            Ouvrez l’app depuis l’adresse de production avant d’en créer un.
+          </Banner>
+        </div>
+      )}
+
+      {loading ? (
+        <Spinner label="Chargement…" />
+      ) : (
+        <>
+          {links.length > 0 && (
+            <div style={{ display: 'grid', gap: 8, marginBottom: 14 }}>
+              {links.map((l) => (
+                <div
+                  key={l.id}
+                  style={{
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: 10,
+                    padding: 11,
+                    borderRadius: 12,
+                    background: C.paper,
+                    border: `1px solid ${C.line}`,
+                  }}
+                >
+                  <div style={{ minWidth: 0, flex: 1 }}>
+                    <div style={{ fontSize: 13.5, fontWeight: 500, overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                      {l.label || 'Lien sans nom'}
+                    </div>
+                    <div style={{ fontSize: 11, color: C.faint, marginTop: 2 }}>
+                      {PRESENTATION_ROLE_LABEL[l.role] || l.role}
+                    </div>
+                  </div>
+                  <button
+                    onClick={() => {
+                      navigator.clipboard?.writeText(presentationUrl(l.id))
+                      showToast('Lien copié.', 'ok')
+                    }}
+                    style={{ ...stepBtn, width: 38, height: 38, fontSize: 13 }}
+                    title="Copier le lien"
+                  >
+                    🔗
+                  </button>
+                  <button
+                    onClick={() => revoke(l.id)}
+                    title="Révoquer"
+                    style={{ ...stepBtn, width: 38, height: 38, fontSize: 14, color: C.danger }}
+                  >
+                    ✕
+                  </button>
+                </div>
+              ))}
+            </div>
+          )}
+
+          <Field label="Nom du lien (optionnel)">
+            <input
+              style={S.input}
+              value={label}
+              onChange={(e) => setLabel(e.target.value)}
+              placeholder="Ex. Démo pour Untel"
+            />
+          </Field>
+          <div style={{ display: 'flex', gap: 8, marginBottom: 12 }}>
+            {[
+              ['staff', 'Équipe', 'Bar, caisse, clients'],
+              ['manager', 'Manager', 'Accès complet'],
+            ].map(([k, lbl, hint]) => (
+              <button
+                key={k}
+                onClick={() => setRole(k)}
+                style={{
+                  ...S.chip,
+                  flex: 1,
+                  minHeight: 52,
+                  flexDirection: 'column',
+                  gap: 2,
+                  borderColor: role === k ? C.terracotta : C.lineHi,
+                  color: role === k ? C.terracotta : C.dim,
+                }}
+              >
+                <span style={{ fontWeight: 600 }}>{lbl}</span>
+                <span style={{ fontSize: 9.5, opacity: 0.8 }}>{hint}</span>
+              </button>
+            ))}
+          </div>
+          <button
+            disabled={busy || onPreview}
+            title={onPreview ? "Indisponible sur un lien d'aperçu — ouvrez le site de production" : undefined}
+            onClick={async () => {
+              const ok = await create()
+              if (ok) showToast('Lien créé — copiez-le depuis la liste ci-dessus.', 'ok')
+            }}
+            style={{ ...S.btnGhost, opacity: busy || onPreview ? 0.5 : 1 }}
+          >
+            {busy ? '…' : 'Générer un lien de présentation'}
+          </button>
+        </>
+      )}
+    </div>
+  )
+}
+
 function ReglagesTab({ venue, event, session, role, onReload, showToast }) {
   const [v, setV] = useState(venue)
   const [e, setE] = useState(event)
@@ -12375,6 +12624,7 @@ function ReglagesTab({ venue, event, session, role, onReload, showToast }) {
       </div>
 
       {role === 'owner' && <TeamCard venue={venue} session={session} showToast={showToast} />}
+      {role === 'owner' && <PresentationLinksCard venue={venue} showToast={showToast} />}
 
       <div style={{ ...S.card, marginBottom: 14 }}>
         <div style={{ ...S.h2, marginBottom: 14 }}>Lieu & mentions légales</div>

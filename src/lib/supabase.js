@@ -32,6 +32,16 @@ export function scanUrl(scanPointId) {
 }
 
 /**
+ * URL d'un lien de présentation staff — /staff-preview/{presentation_link_id}
+ * Ouvre l'espace équipe sans connexion, sur les vraies données du lieu, via
+ * une session anonyme (voir redeem_presentation_link côté SQL).
+ */
+export function presentationUrl(linkId) {
+  const origin = typeof window !== 'undefined' ? window.location.origin : ''
+  return `${origin}${BASE_PATH}staff-preview/${linkId}`.replace(/([^:]\/)\/+/g, '$1')
+}
+
+/**
  * Un QR imprimé depuis un déploiement d'aperçu Vercel (un lien différent à
  * chaque déploiement de branche/PR) casse dès que cet aperçu expire — c'est
  * arrivé une fois en soirée. `scanUrl()` fige `window.location.origin` au
