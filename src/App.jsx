@@ -14,7 +14,7 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import QRCode from 'qrcode'
 import { supabase, isConfigured, frError, errorKey, BASE_PATH, scanUrl, isPreviewDeployment, presentationUrl } from './lib/supabase.js'
 import { C, S, FONT, GRADIENT, RADIUS, alpha, eur, timeFR, dateFR, phoneFR, normalizePhone, isValidPhone } from './lib/theme.js'
-import { dict, useT, trProduct, LANG_LABEL } from './lib/i18n.js'
+import { dict, useT, trProduct, trSubcat, LANG_LABEL, LANGS } from './lib/i18n.js'
 import { phoneVerificationAvailable, sendPhoneCode, confirmPhoneCode } from './lib/firebase.js'
 import {
   canvasesToPdfBlob,
@@ -303,10 +303,14 @@ function upsertMeFromCache() {
   })
 }
 
+// `t` sert l'espace staff, qui reste en français ; `i18n` sert le parcours
+// client. Les deux libellés étaient autrefois portés ici, dans un ternaire
+// à trois langues — qui retombait silencieusement sur le français dès qu'on
+// en ajoutait une quatrième.
 const UNIVERSES = [
-  { k: 'drinks', t: 'Boissons', en: 'Drinks', es: 'Bebidas', e: '🥂' },
-  { k: 'food', t: 'Food', en: 'Food', es: 'Comida', e: '🍽️' },
-  { k: 'bottles', t: 'Bouteilles', en: 'Bottles', es: 'Botellas', e: '🍾' },
+  { k: 'drinks', t: 'Boissons', i18n: 'uniDrinks', e: '🥂' },
+  { k: 'food', t: 'Food', i18n: 'uniFood', e: '🍽️' },
+  { k: 'bottles', t: 'Bouteilles', i18n: 'uniBottles', e: '🍾' },
 ]
 
 const ORDER_STATUS = {
@@ -3082,7 +3086,7 @@ function OrderingApp({
                   }}
                 >
                   <div style={{ fontSize: 20, marginBottom: 3 }}>{u.e}</div>
-                  {lang === 'en' ? u.en : lang === 'es' ? u.es : u.t}
+                  {t[u.i18n]}
                 </button>
               ))}
             </div>
@@ -3112,7 +3116,7 @@ function OrderingApp({
                     background: subcat === c ? 'rgba(106,95,214,.08)' : 'transparent',
                   }}
                 >
-                  {c}
+                  {trSubcat(c, lang)}
                 </button>
               ))}
             </ScrollHint>
@@ -3126,7 +3130,7 @@ function OrderingApp({
                 data-subcat={c}
                 style={{ marginBottom: 26, scrollMarginTop: headerH + 62 }}
               >
-                <div style={{ ...S.h2, marginBottom: 10, fontSize: 13 }}>{c}</div>
+                <div style={{ ...S.h2, marginBottom: 10, fontSize: 13 }}>{trSubcat(c, lang)}</div>
                 <div style={{ display: 'grid', gap: 10 }}>
                   {products
                     .filter((p) => p.universe === universe && p.subcategory === c)
@@ -12633,8 +12637,8 @@ function ReglagesTab({ venue, event, session, role, onReload, showToast }) {
           label="Langues"
           hint="L'app est entièrement traduite. Les noms de vos produits suivent les traductions saisies dans la carte."
         >
-          <div style={{ display: 'flex', gap: 8 }}>
-            {['fr', 'en', 'es'].map((l) => {
+          <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+            {LANGS.map((l) => {
               const on = (e.languages || ['fr']).includes(l)
               return (
                 <button
@@ -12649,7 +12653,7 @@ function ReglagesTab({ venue, event, session, role, onReload, showToast }) {
                   }
                   style={{
                     ...S.chip,
-                    flex: 1,
+                    flex: '1 0 60px',
                     minHeight: 44,
                     borderColor: on ? C.terracotta : C.lineHi,
                     color: on ? C.terracotta : C.dim,
