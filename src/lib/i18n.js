@@ -261,19 +261,11 @@ export const T = {
     showCodeAtBar: 'Présentez ce code au bar et réglez sur place',
     orderedAt: (h) => `Commande de ${h}`,
 
-    // Retard : le compte à rebours est passé et la commande n'est toujours pas
-    // prête. Plutôt qu'un compteur négatif ou un silence, on assume le retard
-    // avec le ton de la maison. La dernière ligne sert aux gros retards.
-    delayNotes: [
-      'T’as le temps d’aller danser 💃 ta commande n’est pas encore prête.',
-      'Le bar est pris d’assaut 🍸 encore un morceau ou deux et c’est à toi.',
-      'Petit retard, grande soif — on accélère, promis.',
-      'On n’a pas oublié ta commande, il y a juste du monde devant 🙃',
-      'Ça prend un peu plus longtemps que prévu. Profites-en pour refaire le monde.',
-      'Le shaker chauffe ! Encore un instant et c’est prêt.',
-    ],
-    delayNoteLate: 'Là, on avoue, ça traîne vraiment 😅 toute l’équipe est dessus.',
-    delayBadge: 'Un peu de retard',
+    // File d'attente. On ne dit jamais combien de temps ça va prendre — un
+    // temps annoncé est une promesse que le bar ne tient pas un soir de rush,
+    // et elle revient en réclamation. Le rang, lui, ne promet rien.
+    queueAhead: (n) => `${n} personne${s(n)} ${n > 1 ? 'ont' : 'a'} commandé avant vous`,
+    queueNext: 'Vous êtes le prochain servi',
     unpaidOrder:
       'Cette commande n’a pas été réglée en fin de soirée. Elle reste due — merci de vous rapprocher de l’établissement.',
     noteLabel: 'Note :',
@@ -284,7 +276,7 @@ export const T = {
     stAwaitingPayment: 'En attente de règlement',
     stAwaitingPaymentShort: 'À régler',
     awaitingPaymentTitle: 'Passez d’abord en caisse.',
-    awaitingPaymentSub: 'La préparation démarre dès que votre commande est réglée — le compte à rebours ne tourne pas encore.',
+    awaitingPaymentSub: 'La préparation démarre dès que votre commande est réglée — elle n’est pas encore dans la file.',
     orderSplitFood: 'Vos boissons partent tout de suite ; la food démarre après passage en caisse. Deux codes de retrait.',
     graceTitle: 'Envoi dans quelques secondes…',
     graceSub: (n) => `Encore ${n} seconde${n > 1 ? 's' : ''} pour modifier ou annuler. Rien n’est encore parti au bar.`,
@@ -563,16 +555,8 @@ export const T = {
     showCodeAtBar: 'Show this code at the bar and pay there',
     orderedAt: (h) => `Ordered at ${h}`,
 
-    delayNotes: [
-      'Time for one more dance 💃 your order isn’t ready yet.',
-      'The bar is packed 🍸 another track or two and it’s yours.',
-      'Running a little late, thanks for the patience — we’re on it.',
-      'We haven’t forgotten you, there’s just a queue ahead 🙃',
-      'Taking a bit longer than expected. Good time to put the world to rights.',
-      'The shaker is working! Just a moment longer.',
-    ],
-    delayNoteLate: 'Alright, this really is taking a while 😅 the whole team is on it.',
-    delayBadge: 'Running late',
+    queueAhead: (n) => `${n} ${n > 1 ? 'people' : 'person'} ordered before you`,
+    queueNext: 'You’re next in line',
     unpaidOrder:
       'This order was not paid at the end of the night. It remains due — please get in touch with the venue.',
     noteLabel: 'Note:',
@@ -583,7 +567,7 @@ export const T = {
     stAwaitingPayment: 'Awaiting payment',
     stAwaitingPaymentShort: 'To pay',
     awaitingPaymentTitle: 'Head to the till first.',
-    awaitingPaymentSub: 'Preparation starts once your order is paid — the countdown hasn’t started yet.',
+    awaitingPaymentSub: 'Preparation starts once your order is paid — it isn’t in the queue yet.',
     orderSplitFood: 'Your drinks are on their way; the food starts after you pay at the till. Two pickup codes.',
     graceTitle: 'Sending in a few seconds…',
     graceSub: (n) => `${n} second${n > 1 ? 's' : ''} left to edit or cancel. Nothing has reached the bar yet.`,
@@ -860,16 +844,8 @@ export const T = {
     showCodeAtBar: 'Muestra este código en la barra y paga allí',
     orderedAt: (h) => `Pedido de las ${h}`,
 
-    delayNotes: [
-      'Te da tiempo a bailar otra 💃 tu pedido aún no está listo.',
-      'La barra está a tope 🍸 una canción más y es tuyo.',
-      'Un pelín de retraso, mucha sed — vamos a por ello.',
-      'No nos hemos olvidado de ti, es que hay cola 🙃',
-      'Está tardando un poco más de lo previsto. Aprovecha para arreglar el mundo.',
-      '¡La coctelera no para! Un momentito más.',
-    ],
-    delayNoteLate: 'Vale, esto se está alargando de verdad 😅 todo el equipo está en ello.',
-    delayBadge: 'Con algo de retraso',
+    queueAhead: (n) => `${n} persona${s(n)} ${n > 1 ? 'han' : 'ha'} pedido antes que tú`,
+    queueNext: 'Eres el siguiente',
     unpaidOrder:
       'Este pedido no se pagó al final de la noche. Sigue pendiente — ponte en contacto con el local.',
     noteLabel: 'Nota:',
@@ -880,7 +856,7 @@ export const T = {
     stAwaitingPayment: 'Pendiente de pago',
     stAwaitingPaymentShort: 'Por pagar',
     awaitingPaymentTitle: 'Pasa primero por caja.',
-    awaitingPaymentSub: 'La preparación empieza en cuanto se pague el pedido — la cuenta atrás aún no corre.',
+    awaitingPaymentSub: 'La preparación empieza en cuanto se pague el pedido — todavía no está en la cola.',
     orderSplitFood: 'Tus bebidas salen ya; la comida empieza tras pasar por caja. Dos códigos de recogida.',
     graceTitle: 'Enviando en unos segundos…',
     graceSub: (n) => `Quedan ${n} segundo${n > 1 ? 's' : ''} para modificar o cancelar. Aún no ha salido a la barra.`,

@@ -770,15 +770,19 @@ function PhoneVerifyBlock({ lang, customer, phone, showToast, onVerified }) {
 }
 
 /**
- * Vérification OBLIGATOIRE avant l'envoi d'une commande (uniquement quand
- * Firebase est configuré — sinon ce composant n'est jamais monté). Distincte
- * de `PhoneVerifyBlock` (facultative, écran de profil) : ici il n'y a rien à
- * enregistrer avant de vérifier (le téléphone est déjà acquis dès
- * l'identification), et une erreur qui n'est PAS imputable au client — panne
- * réseau, service Firebase indisponible, code d'erreur inconnu — laisse
- * passer la commande plutôt que de bloquer toute la soirée sur un incident
- * technique. Seules les erreurs de saisie (numéro invalide, mauvais code,
- * trop de tentatives) gardent la porte fermée.
+ * Vérification OBLIGATOIRE, à l'entrée du parcours (uniquement quand Firebase
+ * est configuré — sinon ce composant n'est jamais monté). Elle se faisait à
+ * l'envoi de la commande ; le test terrain l'a jugée « relou » à cet endroit :
+ * une demande qui tombe d'un coup au moment de commander casse le flux. Elle
+ * suit donc désormais immédiatement la saisie des informations.
+ *
+ * Distincte de `PhoneVerifyBlock` (facultative, écran de profil) : ici il n'y
+ * a rien à enregistrer avant de vérifier (le téléphone est déjà acquis), et
+ * une erreur qui n'est PAS imputable au client — panne réseau, service
+ * Firebase indisponible, code d'erreur inconnu — laisse entrer plutôt que de
+ * bloquer toute la soirée sur un incident technique. Seules les erreurs de
+ * saisie (numéro invalide, mauvais code, trop de tentatives) gardent la porte
+ * fermée.
  */
 function PhoneVerifyGate({ lang, customer, onVerified, onBypass }) {
   const t = useT(lang)
@@ -803,7 +807,7 @@ function PhoneVerifyGate({ lang, customer, onVerified, onBypass }) {
     setError('')
     setStep('sending')
     try {
-      confirmationRef.current = await sendPhoneCode(normalizePhone(customer.phone), 'noti-recaptcha-checkout')
+      confirmationRef.current = await sendPhoneCode(normalizePhone(customer.phone), 'noti-recaptcha-entry')
       setCode('')
       setStep('sent')
     } catch (e) {
@@ -848,7 +852,7 @@ function PhoneVerifyGate({ lang, customer, onVerified, onBypass }) {
         background: 'rgba(185,106,76,.06)',
       }}
     >
-      <div id="noti-recaptcha-checkout" />
+      <div id="noti-recaptcha-entry" />
       <div style={{ fontSize: 14, fontWeight: 600, marginBottom: 8 }}>{t.phoneVerify}</div>
 
       {error && (
@@ -906,6 +910,24 @@ function PhoneVerifyGate({ lang, customer, onVerified, onBypass }) {
           </button>
         </>
       )}
+    </div>
+  )
+}
+
+/**
+ * L'étape de vérification en plein écran, enchaînée juste après la saisie des
+ * informations. Elle reprend la mise en page de l'écran d'identification —
+ * même logo, même carte — pour se lire comme la suite immédiate de l'entrée,
+ * et non comme une interruption.
+ */
+function PhoneVerifyScreen({ lang, customer, onVerified, onBypass }) {
+  return (
+    <div style={{ ...S.page, padding: 26, display: 'flex', flexDirection: 'column', justifyContent: 'center' }}>
+      <Keyframes />
+      <div style={{ textAlign: 'center', marginBottom: 26 }}>
+        <Logo size={1.1} />
+      </div>
+      <PhoneVerifyGate lang={lang} customer={customer} onVerified={onVerified} onBypass={onBypass} />
     </div>
   )
 }
@@ -1494,6 +1516,7 @@ function ClientApp({ scanPointId, session }) {
   // clique sur le logo et on repart d'une base saine »).
   const [step, setStep] = useState('welcome')
   const [lang, setLang] = useState(LS.get('noti:lang', 'fr'))
+  const [verifyBypassed, setVerifyBypassed] = useState(false)
   const [toast, showToast] = useToast()
 
   useEffect(() => LS.set('noti:lang', lang), [lang])
@@ -1608,6 +1631,9 @@ function ClientApp({ scanPointId, session }) {
     forgetMe()
     autoEntered.current = false
     setCustomer(null)
+    // Le laissez-passer accordé sur incident technique ne doit pas profiter à
+    // la personne suivante sur le même appareil.
+    setVerifyBypassed(false)
     setStep('welcome')
     try {
       await supabase.auth.signOut()
@@ -1632,6 +1658,13 @@ function ClientApp({ scanPointId, session }) {
     )
 
   const shared = { event, venue, scanPoint, lang, setLang, showToast }
+
+  // Un incident technique (panne Firebase, réseau) laisse entrer : on retient
+  // ce laissez-passer, sinon l'écran se remonterait en boucle derrière lui.
+  const phoneVerified =
+    customer?.phone_verified_at && customer.phone_verified_number === customer.phone
+  const mustVerifyPhone =
+    phoneVerificationAvailable && Boolean(customer) && !phoneVerified && !verifyBypassed
 
   if (step === 'welcome') {
     // Appareil déjà identifié : l'effet d'aiguillage nous emmène directement
@@ -1658,6 +1691,24 @@ function ClientApp({ scanPointId, session }) {
         onVerified={async () => {
           await loadCustomer()
           setStep('hello')
+        }}
+      />
+    )
+
+  // Vérification du numéro : enchaînée à la saisie des informations, jamais au
+  // moment de commander. Placée ici plutôt que dans l'écran d'identification
+  // pour couvrir aussi l'appareil déjà reconnu, qui ne repasse pas par la
+  // saisie — sans quoi la vérification cesserait d'être obligatoire dès la
+  // deuxième soirée.
+  if (mustVerifyPhone)
+    return (
+      <PhoneVerifyScreen
+        {...shared}
+        customer={customer}
+        onVerified={loadCustomer}
+        onBypass={() => {
+          showToast(dict(lang).phoneVerifyBypassed, 'info')
+          setVerifyBypassed(true)
         }}
       />
     )
@@ -2139,6 +2190,7 @@ function OrderingApp({
   const t = useT(lang)
   const [products, setProducts] = useState([])
   const [orders, setOrders] = useState([])
+  const [queue, setQueue] = useState({}) // { id de commande: personnes devant }
   const [messages, setMessages] = useState([])
   const [loading, setLoading] = useState(true)
   const [view, setView] = useState('menu')
@@ -2290,11 +2342,41 @@ function OrderingApp({
     setOrders(data || [])
   }, [event?.id, customer?.id])
 
+  // Rang dans la file : combien de personnes ont commandé avant soi et
+  // attendent encore. Il descend quand le bar sert QUELQU'UN D'AUTRE — un
+  // événement que le canal temps réel du client ne voit pas (il ne suit que
+  // ses propres commandes). D'où l'interrogation périodique plus bas, seule
+  // façon de voir la file avancer.
+  const pendingKey = orders
+    .filter((o) => o.status === 'RECEIVED' || o.status === 'IN_PREP')
+    .map((o) => o.id)
+    .join(',')
+
+  const loadQueue = useCallback(async () => {
+    const ids = pendingKey ? pendingKey.split(',') : []
+    if (!ids.length) return setQueue({})
+    const entries = await Promise.all(
+      ids.map(async (id) => {
+        const { data, error } = await supabase.rpc('orders_ahead', { p_order: id })
+        return [id, error || typeof data !== 'number' ? null : data]
+      })
+    )
+    setQueue(Object.fromEntries(entries))
+  }, [pendingKey])
+
+  // Les annonces générales (« le bar ferme dans 10 min ») ne remontent plus
+  // chez le client : jugées superflues au test terrain sur ce type de soirée,
+  // où tout ce qui n'aide pas à commander ou à retirer encombre. Le staff
+  // garde l'outil de diffusion, et les deux autres natures de message — le
+  // suivi de commande et le message adressé à quelqu'un — restent.
+  // Écarté ici, à la source : l'onglet Messages, le bandeau des non-lus et la
+  // pastille de l'onglet se servent tous de cette liste.
   const loadMessages = useCallback(async () => {
     const { data } = await supabase
       .from('messages')
       .select('*')
       .eq('event_id', event?.id)
+      .neq('kind', 'broadcast')
       .order('created_at', { ascending: false })
       .limit(20)
     setMessages(data || [])
@@ -2410,6 +2492,17 @@ function OrderingApp({
       clearInterval(restPoll)
     }
   }, [customer?.id, event?.id, loadOrders, loadMessages, loadProducts, realtimeDown])
+
+  // Le rang dans la file a sa propre cadence : il bouge quand le bar sert
+  // quelqu'un d'autre, ce dont aucun abonnement du client n'est prévenu.
+  // Cadence tenue courte — un rang qui ne descend pas pendant vingt secondes
+  // donne l'impression d'une file figée, exactement ce qu'on veut éviter.
+  useEffect(() => {
+    if (!pendingKey) return
+    loadQueue()
+    const id = setInterval(() => loadQueue(), 8000)
+    return () => clearInterval(id)
+  }, [pendingKey, loadQueue])
 
   // ---- Sonnerie douce quand une commande passe à « prête » ----------------
   useEffect(() => {
@@ -2944,6 +3037,7 @@ function OrderingApp({
         ) : view === 'orders' ? (
           <MyOrders
             orders={orders}
+            queue={queue}
             focusOrder={focusOrder}
             onFocusDone={() => setFocusOrder(null)}
             onCancel={cancelOrder}
@@ -3163,9 +3257,6 @@ function OrderingApp({
         subtotal={subtotal}
         creditsTotal={creditsTotal}
         prepMin={event.default_prep_min ?? 1}
-        customer={customer}
-        onReloadCustomer={onReloadCustomer}
-        showToast={showToast}
         onClose={() => setCartCheckout(false)}
         onSubmit={async (payload) => {
           try {
@@ -4393,9 +4484,6 @@ function CheckoutSheet({
   subtotal,
   prepMin,
   creditsTotal = 0,
-  customer,
-  onReloadCustomer,
-  showToast,
   onClose,
   onSubmit,
 }) {
@@ -4403,11 +4491,9 @@ function CheckoutSheet({
   const [note, setNote] = useState('')
   const [preview, setPreview] = useState(null)
   const [busy, setBusy] = useState(false)
-  // Vérification obligatoire avant envoi : ne s'active que si Firebase est
-  // configuré ET que le numéro actuel n'est pas déjà vérifié (0039).
-  const [verifying, setVerifying] = useState(false)
-  const phoneVerified = customer?.phone_verified_at && customer.phone_verified_number === customer?.phone
-  const needsVerification = phoneVerificationAvailable && !phoneVerified
+  // La vérification du numéro ne vit plus ici : elle se fait à l'entrée du
+  // parcours, avec le reste des informations. Retour de test — une demande
+  // qui tombe d'un coup au moment de commander casse le flux et agace.
 
   // Délai de grâce (note du 23/08, §2bis.1). Le point qui fait tout l'intérêt
   // du mécanisme : pendant ces 5 secondes, RIEN n'est envoyé au serveur, donc
@@ -4430,10 +4516,7 @@ function CheckoutSheet({
   // Une feuille qu'on referme (geste, bouton précédent) ne doit pas laisser
   // partir une commande que le client croyait avoir abandonnée.
   useEffect(() => {
-    if (!open) {
-      stopGrace()
-      setVerifying(false)
-    }
+    if (!open) stopGrace()
   }, [open, stopGrace])
   useEffect(() => () => stopGrace(), [stopGrace])
 
@@ -4617,25 +4700,10 @@ function CheckoutSheet({
             {t.graceCancel}
           </button>
         </div>
-      ) : verifying ? (
-        <PhoneVerifyGate
-          lang={lang}
-          customer={customer}
-          onVerified={async () => {
-            await onReloadCustomer?.()
-            setVerifying(false)
-            startGrace()
-          }}
-          onBypass={() => {
-            showToast?.(t.phoneVerifyBypassed, 'info')
-            setVerifying(false)
-            startGrace()
-          }}
-        />
       ) : (
         <button
           disabled={busy}
-          onClick={() => (needsVerification ? setVerifying(true) : startGrace())}
+          onClick={startGrace}
           style={{ ...S.btn, opacity: busy ? 0.6 : 1, minHeight: 58 }}
         >
           {busy ? t.sending : t.send}
@@ -4775,6 +4843,7 @@ function MessagesView({
 
 function MyOrders({
   orders,
+  queue,
   event,
   venue,
   customer,
@@ -4788,13 +4857,7 @@ function MyOrders({
   onCancel,
 }) {
   const t = useT(lang)
-  const [now, setNow] = useState(Date.now())
   const cardRefs = useRef({})
-
-  useEffect(() => {
-    const id = setInterval(() => setNow(Date.now()), 1000)
-    return () => clearInterval(id)
-  }, [])
 
   // Arrivée depuis un message de suivi : on amène directement le bon ticket
   // sous les yeux plutôt que de laisser chercher dans la liste.
@@ -4845,11 +4908,11 @@ function MyOrders({
         >
         <OrderCard
           order={o}
+          ahead={queue?.[o.id]}
           event={event}
           venue={venue}
           customer={customer}
           lang={lang}
-          now={now}
           onReview={() => onReview(o)}
           onCancel={onCancel}
         />
@@ -4863,36 +4926,19 @@ function MyOrders({
   )
 }
 
-function OrderCard({ order, event, venue, customer, lang, now, onReview, onCancel }) {
+function OrderCard({ order, ahead, event, venue, customer, lang, onReview, onCancel }) {
   const t = useT(lang)
   const st = ORDER_STATUS[order.status] || ORDER_STATUS.RECEIVED
   const items = order.order_items || []
-  const etaMs = order.estimated_ready_at ? new Date(order.estimated_ready_at).getTime() - now : 0
-  const etaSec = Math.max(0, Math.round(etaMs / 1000))
-  const mm = String(Math.floor(etaSec / 60)).padStart(2, '0')
-  const ss = String(etaSec % 60).padStart(2, '0')
 
-  // Retard : le compte à rebours est tombé à zéro et rien n'est prêt. Le
-  // compteur figé à 00:00 laissait le client sans nouvelle — on assume le
-  // retard avec une phrase légère, plutôt que par un silence.
   const pending = order.status === 'RECEIVED' || order.status === 'IN_PREP'
   const awaitingPayment = order.status === 'AWAITING_PAYMENT'
   // Annulable tant que le bar n'a pas lancé la préparation (§2bis.2).
   const cancellable = order.status === 'RECEIVED' || awaitingPayment
-  const lateMin = order.estimated_ready_at && pending ? Math.floor(-etaMs / 60000) : -1
-  const isLate = lateMin >= 1
-  const delayNote = useMemo(() => {
-    if (!isLate) return null
-    const notes = t.delayNotes || []
-    if (!notes.length) return null
-    if (lateMin >= 10) return t.delayNoteLate || notes[0]
-    // Stable par commande, mais renouvelée toutes les deux minutes : la phrase
-    // ne clignote pas à chaque tic d'horloge et ne se répète pas non plus si
-    // l'attente s'étire.
-    let h = 0
-    for (const ch of String(order.id)) h = (h * 31 + ch.charCodeAt(0)) >>> 0
-    return notes[(h + Math.floor(lateMin / 2)) % notes.length]
-  }, [isLate, lateMin, order.id, t])
+  // Le rang n'est affiché qu'une fois connu : `undefined` = pas encore
+  // remonté, et afficher « vous êtes le prochain » par défaut serait une
+  // promesse aussi fausse que le compte à rebours qu'on vient de retirer.
+  const showAhead = pending && typeof ahead === 'number'
 
   const steps = ['RECEIVED', 'IN_PREP', 'READY', 'PICKED_UP', 'PAID']
   const idx = Math.max(0, steps.indexOf(order.status === 'UNPAID' ? 'PICKED_UP' : order.status))
@@ -4957,34 +5003,16 @@ function OrderCard({ order, event, venue, customer, lang, now, onReview, onCance
           <div style={{ fontFamily: FONT.label, fontWeight: 600, letterSpacing: 1, color: st.color }}>
             {statusLabel(order.status, lang).toUpperCase()}
           </div>
-          {pending && etaSec > 0 && (
-            <div style={{ ...S.money, marginLeft: 'auto', fontSize: 20, fontWeight: 600 }}>
-              {mm}:{ss}
-            </div>
-          )}
-          {isLate && (
-            <div
-              style={{
-                marginLeft: 'auto',
-                fontFamily: FONT.label,
-                fontSize: 10.5,
-                fontWeight: 600,
-                letterSpacing: 0.6,
-                textTransform: 'uppercase',
-                color: C.goldDark,
-                background: `${alpha(C.gold, 15)}`,
-                border: `1px solid ${C.gold}`,
-                borderRadius: 999,
-                padding: '3px 9px',
-                whiteSpace: 'nowrap',
-              }}
-            >
-              {t.delayBadge}
+          {showAhead && ahead > 0 && (
+            <div style={{ ...S.money, marginLeft: 'auto', fontSize: 22, fontWeight: 600 }}>
+              {ahead}
             </div>
           )}
         </div>
 
-        {delayNote && (
+        {/* Rang dans la file, à la place du temps estimé : il situe sans rien
+            promettre, et descend sous les yeux du client. */}
+        {showAhead && (
           <div
             style={{
               display: 'flex',
@@ -4993,15 +5021,15 @@ function OrderCard({ order, event, venue, customer, lang, now, onReview, onCance
               padding: '11px 13px',
               marginBottom: 14,
               borderRadius: 14,
-              background: `${alpha(C.gold, 9)}`,
-              border: `1px solid ${alpha(C.gold, 40)}`,
+              background: alpha(C.terracotta, 8),
+              border: `1px solid ${alpha(C.terracotta, 30)}`,
               fontSize: 13,
               lineHeight: 1.5,
               color: C.text,
             }}
           >
-            <span aria-hidden="true">⏳</span>
-            <span>{delayNote}</span>
+            <span aria-hidden="true">{ahead > 0 ? '👥' : '🎯'}</span>
+            <span>{ahead > 0 ? t.queueAhead(ahead) : t.queueNext}</span>
           </div>
         )}
 
