@@ -174,6 +174,43 @@ SQL
 done
 check "essais incohérents sur 5" "$BAD" "0"
 
+# --------------------------------------------------------------------------
+# Anti-double-ticket : toutes les tablettes du bar voient la même commande et
+# voudraient l'imprimer. Une seule doit gagner, sinon le poste reçoit autant
+# de tickets que de tablettes allumées.
+say ""
+say "── Anti-double-ticket entre tablettes ────────────────────"
+psql -h "$W" -p "$PORT" -U postgres -q >/dev/null 2>&1 <<SQL
+delete from public.gift_redemptions; delete from public.order_items; delete from public.orders;
+insert into public.orders (event_id, customer_id, scan_point_id, pickup_code, status)
+select '$EV', c.id, '$SP', 'TK' || lpad(g::text,2,'0'), 'RECEIVED'
+from generate_series(1,10) g
+cross join lateral (select id from public.customers limit 1) c;
+SQL
+MULTI=0
+for o in $(q "select id from public.orders order by pickup_code"); do
+  rm -f "$W"/claim_*
+  for n in 1 2 3 4 5; do
+    psql -h "$W" -p "$PORT" -U postgres -q -t -A >"$W/claim_$n" 2>&1 <<SQL &
+select set_config('request.jwt.claim.sub','00000000-0000-0000-0000-0000000000ff',false);
+select public.claim_ticket_print('$o');
+SQL
+  done
+  wait
+  G=$(cat "$W"/claim_* 2>/dev/null | grep -c '^t$')
+  [ "$G" = "1" ] || { MULTI=$((MULTI+1)); say "  ✗ $G tablette(s) ont gagné sur une même commande"; }
+done
+check "commandes imprimées plus d'une fois" "$MULTI" "0"
+
+# Une impression qui échoue doit rendre la main, sinon la commande reste
+# marquée imprimée sans qu'aucun papier ne soit sorti.
+OID=$(q "select id from public.orders limit 1")
+psql -h "$W" -p "$PORT" -U postgres -q >/dev/null 2>&1 <<SQL
+select set_config('request.jwt.claim.sub','00000000-0000-0000-0000-0000000000ff',false);
+select public.release_ticket_print('$OID');
+SQL
+check "réimprimable après un échec" "$(q "select set_config('request.jwt.claim.sub','00000000-0000-0000-0000-0000000000ff',false); select public.claim_ticket_print('$OID')" | tail -1)" "t"
+
 say ""
 if [ "$FAILURES" -eq 0 ]; then
   say "✅ $N commandes simultanées absorbées, tous les invariants tiennent."

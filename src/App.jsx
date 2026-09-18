@@ -16,6 +16,8 @@ import { supabase, isConfigured, frError, errorKey, BASE_PATH, scanUrl, isPrevie
 import { C, S, FONT, GRADIENT, RADIUS, alpha, eur, timeFR, dateFR, phoneFR, normalizePhone, isValidPhone } from './lib/theme.js'
 import { dict, useT, trProduct, trSubcat, LANG_LABEL, LANGS } from './lib/i18n.js'
 import { phoneVerificationAvailable, sendPhoneCode, confirmPhoneCode } from './lib/firebase.js'
+import { buildTicket, ticketToText, encodeEscPos } from './lib/ticket.js'
+import { sendToPrinter } from './lib/printer.js'
 import {
   canvasesToPdfBlob,
   shareOrDownload,
@@ -2461,9 +2463,13 @@ function OrderingApp({
         // provoquait un rendu inutile de tout l'écran de commande.
         setRealtimeDown((prev) => (prev === down ? prev : down))
         // Une reconnexion a pu manquer des événements : on resynchronise.
+        // La carte en fait partie depuis qu'elle n'est plus relevée
+        // périodiquement — sans ça, une rupture de stock annoncée pendant la
+        // coupure resterait invisible jusqu'à la fin de la soirée.
         if (status === 'SUBSCRIBED') {
           loadOrders()
           loadMessages()
+          loadProducts()
         }
       })
 
@@ -2481,30 +2487,45 @@ function OrderingApp({
   // Repli en interrogation périodique, dans son propre effet : sa cadence
   // dépend de l'état du canal, mais il ne doit surtout pas emporter le canal
   // avec lui à chaque changement de cadence.
+  // Cadences calibrées sur ce que chaque appel coûte RÉELLEMENT au serveur,
+  // multiplié par le nombre de téléphones dans la salle.
+  //
+  // La carte pèse ~33 Ko (illustrations comprises) et ne bouge pas de la
+  // soirée, à l'exception des ruptures de stock — que le canal temps réel
+  // signale déjà. La recharger toutes les 20 secondes par téléphone, c'était
+  // ~240 Mo l'heure à 40 clients pour des octets identiques. Elle n'est donc
+  // plus rechargée que lorsque le canal est tombé, et lentement.
+  //
+  // Les messages étaient relevés toutes les 6 s parce qu'une annonce devait
+  // être vue tout de suite. Les annonces ne remontent plus chez le client, et
+  // ce qui reste — suivi de commande, message adressé à quelqu'un — arrive
+  // déjà par le canal et par la notification poussée. Le repli peut donc
+  // respirer.
   useEffect(() => {
     if (!customer?.id || !event?.id) return
-    const msgPoll = setInterval(() => loadMessages(), 6000)
-    const restPoll = setInterval(
-      () => {
-        loadOrders()
-        loadProducts()
-      },
-      realtimeDown ? 6000 : 20000
-    )
+    const msgPoll = setInterval(() => loadMessages(), realtimeDown ? 6000 : 15000)
+    const orderPoll = setInterval(() => loadOrders(), realtimeDown ? 6000 : 20000)
+    const menuPoll = realtimeDown ? setInterval(() => loadProducts(), 30000) : null
     return () => {
       clearInterval(msgPoll)
-      clearInterval(restPoll)
+      clearInterval(orderPoll)
+      if (menuPoll) clearInterval(menuPoll)
     }
   }, [customer?.id, event?.id, loadOrders, loadMessages, loadProducts, realtimeDown])
 
   // Le rang dans la file a sa propre cadence : il bouge quand le bar sert
-  // quelqu'un d'autre, ce dont aucun abonnement du client n'est prévenu.
-  // Cadence tenue courte — un rang qui ne descend pas pendant vingt secondes
-  // donne l'impression d'une file figée, exactement ce qu'on veut éviter.
+  // quelqu'un d'autre, ce dont aucun abonnement du client n'est prévenu — le
+  // canal ne suit que ses propres commandes. Seule l'interrogation permet
+  // donc de voir la file avancer.
+  //
+  // 10 s : assez court pour que le rang descende sous les yeux, assez long
+  // pour rester discret. Le calcul lui-même est mesuré à 0,75 ms sur une
+  // soirée de 2 000 commandes, et cet effet ne tourne que tant qu'une
+  // commande est en attente.
   useEffect(() => {
     if (!pendingKey) return
     loadQueue()
-    const id = setInterval(() => loadQueue(), 8000)
+    const id = setInterval(() => loadQueue(), 10000)
     return () => clearInterval(id)
   }, [pendingKey, loadQueue])
 
@@ -6766,7 +6787,11 @@ function BarTab({ event, venue, session, onEventChange, showToast }) {
     // de l'affichage juste en dessous.
     const { data } = await supabase
       .from('orders')
-      .select('*, order_items ( * ), customers ( first_name, last_name, phone, tags )')
+      .select(
+        // L'univers du produit sert au ticket imprimé : il décide de l'en-tête
+        // FOOD / BOISSONS, que le poste lit d'un coup d'œil.
+        '*, order_items ( *, products ( universe ) ), customers ( first_name, last_name, phone, tags )'
+      )
       .eq('event_id', event.id)
       .order('created_at', { ascending: true })
     setOrders(data || [])
@@ -6943,10 +6968,71 @@ function BarTab({ event, venue, session, onEventChange, showToast }) {
     await supabase.from('orders').update({ printed_at: new Date().toISOString() }).eq('id', order.id)
   }
 
+  // ---- Impression automatique -------------------------------------------
+  // Le ticket sort tout seul dès qu'une commande arrive. Trois garde-fous,
+  // chacun pour une panne observable un soir de rush :
+  //
+  //  · RÉSERVATION — plusieurs tablettes voient la même commande et
+  //    voudraient toutes l'imprimer. claim_ticket_print() n'en laisse gagner
+  //    qu'une (voir 0050). Sans ça, trois tablettes = trois tickets.
+  //  · RENDU DE LA MAIN — si l'impression échoue, la réservation est rendue,
+  //    sinon la commande resterait marquée imprimée sans papier en face.
+  //  · UNE SEULE À LA FOIS — les tickets partent en file. Quarante commandes
+  //    d'un coup ne doivent pas ouvrir quarante connexions vers une
+  //    imprimante qui n'en sert qu'une.
+  const autoPrintOn = Boolean(venue?.printer_auto && venue?.printer_url)
+  const printing = useRef(false)
+  const [printFail, setPrintFail] = useState('')
+
+  useEffect(() => {
+    if (!autoPrintOn || printing.current) return
+    const queue = orders.filter(
+      (o) => !o.printed_at && o.status !== 'CANCELLED' && o.status !== 'AWAITING_PAYMENT'
+    )
+    if (!queue.length) return
+
+    let cancelled = false
+    printing.current = true
+    ;(async () => {
+      for (const order of queue) {
+        if (cancelled) break
+        const { data: won, error } = await supabase.rpc('claim_ticket_print', { p_order: order.id })
+        if (error || !won) continue // une autre tablette s'en charge
+
+        const res = await sendToPrinter(encodeEscPos(buildTicket({ order, event, venue })), {
+          url: venue.printer_url,
+        })
+        if (!res.ok) {
+          await supabase.rpc('release_ticket_print', { p_order: order.id })
+          if (!cancelled) setPrintFail(res.reason)
+          break // imprimante muette : inutile d'insister sur les suivantes
+        }
+        if (!cancelled) setPrintFail('')
+      }
+      printing.current = false
+      if (!cancelled) load()
+    })()
+
+    return () => {
+      cancelled = true
+    }
+  }, [autoPrintOn, orders, event, venue, load])
+
   if (loading) return <Spinner />
 
   return (
     <div>
+      {/* L'imprimante muette ne doit jamais passer inaperçue : sans ticket, le
+          bar ne prépare rien. On le dit, sans rien bloquer — les commandes
+          restent visibles à l'écran, qui reste la source de vérité. */}
+      {printFail && (
+        <div style={{ marginBottom: 14 }} className="no-print">
+          <Banner tone="danger">
+            <strong>Imprimante :</strong> {printFail} Les commandes restent affichées ci-dessous.
+          </Banner>
+        </div>
+      )}
+
       {unseen.length > 0 && (
         <div style={{ marginBottom: 14 }}>
           <div
@@ -12453,6 +12539,130 @@ function PresentationLinksCard({ venue, showToast }) {
   )
 }
 
+/**
+ * Réglage de l'imprimante du bar. Le bouton d'essai sort un vrai ticket, avec
+ * un vrai nom et de vrais articles : c'est le seul moyen de vérifier la
+ * largeur du rouleau et les accents avant la soirée, pas pendant.
+ */
+function PrinterCard({ venue, onReload, showToast }) {
+  const [url, setUrl] = useState(venue.printer_url || '')
+  const [auto, setAuto] = useState(Boolean(venue.printer_auto))
+  const [busy, setBusy] = useState(false)
+  const [preview, setPreview] = useState(false)
+
+  const demo = useMemo(
+    () => ({
+      pickup_code: 'A7X3',
+      created_at: new Date().toISOString(),
+      status: 'RECEIVED',
+      subtotal: 26, discount: 0, total: 26,
+      note: 'Essai d’imprimante',
+      customers: { first_name: 'Essai', last_name: 'Imprimante', phone: '+33 6 00 00 00 00', tags: [] },
+      order_items: [
+        { quantity: 2, name_snapshot: 'Spritz', unit_price: 12, variant_label: null, detail: { options: [{ name: 'Aperol' }] } },
+        { quantity: 1, name_snapshot: 'Coca-Cola', unit_price: 2, variant_label: '33 cl', detail: { options: [] } },
+      ],
+    }),
+    []
+  )
+
+  async function save() {
+    setBusy(true)
+    const { error } = await supabase
+      .from('venues')
+      .update({ printer_url: url.trim() || null, printer_auto: auto })
+      .eq('id', venue.id)
+    setBusy(false)
+    if (error) return showToast(frError(error), 'error')
+    showToast('Imprimante enregistrée.', 'ok')
+    onReload?.()
+  }
+
+  async function testPrint() {
+    setBusy(true)
+    const res = await sendToPrinter(encodeEscPos(buildTicket({ order: demo, event: null, venue })), {
+      url: url.trim(),
+    })
+    setBusy(false)
+    showToast(res.ok ? 'Ticket d’essai envoyé.' : res.reason, res.ok ? 'ok' : 'error')
+  }
+
+  return (
+    <div style={{ ...S.card, marginBottom: 14 }}>
+      <div style={{ ...S.h2, marginBottom: 6 }}>Impression des tickets</div>
+      <div style={{ fontSize: 12, color: C.dim, marginBottom: 14, lineHeight: 1.55 }}>
+        Quand c’est actif, le ticket sort tout seul dès qu’une commande arrive — avec le nom du
+        client, son téléphone, le détail et le code de retrait. Plusieurs tablettes peuvent rester
+        allumées : une seule imprime chaque commande.
+      </div>
+
+      <div style={{ marginBottom: 14 }}>
+        <Banner tone="info">
+          Un navigateur ne peut joindre ni une adresse <code>http://</code> depuis un site sécurisé,
+          ni un port d’imprimante brut. L’adresse ci-dessous doit donc répondre en{' '}
+          <strong>https</strong> — en pratique, une imprimante qui va chercher ses tickets
+          (Epson Server Direct Print, Star CloudPRNT) ou un relais installé sur place.
+        </Banner>
+      </div>
+
+      <Field label="Adresse d’impression">
+        <input
+          style={S.input}
+          value={url}
+          onChange={(e) => setUrl(e.target.value)}
+          placeholder="https://…"
+          autoComplete="off"
+        />
+      </Field>
+
+      <button
+        onClick={() => setAuto(!auto)}
+        style={{
+          ...S.chip,
+          width: '100%',
+          minHeight: 48,
+          marginBottom: 12,
+          borderColor: auto ? C.terracotta : C.lineHi,
+          color: auto ? C.terracotta : C.dim,
+        }}
+      >
+        {auto ? '✓ Impression automatique active' : 'Impression automatique désactivée'}
+      </button>
+
+      <div style={{ display: 'grid', gap: 8 }}>
+        <button disabled={busy} onClick={save} style={{ ...S.btn, opacity: busy ? 0.6 : 1 }}>
+          {busy ? '…' : 'Enregistrer'}
+        </button>
+        <button disabled={busy || !url.trim()} onClick={testPrint} style={{ ...S.btnGhost, opacity: busy || !url.trim() ? 0.5 : 1 }}>
+          Imprimer un ticket d’essai
+        </button>
+        <button onClick={() => setPreview(!preview)} style={S.btnGhost}>
+          {preview ? 'Masquer l’aperçu' : 'Voir à quoi ressemble le ticket'}
+        </button>
+      </div>
+
+      {preview && (
+        <pre
+          style={{
+            marginTop: 12,
+            padding: 12,
+            borderRadius: 12,
+            background: C.paper,
+            border: `1px solid ${C.line}`,
+            fontFamily: 'ui-monospace, Menlo, Consolas, monospace',
+            fontSize: 11,
+            lineHeight: 1.45,
+            overflowX: 'auto',
+            whiteSpace: 'pre',
+          }}
+        >
+          {ticketToText(buildTicket({ order: demo, event: null, venue }))}
+        </pre>
+      )}
+    </div>
+  )
+}
+
 function ReglagesTab({ venue, event, session, role, onReload, showToast }) {
   const [v, setV] = useState(venue)
   const [e, setE] = useState(event)
@@ -12666,6 +12876,8 @@ function ReglagesTab({ venue, event, session, role, onReload, showToast }) {
           </div>
         </Field>
       </div>
+
+      <PrinterCard venue={venue} onReload={onReload} showToast={showToast} />
 
       {role === 'owner' && <TeamCard venue={venue} session={session} showToast={showToast} />}
       {(role === 'owner' || role === 'manager') && (
