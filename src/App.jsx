@@ -12620,12 +12620,15 @@ function PrinterCard({ venue, onReload, showToast }) {
         </Banner>
       </div>
 
-      <Field label="Adresse d’impression">
+      <Field
+        label="Adresse d’impression"
+        hint="Sur un Epson TM-m30III, le service ePOS-Print répond sur /cgi-bin/epos/service.cgi?devid=local_printer — par exemple https://192.168.1.50/cgi-bin/epos/service.cgi?devid=local_printer"
+      >
         <input
           style={S.input}
           value={url}
           onChange={(e) => setUrl(e.target.value)}
-          placeholder="https://…"
+          placeholder="https://…/cgi-bin/epos/service.cgi?devid=local_printer"
           autoComplete="off"
         />
       </Field>
