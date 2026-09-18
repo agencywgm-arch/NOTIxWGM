@@ -5727,6 +5727,96 @@ function tabsForRole(role) {
   return STAFF_TABS.filter((t) => allowed.includes(t.k))
 }
 
+/**
+ * Impression silencieuse à l'arrivée — montée une fois pour toute la session
+ * staff, jamais à l'intérieur d'un onglet.
+ *
+ * Elle vivait avant dans BarTab : elle s'arrêtait donc dès qu'on quittait
+ * l'onglet Bar (le composant est démonté, son abonnement temps réel coupé),
+ * et ne reprenait qu'au retour sur l'onglet — un ticket pouvait attendre
+ * plusieurs minutes qu'on y repense. Montée ici, au niveau de StaffApp
+ * au-dessus des onglets, elle tourne tout le temps, quel que soit l'écran
+ * ouvert sur la tablette.
+ *
+ * Ne rend rien à l'écran : les échecs remontent par showToast (déjà visible
+ * depuis n'importe quel onglet), pas par une bannière locale à une vue.
+ */
+function AutoPrintDaemon({ event, venue, showToast }) {
+  const autoPrintOn = Boolean(venue?.printer_auto && venue?.printer_url)
+  const printing = useRef(false)
+  const failedOnce = useRef(false)
+
+  const run = useCallback(async () => {
+    if (!autoPrintOn || printing.current || !event?.id) return
+    const { data } = await supabase
+      .from('orders')
+      .select('*, order_items ( *, products ( universe ) ), customers ( first_name, last_name, phone, tags )')
+      .eq('event_id', event.id)
+      .is('printed_at', null)
+      .not('status', 'in', '(CANCELLED,AWAITING_PAYMENT)')
+    const queue = data || []
+    if (!queue.length) return
+
+    printing.current = true
+    try {
+      for (const order of queue) {
+        const { data: won, error } = await supabase.rpc('claim_ticket_print', { p_order: order.id })
+        if (error || !won) continue // une autre tablette s'en charge
+
+        const res = await sendToPrinter(buildTicket({ order, event, venue }), { url: venue.printer_url })
+        if (!res.ok) {
+          await supabase.rpc('release_ticket_print', { p_order: order.id })
+          // Un seul avertissement tant que ça ne remarche pas : sinon chaque
+          // commande qui arrive spamme le même message.
+          if (!failedOnce.current) {
+            failedOnce.current = true
+            showToast(`Imprimante : ${res.reason}`, 'error')
+          }
+          break // imprimante muette : inutile d'insister sur les suivantes
+        }
+        failedOnce.current = false
+      }
+    } catch (e) {
+      // Filet identique à celui du transport : un incident imprévu ne doit
+      // jamais s'éteindre en silence pour le reste de la soirée.
+      if (!failedOnce.current) {
+        failedOnce.current = true
+        showToast(`Imprimante : ${printerError(e)}`, 'error')
+      }
+    } finally {
+      printing.current = false
+    }
+  }, [autoPrintOn, event, venue, showToast])
+
+  useEffect(() => {
+    if (!autoPrintOn || !event?.id) return
+    run()
+    // Abonnement temps réel, propre à ce démon : indépendant de celui de
+    // BarTab, qui sert l'affichage et peut être démonté/remonté au gré de la
+    // navigation. Celui-ci ne l'est jamais tant que la session staff dure.
+    const ch = supabase
+      .channel(`autoprint-${event.id}`)
+      .on(
+        'postgres_changes',
+        { event: '*', schema: 'public', table: 'orders', filter: `event_id=eq.${event.id}` },
+        () => run()
+      )
+      .subscribe((status) => {
+        if (status === 'SUBSCRIBED') run()
+      })
+    // Repli si le canal reste muet (Wi-Fi capricieux) : sans lui, une coupure
+    // silencieuse du WebSocket arrêterait l'impression sans que personne ne
+    // le remarque avant la fin de la soirée.
+    const poll = setInterval(run, 20000)
+    return () => {
+      supabase.removeChannel(ch)
+      clearInterval(poll)
+    }
+  }, [autoPrintOn, event?.id, run])
+
+  return null
+}
+
 function StaffApp({ session }) {
   const [venues, setVenues] = useState(null)
   const [venueId, setVenueId] = useState(LS.get('noti:venue', null))
@@ -5866,6 +5956,7 @@ function StaffApp({ session }) {
   return (
     <div style={{ ...S.page, paddingBottom: 96 }}>
       <Keyframes />
+      <AutoPrintDaemon event={event} venue={venue} showToast={showToast} />
 
       <div
         style={{
@@ -7015,80 +7106,10 @@ function BarTab({ event, venue, session, onEventChange, showToast }) {
     await supabase.from('orders').update({ printed_at: new Date().toISOString() }).eq('id', order.id)
   }
 
-  // ---- Impression automatique -------------------------------------------
-  // Le ticket sort tout seul dès qu'une commande arrive. Trois garde-fous,
-  // chacun pour une panne observable un soir de rush :
-  //
-  //  · RÉSERVATION — plusieurs tablettes voient la même commande et
-  //    voudraient toutes l'imprimer. claim_ticket_print() n'en laisse gagner
-  //    qu'une (voir 0050). Sans ça, trois tablettes = trois tickets.
-  //  · RENDU DE LA MAIN — si l'impression échoue, la réservation est rendue,
-  //    sinon la commande resterait marquée imprimée sans papier en face.
-  //  · UNE SEULE À LA FOIS — les tickets partent en file. Quarante commandes
-  //    d'un coup ne doivent pas ouvrir quarante connexions vers une
-  //    imprimante qui n'en sert qu'une.
-  const autoPrintOn = Boolean(venue?.printer_auto && venue?.printer_url)
-  const printing = useRef(false)
-  const [printFail, setPrintFail] = useState('')
-
-  useEffect(() => {
-    if (!autoPrintOn || printing.current) return
-    const queue = orders.filter(
-      (o) => !o.printed_at && o.status !== 'CANCELLED' && o.status !== 'AWAITING_PAYMENT'
-    )
-    if (!queue.length) return
-
-    let cancelled = false
-    printing.current = true
-    ;(async () => {
-      try {
-        for (const order of queue) {
-          if (cancelled) break
-          const { data: won, error } = await supabase.rpc('claim_ticket_print', { p_order: order.id })
-          if (error || !won) continue // une autre tablette s'en charge
-
-          const res = await sendToPrinter(buildTicket({ order, event, venue }), {
-            url: venue.printer_url,
-          })
-          if (!res.ok) {
-            await supabase.rpc('release_ticket_print', { p_order: order.id })
-            if (!cancelled) setPrintFail(res.reason)
-            break // imprimante muette : inutile d'insister sur les suivantes
-          }
-          if (!cancelled) setPrintFail('')
-        }
-      } catch (e) {
-        // Un incident imprévu (pas juste une imprimante muette) ne doit
-        // jamais s'éteindre en silence : sans ce filet, une seule commande
-        // malformée bloquait ensuite toute impression pour le reste de la
-        // soirée, sans le moindre message.
-        if (!cancelled) setPrintFail(printerError(e))
-      } finally {
-        printing.current = false
-        if (!cancelled) load()
-      }
-    })()
-
-    return () => {
-      cancelled = true
-    }
-  }, [autoPrintOn, orders, event, venue, load])
-
   if (loading) return <Spinner />
 
   return (
     <div>
-      {/* L'imprimante muette ne doit jamais passer inaperçue : sans ticket, le
-          bar ne prépare rien. On le dit, sans rien bloquer — les commandes
-          restent visibles à l'écran, qui reste la source de vérité. */}
-      {printFail && (
-        <div style={{ marginBottom: 14 }} className="no-print">
-          <Banner tone="danger">
-            <strong>Imprimante :</strong> {printFail} Les commandes restent affichées ci-dessous.
-          </Banner>
-        </div>
-      )}
-
       {unseen.length > 0 && (
         <div style={{ marginBottom: 14 }}>
           <div
