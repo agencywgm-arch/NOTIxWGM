@@ -6917,6 +6917,45 @@ function BarTab({ event, venue, session, onEventChange, showToast }) {
     }
   }, [orders, showToast])
 
+  // Impression du ticket « En prépa », VOLONTAIREMENT non attendue par move()
+  // (voir plus bas) : l'imprimante peut mettre plusieurs secondes à répondre
+  // (jusqu'au timeoutMs de sendToPrinter), et faire attendre tout l'écran
+  // staff sur ce délai avant de faire bouger la commande à l'écran rendait
+  // chaque clic « En prépa » poussif. Le ticket part en tâche de fond dès
+  // que le statut est enregistré ; un souci d'impression remonte quand même,
+  // juste après coup, via showToast.
+  async function printPrepTicket(order) {
+    try {
+      const { data: won, error: claimErr } = await supabase.rpc('claim_prep_ticket_print', {
+        p_order: order.id,
+      })
+      if (claimErr || !won) return
+      const res = await sendToPrinter(buildTicket({ order, event, venue }), {
+        url: venue.printer_url,
+      })
+      await supabase.rpc('log_ticket_print', {
+        p_order: order.id,
+        p_trigger: 'en_prepa',
+        p_result: res.ok ? 'ok' : res.ambiguous ? 'ambiguous' : 'fail',
+        p_reason: res.ok ? null : res.reason,
+      })
+      if (!res.ok) {
+        // Un délai dépassé ne prouve pas que l'impression a raté (voir
+        // printer.js) : on ne relâche pas la réservation dans ce cas, sinon
+        // un simple ralentissement redéclenche un second ticket.
+        if (!res.ambiguous) await supabase.rpc('release_prep_ticket_print', { p_order: order.id })
+        showToast(
+          res.ambiguous
+            ? `Imprimante : ${res.reason} Vérifiez si le ticket ${order.pickup_code} est sorti avant de réimprimer.`
+            : `Imprimante : ${res.reason}`,
+          'error'
+        )
+      }
+    } catch (e) {
+      showToast(`Imprimante : ${printerError(e)}`, 'error')
+    }
+  }
+
   async function move(order, status, opts = {}) {
     unlockAudio()
     const { error } = await supabase.from('orders').update({ status }).eq('id', order.id)
@@ -6936,33 +6975,10 @@ function BarTab({ event, venue, session, onEventChange, showToast }) {
     // une correction de statut, ça ne doit jamais réimprimer — même si un
     // jour la garde côté base changeait, celle-ci ne dépend d'aucune requête
     // réseau pour être sûre.
+    //
+    // Pas de `await` ici : voir printPrepTicket ci-dessus.
     if (status === 'IN_PREP' && !opts.back && venue?.printer_url) {
-      const { data: won, error: claimErr } = await supabase.rpc('claim_prep_ticket_print', {
-        p_order: order.id,
-      })
-      if (!claimErr && won) {
-        const res = await sendToPrinter(buildTicket({ order, event, venue }), {
-          url: venue.printer_url,
-        })
-        await supabase.rpc('log_ticket_print', {
-          p_order: order.id,
-          p_trigger: 'en_prepa',
-          p_result: res.ok ? 'ok' : res.ambiguous ? 'ambiguous' : 'fail',
-          p_reason: res.ok ? null : res.reason,
-        })
-        if (!res.ok) {
-          // Un délai dépassé ne prouve pas que l'impression a raté (voir
-          // printer.js) : on ne relâche pas la réservation dans ce cas,
-          // sinon un simple ralentissement redéclenche un second ticket.
-          if (!res.ambiguous) await supabase.rpc('release_prep_ticket_print', { p_order: order.id })
-          showToast(
-            res.ambiguous
-              ? `Imprimante : ${res.reason} Vérifiez si le ticket ${order.pickup_code} est sorti avant de réimprimer.`
-              : `Imprimante : ${res.reason}`,
-            'error'
-          )
-        }
-      }
+      printPrepTicket(order)
     }
 
     if (status === 'READY') {
