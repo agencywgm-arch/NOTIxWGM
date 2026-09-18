@@ -6914,6 +6914,25 @@ function BarTab({ event, venue, session, onEventChange, showToast }) {
     const { error } = await supabase.from('orders').update({ status }).eq('id', order.id)
     if (error) return showToast(frError(error), 'error')
 
+    // Second ticket, volontairement indépendant de celui de l'arrivée
+    // (0050) : au clic « En prépa », dès que quelqu'un commence
+    // effectivement à traiter la commande. Sur sa propre réservation
+    // (0052) — sinon la première impression aurait déjà bloqué celle-ci.
+    if (status === 'IN_PREP' && venue?.printer_auto && venue?.printer_url) {
+      const { data: won, error: claimErr } = await supabase.rpc('claim_prep_ticket_print', {
+        p_order: order.id,
+      })
+      if (!claimErr && won) {
+        const res = await sendToPrinter(buildTicket({ order, event, venue }), {
+          url: venue.printer_url,
+        })
+        if (!res.ok) {
+          await supabase.rpc('release_prep_ticket_print', { p_order: order.id })
+          showToast(`Imprimante : ${res.reason}`, 'error')
+        }
+      }
+    }
+
     if (status === 'READY') {
       notify({
         eventId: event.id,
