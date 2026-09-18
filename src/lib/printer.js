@@ -118,11 +118,22 @@ function eposEnvelope(xmlBody) {
  * Pousse un ticket vers l'imprimante. Ne lève jamais tout seul : le service
  * ne doit pas s'arrêter parce qu'un rouleau de papier est vide.
  *
+ * `ambiguous: true` distingue « on sait que ça a échoué » de « on ne sait
+ * pas » — la nuance qui a provoqué une impression en boucle un soir de
+ * rush : un simple dépassement de délai (l'imprimante encaisse la requête
+ * mais répond lentement) était traité comme un échec certain, la
+ * réservation était relâchée, et ce relâchement relançait aussitôt une
+ * nouvelle tentative — qui imprimait à nouveau, retimeoutait, relâchait de
+ * nouveau, sans fin. Un abandon par délai ne prouve pas que l'impression a
+ * raté : l'appelant ne doit PAS relâcher la réservation dans ce cas,
+ * seulement sur un refus net (code HTTP d'erreur, ou l'imprimante qui
+ * répond explicitement qu'elle refuse).
+ *
  * @param {ReturnType<typeof import('./ticket.js').buildTicket>} lines
- * @returns {Promise<{ok: boolean, reason?: string}>}
+ * @returns {Promise<{ok: boolean, reason?: string, ambiguous?: boolean}>}
  */
 export async function sendToPrinter(lines, { url, timeoutMs = 6000 } = {}) {
-  if (!url) return { ok: false, reason: 'Aucune imprimante configurée.' }
+  if (!url) return { ok: false, ambiguous: false, reason: 'Aucune imprimante configurée.' }
 
   const ctrl = new AbortController()
   const timer = setTimeout(() => ctrl.abort(), timeoutMs)
@@ -136,16 +147,20 @@ export async function sendToPrinter(lines, { url, timeoutMs = 6000 } = {}) {
       body: eposEnvelope(buildEposPrintXml(lines)),
       signal: ctrl.signal,
     })
-    if (!res.ok) return { ok: false, reason: `L’imprimante a répondu ${res.status}.` }
+    if (!res.ok) return { ok: false, ambiguous: false, reason: `L’imprimante a répondu ${res.status}.` }
     const body = await res.text()
     // ePOS-Print répond 200 même quand il refuse : le verdict est dans le XML.
     if (/success="false"/i.test(body)) {
       const code = body.match(/code="([^"]*)"/i)?.[1] || ''
-      return { ok: false, reason: `L’imprimante a refusé le ticket${code ? ` (${code})` : ''}.` }
+      return { ok: false, ambiguous: false, reason: `L’imprimante a refusé le ticket${code ? ` (${code})` : ''}.` }
     }
     return { ok: true }
   } catch (e) {
-    return { ok: false, reason: printerError(e) }
+    // AbortError : c'est NOUS qui avons abandonné après timeoutMs, pas
+    // l'imprimante qui a refusé — elle a très bien pu recevoir et imprimer
+    // quand même, juste plus lentement que prévu.
+    const ambiguous = e?.name === 'AbortError'
+    return { ok: false, ambiguous, reason: printerError(e) }
   } finally {
     clearTimeout(timer)
   }

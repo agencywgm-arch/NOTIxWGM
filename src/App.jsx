@@ -5765,12 +5765,24 @@ function AutoPrintDaemon({ event, venue, showToast }) {
 
         const res = await sendToPrinter(buildTicket({ order, event, venue }), { url: venue.printer_url })
         if (!res.ok) {
-          await supabase.rpc('release_ticket_print', { p_order: order.id })
+          // Sur un échec AMBIGU (délai dépassé — l'imprimante a peut-être
+          // quand même imprimé, juste lentement) on NE relâche PAS la
+          // réservation : la relâcher redéclenchait aussitôt une nouvelle
+          // tentative via l'abonnement temps réel, qui pouvait retimeouter
+          // et relâcher à son tour — une boucle d'impression sans fin,
+          // vécue en soirée. Seul un refus net (code d'erreur, imprimante
+          // qui répond « non ») libère la commande pour une vraie reprise.
+          if (!res.ambiguous) await supabase.rpc('release_ticket_print', { p_order: order.id })
           // Un seul avertissement tant que ça ne remarche pas : sinon chaque
           // commande qui arrive spamme le même message.
           if (!failedOnce.current) {
             failedOnce.current = true
-            showToast(`Imprimante : ${res.reason}`, 'error')
+            showToast(
+              res.ambiguous
+                ? `Imprimante : ${res.reason} Vérifiez si le ticket ${order.pickup_code} est sorti avant de réimprimer.`
+                : `Imprimante : ${res.reason}`,
+              'error'
+            )
           }
           break // imprimante muette : inutile d'insister sur les suivantes
         }
@@ -7031,8 +7043,16 @@ function BarTab({ event, venue, session, onEventChange, showToast }) {
           url: venue.printer_url,
         })
         if (!res.ok) {
-          await supabase.rpc('release_prep_ticket_print', { p_order: order.id })
-          showToast(`Imprimante : ${res.reason}`, 'error')
+          // Même garde-fou que l'impression à l'arrivée (voir AutoPrintDaemon) :
+          // un délai dépassé ne prouve pas que l'impression a raté, donc on
+          // ne relâche pas la réservation dans ce cas.
+          if (!res.ambiguous) await supabase.rpc('release_prep_ticket_print', { p_order: order.id })
+          showToast(
+            res.ambiguous
+              ? `Imprimante : ${res.reason} Vérifiez si le ticket ${order.pickup_code} est sorti avant de réimprimer.`
+              : `Imprimante : ${res.reason}`,
+            'error'
+          )
         }
       }
     }
