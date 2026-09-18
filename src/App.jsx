@@ -17,7 +17,7 @@ import { C, S, FONT, GRADIENT, RADIUS, alpha, eur, timeFR, dateFR, phoneFR, norm
 import { dict, useT, trProduct, trSubcat, LANG_LABEL, LANGS } from './lib/i18n.js'
 import { phoneVerificationAvailable, sendPhoneCode, confirmPhoneCode } from './lib/firebase.js'
 import { buildTicket, ticketToText } from './lib/ticket.js'
-import { sendToPrinter } from './lib/printer.js'
+import { sendToPrinter, printerError } from './lib/printer.js'
 import {
   canvasesToPdfBlob,
   shareOrDownload,
@@ -7033,23 +7033,32 @@ function BarTab({ event, venue, session, onEventChange, showToast }) {
     let cancelled = false
     printing.current = true
     ;(async () => {
-      for (const order of queue) {
-        if (cancelled) break
-        const { data: won, error } = await supabase.rpc('claim_ticket_print', { p_order: order.id })
-        if (error || !won) continue // une autre tablette s'en charge
+      try {
+        for (const order of queue) {
+          if (cancelled) break
+          const { data: won, error } = await supabase.rpc('claim_ticket_print', { p_order: order.id })
+          if (error || !won) continue // une autre tablette s'en charge
 
-        const res = await sendToPrinter(buildTicket({ order, event, venue }), {
-          url: venue.printer_url,
-        })
-        if (!res.ok) {
-          await supabase.rpc('release_ticket_print', { p_order: order.id })
-          if (!cancelled) setPrintFail(res.reason)
-          break // imprimante muette : inutile d'insister sur les suivantes
+          const res = await sendToPrinter(buildTicket({ order, event, venue }), {
+            url: venue.printer_url,
+          })
+          if (!res.ok) {
+            await supabase.rpc('release_ticket_print', { p_order: order.id })
+            if (!cancelled) setPrintFail(res.reason)
+            break // imprimante muette : inutile d'insister sur les suivantes
+          }
+          if (!cancelled) setPrintFail('')
         }
-        if (!cancelled) setPrintFail('')
+      } catch (e) {
+        // Un incident imprévu (pas juste une imprimante muette) ne doit
+        // jamais s'éteindre en silence : sans ce filet, une seule commande
+        // malformée bloquait ensuite toute impression pour le reste de la
+        // soirée, sans le moindre message.
+        if (!cancelled) setPrintFail(printerError(e))
+      } finally {
+        printing.current = false
+        if (!cancelled) load()
       }
-      printing.current = false
-      if (!cancelled) load()
     })()
 
     return () => {
