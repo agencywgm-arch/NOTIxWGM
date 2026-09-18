@@ -7,12 +7,14 @@
 //  transport : c'est la seule partie qui dépend du modèle acheté.
 // ============================================================================
 
-// 32 caractères : largeur d'un rouleau 58 mm en police par défaut (Font A) —
-// passé de 42 (80 mm) au changement de rouleau. Cette largeur ne suffit pas
-// à elle seule : l'imprimante doit aussi savoir qu'elle a du 58 mm en face
-// (réglage papier dans son propre Web Config), sinon elle continue de
-// calculer sur 80 mm quoi qu'on lui envoie.
-export const WIDTH = 32
+// 30 caractères utiles, sur un rouleau 58 mm. Vérifié sur un ticket réel :
+// le texte aligné à gauche perdait systématiquement ses 2 premiers
+// caractères (« 18:54 » imprimait « 54 », « TOTAL » imprimait « TAL ») —
+// la marge gauche de l'imprimante ne démarre pas exactement là où
+// commence le papier. Les 2 caractères de marge sont ajoutés dans
+// printer.js, invisibles, pour rattraper ce décalage ; WIDTH ne compte que
+// ce qui doit rester lisible derrière.
+export const WIDTH = 30
 
 const pad = (left, right, w = WIDTH) => {
   const l = String(left ?? '')

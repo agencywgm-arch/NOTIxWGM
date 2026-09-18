@@ -63,15 +63,25 @@ const xmlEscape = (s) =>
  * Bénéfice au passage : le texte voyage en UTF-8 normal, directement — plus
  * besoin de translittérer les accents pour une page de codes imprimante.
  */
+// Rattrapage matériel : sur ce rouleau, le texte aligné à gauche perdait
+// systématiquement ses 2 premiers caractères, engloutis avant le bord réel
+// du papier (« 18:54 » sortait « 54 », « TOTAL » sortait « TAL » — constaté
+// sur un ticket imprimé). Uniquement sur le texte aligné à gauche : les
+// éléments centrés (title/big/center) sont positionnés par l'imprimante
+// elle-même selon la longueur du texte — leur ajouter cette marge décalerait
+// leur centrage au lieu de le corriger.
+const LEFT_MARGIN = '  '
+
 function buildEposPrintXml(lines) {
   const text = (v, attrs = '') => `<text${attrs}>${xmlEscape(v)}\n</text>`
+  const left = (v, attrs = '') => text(LEFT_MARGIN + v, attrs)
   const parts = lines.map((l) => {
     switch (l.t) {
       case 'sep':
         // Largeur reprise de ticket.js, jamais recopiée en dur ici — c'est
         // le fait d'avoir deux « 42 » séparés qui a cassé l'alignement au
         // passage à un rouleau 58 mm plus étroit.
-        return text('-'.repeat(WIDTH))
+        return left('-'.repeat(WIDTH))
       case 'title':
         // Taille normale : seul le code de retrait (ci-dessous) doit
         // dominer le ticket, le nom du lieu n'a pas besoin de rivaliser.
@@ -85,9 +95,9 @@ function buildEposPrintXml(lines) {
       case 'center':
         return text(l.v, ' align="center"')
       case 'bold':
-        return text(l.v, ' em="true"')
+        return left(l.v, ' em="true"')
       default:
-        return text(l.v)
+        return left(l.v)
     }
   })
   parts.push('<feed line="2"/>', '<cut type="feed"/>')
