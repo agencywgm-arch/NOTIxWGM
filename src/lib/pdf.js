@@ -147,6 +147,41 @@ export async function shareOrDownload(blob, filename, title = 'Noti Calling') {
   return 'downloaded'
 }
 
+let fontsReadyPromise = null
+
+/**
+ * Garantit que les polices web dessinées sur un `<canvas>` sont bien
+ * chargées AVANT le premier `ctx.fillText`.
+ *
+ * Sans ça, `fillText` retombe silencieusement sur une police système si la
+ * police demandée n'a pas fini de charger — c'est ce qui produisait des
+ * exports à l'apparence différente d'une fois sur l'autre (police fine et
+ * mal espacée juste après l'ouverture de la page, correcte une fois les
+ * polices en cache). `document.fonts.ready` seul ne suffit pas : cette
+ * promesse n'attend que les polices déjà DEMANDÉES ailleurs dans la page —
+ * si aucun texte visible n'utilise encore Great Vibes ou Oswald 600 au
+ * moment du rendu, elle se résout immédiatement sans les avoir chargées.
+ * `document.fonts.load()` déclenche le chargement ET attend qu'il aboutisse,
+ * pour chaque graisse utilisée dans les rendus Canvas de l'app.
+ */
+export function ensureFontsReady() {
+  if (!fontsReadyPromise) {
+    const specs = [
+      '700 16px "Playfair Display"',
+      '400 16px "Great Vibes"',
+      '500 16px "Oswald"',
+      '600 16px "Oswald"',
+      '400 16px "Jost"',
+      '500 16px "Jost"',
+      '600 16px "Jost"',
+    ]
+    fontsReadyPromise = Promise.all(specs.map((s) => document.fonts.load(s).catch(() => {})))
+      .then(() => document.fonts.ready)
+      .catch(() => {})
+  }
+  return fontsReadyPromise
+}
+
 /** Crée un canvas HiDPI prêt à peindre (dimensions logiques en px CSS). */
 export function makeCanvas(w, h, dpr = 2) {
   const canvas = document.createElement('canvas')
