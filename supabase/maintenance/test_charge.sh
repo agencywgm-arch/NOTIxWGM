@@ -211,6 +211,26 @@ select public.release_ticket_print('$OID');
 SQL
 check "réimprimable après un échec" "$(q "select set_config('request.jwt.claim.sub','00000000-0000-0000-0000-0000000000ff',false); select public.claim_ticket_print('$OID')" | tail -1)" "t"
 
+# --------------------------------------------------------------------------
+# L'écran du bar ne charge plus toute la soirée mais une fenêtre glissante.
+# La garantie à ne jamais perdre : une commande en cours reste visible quel
+# que soit son âge. Une commande prête oubliée six heures plus tôt doit
+# encore apparaître, sinon un client attend un verre que personne ne voit.
+say ""
+say "── Fenêtre du bar : rien d'en cours ne disparaît ─────────"
+psql -h "$W" -p "$PORT" -U postgres -q >/dev/null 2>&1 <<SQL
+insert into public.orders (event_id, customer_id, scan_point_id, pickup_code, status, created_at)
+select '$EV', (select id from public.customers limit 1), '$SP', 'OLD1', 'READY', now() - interval '6 hours';
+insert into public.orders (event_id, customer_id, scan_point_id, pickup_code, status, created_at)
+select '$EV', (select id from public.customers limit 1), '$SP', 'OLD2', 'PAID', now() - interval '6 hours';
+SQL
+FENETRE="status <> 'PAID' and (status in ('AWAITING_PAYMENT','RECEIVED','IN_PREP','READY')
+         or created_at >= now() - interval '2 hours')"
+check "commande prête vieille de 6 h, encore chargée" \
+  "$(q "select count(*) from public.orders where pickup_code='OLD1' and $FENETRE")" "1"
+check "commande réglée vieille de 6 h, écartée"       \
+  "$(q "select count(*) from public.orders where pickup_code='OLD2' and $FENETRE")" "0"
+
 say ""
 if [ "$FAILURES" -eq 0 ]; then
   say "✅ $N commandes simultanées absorbées, tous les invariants tiennent."

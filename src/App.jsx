@@ -6785,6 +6785,17 @@ function BarTab({ event, venue, session, onEventChange, showToast }) {
     // liste : impossible de distinguer « annulée » de « jamais vue », donc
     // impossible de prévenir le barman qui la préparait. Elles sont écartées
     // de l'affichage juste en dessous.
+    // Fenêtre glissante plutôt que toute la soirée. L'écran du bar ne montre
+    // que le travail en cours et les retraits récents — l'historique complet a
+    // son propre onglet. Sans cette borne, chaque tablette rechargeait toutes
+    // les commandes de la nuit toutes les 20 secondes : mesuré à 891 Ko sur
+    // une soirée de 2 000 commandes, et ça ne fait que grossir jusqu'à la
+    // fermeture.
+    //
+    // Les commandes en cours sont gardées quel qu'en soit l'âge : une
+    // commande jamais retirée doit rester sous les yeux du bar, même six
+    // heures plus tard. Seules les commandes closes sortent de la fenêtre.
+    const depuis = new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString()
     const { data } = await supabase
       .from('orders')
       .select(
@@ -6793,6 +6804,10 @@ function BarTab({ event, venue, session, onEventChange, showToast }) {
         '*, order_items ( *, products ( universe ) ), customers ( first_name, last_name, phone, tags )'
       )
       .eq('event_id', event.id)
+      // Les réglées ne sont affichées dans aucune colonne du bar : les charger
+      // était du poids mort, et c'est le gros du volume en fin de soirée.
+      .neq('status', 'PAID')
+      .or(`status.in.(AWAITING_PAYMENT,RECEIVED,IN_PREP,READY),created_at.gte.${depuis}`)
       .order('created_at', { ascending: true })
     setOrders(data || [])
     setLoading(false)
