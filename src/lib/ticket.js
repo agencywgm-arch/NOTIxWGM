@@ -1,15 +1,10 @@
 // ============================================================================
 //  NOTI Calling — ticket de commande pour imprimante thermique 80 mm
 //
-//  Deux étages volontairement séparés :
-//    · buildTicket()  décide CE QUI est imprimé — indépendant de toute
-//      imprimante, donc testable seul et réutilisable quel que soit le
-//      matériel choisi ;
-//    · encodeEscPos()  traduit ça en octets ESC/POS, le langage que parlent
-//      toutes les imprimantes de caisse.
-//
-//  Le transport (comment les octets atteignent l'imprimante) vit ailleurs :
-//  c'est la seule partie qui dépend du modèle acheté.
+//  buildTicket() décide CE QUI est imprimé — indépendant de toute imprimante,
+//  donc testable seul. La traduction vers le langage de l'imprimante (XML
+//  ePOS-Print pour une Epson en réseau) vit dans src/lib/printer.js, avec le
+//  transport : c'est la seule partie qui dépend du modèle acheté.
 // ============================================================================
 
 /** 42 caractères : la largeur d'un rouleau 80 mm en police par défaut. */
@@ -136,104 +131,3 @@ export function ticketToText(lines) {
     .join('\n')
 }
 
-// ---------------------------------------------------------------- ESC/POS
-const ESC = 0x1b
-const GS = 0x1d
-
-// Une imprimante de caisse ne connaît pas l'Unicode : elle travaille par page
-// de codes. CP858 (page 19) couvre le français ; tout ce qui en sort est
-// translittéré plutôt que rendu en caractère parasite — un prénom mal
-// accentué se lit encore, un « ▯ » non.
-const CP858 = {
-  é: 0x82, è: 0x8a, ê: 0x88, ë: 0x89, à: 0x85, â: 0x83, ä: 0x84,
-  î: 0x8c, ï: 0x8b, ô: 0x93, ö: 0x94, ù: 0x97, û: 0x96, ü: 0x81,
-  ç: 0x87, É: 0x90, È: 0xd4, Ê: 0xd2, À: 0xb7, Ç: 0x80, Î: 0xd7,
-  Ô: 0xe2, Û: 0xea, Ù: 0xeb, '€': 0xd5, '°': 0xf8, '·': 0xfa,
-}
-const TRANSLIT = {
-  '’': "'", '‘': "'", '“': '"', '”': '"', '—': '-', '–': '-', '…': '...',
-  œ: 'oe', Œ: 'OE', æ: 'ae', Æ: 'AE',
-}
-
-function encodeLine(text) {
-  const out = []
-  for (const ch of String(text)) {
-    if (TRANSLIT[ch]) {
-      for (const c of TRANSLIT[ch]) out.push(c.charCodeAt(0) & 0x7f)
-      continue
-    }
-    if (CP858[ch] !== undefined) {
-      out.push(CP858[ch])
-      continue
-    }
-    const code = ch.charCodeAt(0)
-    if (code < 0x80) {
-      out.push(code)
-      continue
-    }
-    // Dernier recours : on retire l'accent plutôt que d'imprimer un pavé.
-    const plain = ch.normalize('NFD').replace(/[̀-ͯ]/g, '')
-    out.push(plain.length === 1 && plain.charCodeAt(0) < 0x80 ? plain.charCodeAt(0) : 0x3f)
-  }
-  return out
-}
-
-/**
- * Traduit les lignes en octets ESC/POS, prêts à être poussés vers
- * l'imprimante par le transport de votre choix.
- */
-export function encodeEscPos(lines, { cut = true } = {}) {
-  const b = []
-  const push = (...bytes) => b.push(...bytes)
-  const text = (s) => push(...encodeLine(s), 0x0a)
-  const align = (n) => push(ESC, 0x61, n) // 0 gauche · 1 centre · 2 droite
-  const bold = (on) => push(ESC, 0x45, on ? 1 : 0)
-  const size = (n) => push(GS, 0x21, n) // quartet haut = largeur, bas = hauteur
-
-  push(ESC, 0x40) // initialisation
-  push(ESC, 0x74, 19) // page de codes CP858
-
-  for (const l of lines) {
-    switch (l.t) {
-      case 'sep':
-        align(0)
-        bold(false)
-        size(0)
-        text('-'.repeat(WIDTH))
-        break
-      case 'title':
-        align(1)
-        bold(true)
-        size(0x11) // double largeur et hauteur
-        text(l.v)
-        size(0)
-        bold(false)
-        break
-      case 'big':
-        align(1)
-        bold(true)
-        size(0x22) // triple : le code doit se lire à bout de bras
-        text(l.v)
-        size(0)
-        bold(false)
-        break
-      case 'center':
-        align(1)
-        text(l.v)
-        break
-      case 'bold':
-        align(0)
-        bold(true)
-        text(l.v)
-        bold(false)
-        break
-      default:
-        align(0)
-        text(l.v)
-    }
-  }
-
-  push(0x0a, 0x0a, 0x0a) // marge avant la coupe
-  if (cut) push(GS, 0x56, 0x42, 0x00) // coupe partielle
-  return Uint8Array.from(b)
-}

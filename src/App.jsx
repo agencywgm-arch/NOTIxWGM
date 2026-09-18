@@ -16,7 +16,7 @@ import { supabase, isConfigured, frError, errorKey, BASE_PATH, scanUrl, isPrevie
 import { C, S, FONT, GRADIENT, RADIUS, alpha, eur, timeFR, dateFR, phoneFR, normalizePhone, isValidPhone } from './lib/theme.js'
 import { dict, useT, trProduct, trSubcat, LANG_LABEL, LANGS } from './lib/i18n.js'
 import { phoneVerificationAvailable, sendPhoneCode, confirmPhoneCode } from './lib/firebase.js'
-import { buildTicket, ticketToText, encodeEscPos } from './lib/ticket.js'
+import { buildTicket, ticketToText } from './lib/ticket.js'
 import { sendToPrinter } from './lib/printer.js'
 import {
   canvasesToPdfBlob,
@@ -7014,7 +7014,7 @@ function BarTab({ event, venue, session, onEventChange, showToast }) {
         const { data: won, error } = await supabase.rpc('claim_ticket_print', { p_order: order.id })
         if (error || !won) continue // une autre tablette s'en charge
 
-        const res = await sendToPrinter(encodeEscPos(buildTicket({ order, event, venue })), {
+        const res = await sendToPrinter(buildTicket({ order, event, venue }), {
           url: venue.printer_url,
         })
         if (!res.ok) {
@@ -12595,7 +12595,7 @@ function PrinterCard({ venue, onReload, showToast }) {
 
   async function testPrint() {
     setBusy(true)
-    const res = await sendToPrinter(encodeEscPos(buildTicket({ order: demo, event: null, venue })), {
+    const res = await sendToPrinter(buildTicket({ order: demo, event: null, venue }), {
       url: url.trim(),
     })
     setBusy(false)

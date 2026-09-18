@@ -49,17 +49,47 @@ const xmlEscape = (s) =>
   String(s).replace(/[<>&'"]/g, (c) => ({ '<': '&lt;', '>': '&gt;', '&': '&amp;', "'": '&apos;', '"': '&quot;' })[c])
 
 /**
- * Enveloppe ePOS-Print (Epson) : du XML sur HTTP, seul dialecte d'imprimante
- * qu'une page web sait parler. Les octets ESC/POS y voyagent en base64.
+ * Traduit les lignes du ticket (src/lib/ticket.js) en XML ePOS-Print — le
+ * langage structuré que l'imprimante attend réellement derrière
+ * /cgi-bin/epos/service.cgi. Une première version envoyait des octets
+ * ESC/POS bruts encapsulés dans une balise <command> inventée pour
+ * l'occasion : l'imprimante les a refusés avec « SchemaError », relevé sur
+ * une TM-m30III réelle le soir du branchement — ePOS-Print XML ne transporte
+ * pas de flux binaire arbitraire, seulement des balises connues (<text>,
+ * <feed>, <cut>…) validées contre son propre schéma.
+ *
+ * Bénéfice au passage : le texte voyage en UTF-8 normal, directement — plus
+ * besoin de translittérer les accents pour une page de codes imprimante.
  */
-function eposEnvelope(bytes) {
-  let bin = ''
-  for (const b of bytes) bin += String.fromCharCode(b)
+function buildEposPrintXml(lines) {
+  const text = (v, attrs = '') => `<text${attrs}>${xmlEscape(v)}\n</text>`
+  const parts = lines.map((l) => {
+    switch (l.t) {
+      case 'sep':
+        return text('-'.repeat(42))
+      case 'title':
+        return text(l.v, ' align="center" width="2" height="2" em="true"')
+      case 'big':
+        // Triple largeur/hauteur : le code doit se lire à bout de bras.
+        return text(l.v, ' align="center" width="3" height="3" em="true"')
+      case 'center':
+        return text(l.v, ' align="center"')
+      case 'bold':
+        return text(l.v, ' em="true"')
+      default:
+        return text(l.v)
+    }
+  })
+  parts.push('<feed line="2"/>', '<cut type="feed"/>')
+  return parts.join('')
+}
+
+function eposEnvelope(xmlBody) {
   return (
     '<?xml version="1.0" encoding="utf-8"?>' +
     '<s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/"><s:Body>' +
     '<epos-print xmlns="http://www.epson-pos.com/schemas/2011/03/epos-print">' +
-    `<command>${xmlEscape(btoa(bin))}</command>` +
+    xmlBody +
     '</epos-print></s:Body></s:Envelope>'
   )
 }
@@ -68,9 +98,10 @@ function eposEnvelope(bytes) {
  * Pousse un ticket vers l'imprimante. Ne lève jamais tout seul : le service
  * ne doit pas s'arrêter parce qu'un rouleau de papier est vide.
  *
+ * @param {ReturnType<typeof import('./ticket.js').buildTicket>} lines
  * @returns {Promise<{ok: boolean, reason?: string}>}
  */
-export async function sendToPrinter(bytes, { url, timeoutMs = 6000 } = {}) {
+export async function sendToPrinter(lines, { url, timeoutMs = 6000 } = {}) {
   if (!url) return { ok: false, reason: 'Aucune imprimante configurée.' }
 
   const ctrl = new AbortController()
@@ -82,7 +113,7 @@ export async function sendToPrinter(bytes, { url, timeoutMs = 6000 } = {}) {
         'Content-Type': 'text/xml; charset=utf-8',
         SOAPAction: '""',
       },
-      body: eposEnvelope(bytes),
+      body: eposEnvelope(buildEposPrintXml(lines)),
       signal: ctrl.signal,
     })
     if (!res.ok) return { ok: false, reason: `L’imprimante a répondu ${res.status}.` }
