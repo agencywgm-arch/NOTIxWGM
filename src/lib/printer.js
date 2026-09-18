@@ -87,11 +87,12 @@ function buildEposPrintXml(lines) {
         // dominer le ticket, le nom du lieu n'a pas besoin de rivaliser.
         return text(l.v, ' align="center" em="true"')
       case 'big':
-        // Double largeur/hauteur (avant : triple) — retours du terrain : les
-        // tickets étaient trop grands une fois le nom du lieu déjà réduit.
-        // Reste le plus gros élément du ticket, ce qui suffit à se lire
-        // sans le brandir à bout de bras.
-        return text(l.v, ' align="center" width="2" height="2" em="true"')
+        // Double hauteur seulement (avant : double largeur ET hauteur) —
+        // doubler la largeur double aussi le nombre de colonnes que prend
+        // chaque caractère, ce qui serrait le texte contre les bords sur un
+        // rouleau étroit. Rester grand en hauteur suffit à se lire sans le
+        // brandir à bout de bras, sans jamais risquer de déborder en largeur.
+        return text(l.v, ' align="center" height="2" em="true"')
       case 'center':
         return text(l.v, ' align="center"')
       case 'bold':

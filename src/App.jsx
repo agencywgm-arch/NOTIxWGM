@@ -6930,7 +6930,13 @@ function BarTab({ event, venue, session, onEventChange, showToast }) {
     // personne n'ait cliqué « imprimer »). claim_prep_ticket_print garantit
     // un seul ticket par commande ; chaque tentative est tracée dans
     // print_log pour qu'on sache toujours QUI/QUOI a déclenché un ticket.
-    if (status === 'IN_PREP' && venue?.printer_url) {
+    //
+    // !opts.back exclut explicitement le bouton ↩ (retour de « Prête » à
+    // « En prépa ») : ce n'est pas une nouvelle décision de préparer, juste
+    // une correction de statut, ça ne doit jamais réimprimer — même si un
+    // jour la garde côté base changeait, celle-ci ne dépend d'aucune requête
+    // réseau pour être sûre.
+    if (status === 'IN_PREP' && !opts.back && venue?.printer_url) {
       const { data: won, error: claimErr } = await supabase.rpc('claim_prep_ticket_print', {
         p_order: order.id,
       })

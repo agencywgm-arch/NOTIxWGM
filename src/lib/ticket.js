@@ -136,9 +136,11 @@ export function ticketToText(lines) {
     .map((l) => {
       if (l.t === 'sep') return '-'.repeat(WIDTH)
       if (l.t === 'center' || l.t === 'title' || l.t === 'big') {
-        const v = l.t === 'big' ? l.v.split('').join(' ') : l.v
-        const left = Math.max(0, Math.floor((WIDTH - v.length) / 2))
-        return ' '.repeat(left) + v
+        // 'big' n'est plus qu'une question de hauteur (voir printer.js) —
+        // rien à simuler en largeur ici, l'aperçu texte reste un centrage
+        // ordinaire, fidèle à ce qui sort réellement.
+        const left = Math.max(0, Math.floor((WIDTH - l.v.length) / 2))
+        return ' '.repeat(left) + l.v
       }
       return l.v
     })
