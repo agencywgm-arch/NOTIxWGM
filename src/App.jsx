@@ -6508,7 +6508,7 @@ function OrderNotesSheet({ order, onClose, onSaved, showToast }) {
  *    c'est ce qui rend la ressaisie en caisse rapide (§3), et une ressaisie
  *    laborieuse est bâclée puis abandonnée.
  */
-function BarCadrans({ orders, now, onDone, onDetail }) {
+function BarCadrans({ orders, onDone, onDetail }) {
   // Premier arrivé, premier servi — l'ordre est celui de la création, et le
   // rang est affiché pour qu'il ne soit jamais ambigu.
   const list = useMemo(
@@ -6554,7 +6554,6 @@ function BarCadrans({ orders, now, onDone, onDetail }) {
       >
         {list.map((o, i) => {
           const st = ORDER_STATUS[o.status] || ORDER_STATUS.RECEIVED
-          const waiting = Math.max(0, Math.floor((now - new Date(o.created_at).getTime()) / 60000))
           const awaiting = o.status === 'AWAITING_PAYMENT'
 
           return (
@@ -6572,14 +6571,13 @@ function BarCadrans({ orders, now, onDone, onDetail }) {
                 gap: 8,
               }}
             >
-              {/* Rang + code + attente : ce qu'on lit en vision périphérique */}
+              {/* Rang + code : ce qu'on lit en vision périphérique. Le
+                  minutage par commande a été retiré à la demande du staff —
+                  seul le total en cours (ci-dessus) compte pour se repérer. */}
               <div style={{ display: 'flex', alignItems: 'baseline', gap: 8 }}>
                 <span style={{ fontSize: 12, color: C.faint, fontFamily: FONT.label }}>#{i + 1}</span>
                 <span style={{ fontFamily: FONT.label, fontWeight: 600, fontSize: codeSize, letterSpacing: 2 }}>
                   {o.pickup_code}
-                </span>
-                <span style={{ marginLeft: 'auto', fontSize: 13, color: waiting >= RELANCE_MIN ? C.terracotta : C.faint }}>
-                  {waiting} min
                 </span>
               </div>
 
@@ -7250,7 +7248,6 @@ function BarTab({ event, venue, session, onEventChange, showToast }) {
       {mode === 'cadrans' && (
         <BarCadrans
           orders={shown}
-          now={now}
           onDone={(o) => {
             acknowledge([o.id])
             move(o, o.status === 'READY' ? 'PICKED_UP' : 'READY')
