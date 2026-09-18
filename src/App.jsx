@@ -6914,11 +6914,16 @@ function BarTab({ event, venue, session, onEventChange, showToast }) {
     const { error } = await supabase.from('orders').update({ status }).eq('id', order.id)
     if (error) return showToast(frError(error), 'error')
 
-    // Second ticket, volontairement indépendant de celui de l'arrivée
-    // (0050) : au clic « En prépa », dès que quelqu'un commence
-    // effectivement à traiter la commande. Sur sa propre réservation
-    // (0052) — sinon la première impression aurait déjà bloqué celle-ci.
-    if (status === 'IN_PREP' && venue?.printer_auto && venue?.printer_url) {
+    // Second ticket, volontairement indépendant de celui de l'arrivée (0050) :
+    // au clic « En prépa », dès que quelqu'un commence effectivement à
+    // traiter la commande. Sur sa propre réservation (0052) — sinon la
+    // première impression aurait déjà bloqué celle-ci.
+    //
+    // Ne dépend PAS de l'interrupteur « impression automatique » : celui-ci
+    // gouverne uniquement le ticket silencieux à l'arrivée. Cliquer
+    // « En prépa » est un geste volontaire du staff — ça doit imprimer dès
+    // qu'une imprimante est configurée, même si l'automatique est éteint.
+    if (status === 'IN_PREP' && venue?.printer_url) {
       const { data: won, error: claimErr } = await supabase.rpc('claim_prep_ticket_print', {
         p_order: order.id,
       })
@@ -12625,9 +12630,15 @@ function PrinterCard({ venue, onReload, showToast }) {
     <div style={{ ...S.card, marginBottom: 14 }}>
       <div style={{ ...S.h2, marginBottom: 6 }}>Impression des tickets</div>
       <div style={{ fontSize: 12, color: C.dim, marginBottom: 14, lineHeight: 1.55 }}>
-        Quand c’est actif, le ticket sort tout seul dès qu’une commande arrive — avec le nom du
-        client, son téléphone, le détail et le code de retrait. Plusieurs tablettes peuvent rester
+        Un ticket sort à chaque commande dès qu'une adresse est enregistrée ci-dessous — avec le nom
+        du client, son téléphone, le détail et le code de retrait. Plusieurs tablettes peuvent rester
         allumées : une seule imprime chaque commande.
+      </div>
+      <div style={{ fontSize: 12, color: C.dim, marginBottom: 14, lineHeight: 1.55 }}>
+        Deux moments d'impression, indépendants l'un de l'autre : un ticket silencieux dès que la
+        commande <strong>arrive</strong> (à activer ci-dessous), et un second dès qu'elle passe
+        <strong> « En prépa »</strong> — celui-là imprime toujours, même si l'automatique est
+        désactivé, puisque c'est vous qui cliquez.
       </div>
 
       <div style={{ marginBottom: 14 }}>
