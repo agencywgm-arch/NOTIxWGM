@@ -60,8 +60,13 @@ const money = (n) => `${Number(n ?? 0).toFixed(2).replace('.', ',')} EUR`
  *   · le NOM du client, pour l'appeler plutôt que de brandir un code ;
  *   · l'état du règlement : une commande food non encaissée ne se prépare
  *     pas, et c'est l'erreur la plus coûteuse à faire en plein rush.
+ *
+ * `duplicate` : réimpression volontaire d'un ticket déjà sorti une fois
+ * (voir printer.js / App.jsx). Un bandeau DUPLICATA en tête, avant même le
+ * nom du lieu, pour qu'on ne prépare jamais deux fois la même commande en
+ * la confondant avec une nouvelle arrivée.
  */
-export function buildTicket({ order, event, venue }) {
+export function buildTicket({ order, event, venue, duplicate = false }) {
   const L = []
   const c = order.customers || {}
   const nom = [c.first_name, c.last_name].filter(Boolean).join(' ').trim()
@@ -72,6 +77,12 @@ export function buildTicket({ order, event, venue }) {
   // d'une commande food à sa création — elle attend d'être encaissée.
   const food =
     items.some((i) => i.products?.universe === 'food') || order.status === 'AWAITING_PAYMENT'
+
+  if (duplicate) {
+    L.push({ t: 'big', v: 'DUPLICATA' })
+    L.push({ t: 'bold', v: '*** NE PAS REFAIRE ***' })
+    L.push({ t: 'sep' })
+  }
 
   L.push({ t: 'title', v: (venue?.name || 'NOTI CALLING').toUpperCase() })
   if (event?.name) L.push({ t: 'center', v: event.name })

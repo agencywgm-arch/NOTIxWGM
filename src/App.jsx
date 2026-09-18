@@ -5727,108 +5727,6 @@ function tabsForRole(role) {
   return STAFF_TABS.filter((t) => allowed.includes(t.k))
 }
 
-/**
- * Impression silencieuse à l'arrivée — montée une fois pour toute la session
- * staff, jamais à l'intérieur d'un onglet.
- *
- * Elle vivait avant dans BarTab : elle s'arrêtait donc dès qu'on quittait
- * l'onglet Bar (le composant est démonté, son abonnement temps réel coupé),
- * et ne reprenait qu'au retour sur l'onglet — un ticket pouvait attendre
- * plusieurs minutes qu'on y repense. Montée ici, au niveau de StaffApp
- * au-dessus des onglets, elle tourne tout le temps, quel que soit l'écran
- * ouvert sur la tablette.
- *
- * Ne rend rien à l'écran : les échecs remontent par showToast (déjà visible
- * depuis n'importe quel onglet), pas par une bannière locale à une vue.
- */
-function AutoPrintDaemon({ event, venue, showToast }) {
-  const autoPrintOn = Boolean(venue?.printer_auto && venue?.printer_url)
-  const printing = useRef(false)
-  const failedOnce = useRef(false)
-
-  const run = useCallback(async () => {
-    if (!autoPrintOn || printing.current || !event?.id) return
-    const { data } = await supabase
-      .from('orders')
-      .select('*, order_items ( *, products ( universe ) ), customers ( first_name, last_name, phone, tags )')
-      .eq('event_id', event.id)
-      .is('printed_at', null)
-      .not('status', 'in', '(CANCELLED,AWAITING_PAYMENT)')
-    const queue = data || []
-    if (!queue.length) return
-
-    printing.current = true
-    try {
-      for (const order of queue) {
-        const { data: won, error } = await supabase.rpc('claim_ticket_print', { p_order: order.id })
-        if (error || !won) continue // une autre tablette s'en charge
-
-        const res = await sendToPrinter(buildTicket({ order, event, venue }), { url: venue.printer_url })
-        if (!res.ok) {
-          // Sur un échec AMBIGU (délai dépassé — l'imprimante a peut-être
-          // quand même imprimé, juste lentement) on NE relâche PAS la
-          // réservation : la relâcher redéclenchait aussitôt une nouvelle
-          // tentative via l'abonnement temps réel, qui pouvait retimeouter
-          // et relâcher à son tour — une boucle d'impression sans fin,
-          // vécue en soirée. Seul un refus net (code d'erreur, imprimante
-          // qui répond « non ») libère la commande pour une vraie reprise.
-          if (!res.ambiguous) await supabase.rpc('release_ticket_print', { p_order: order.id })
-          // Un seul avertissement tant que ça ne remarche pas : sinon chaque
-          // commande qui arrive spamme le même message.
-          if (!failedOnce.current) {
-            failedOnce.current = true
-            showToast(
-              res.ambiguous
-                ? `Imprimante : ${res.reason} Vérifiez si le ticket ${order.pickup_code} est sorti avant de réimprimer.`
-                : `Imprimante : ${res.reason}`,
-              'error'
-            )
-          }
-          break // imprimante muette : inutile d'insister sur les suivantes
-        }
-        failedOnce.current = false
-      }
-    } catch (e) {
-      // Filet identique à celui du transport : un incident imprévu ne doit
-      // jamais s'éteindre en silence pour le reste de la soirée.
-      if (!failedOnce.current) {
-        failedOnce.current = true
-        showToast(`Imprimante : ${printerError(e)}`, 'error')
-      }
-    } finally {
-      printing.current = false
-    }
-  }, [autoPrintOn, event, venue, showToast])
-
-  useEffect(() => {
-    if (!autoPrintOn || !event?.id) return
-    run()
-    // Abonnement temps réel, propre à ce démon : indépendant de celui de
-    // BarTab, qui sert l'affichage et peut être démonté/remonté au gré de la
-    // navigation. Celui-ci ne l'est jamais tant que la session staff dure.
-    const ch = supabase
-      .channel(`autoprint-${event.id}`)
-      .on(
-        'postgres_changes',
-        { event: '*', schema: 'public', table: 'orders', filter: `event_id=eq.${event.id}` },
-        () => run()
-      )
-      .subscribe((status) => {
-        if (status === 'SUBSCRIBED') run()
-      })
-    // Repli si le canal reste muet (Wi-Fi capricieux) : sans lui, une coupure
-    // silencieuse du WebSocket arrêterait l'impression sans que personne ne
-    // le remarque avant la fin de la soirée.
-    const poll = setInterval(run, 20000)
-    return () => {
-      supabase.removeChannel(ch)
-      clearInterval(poll)
-    }
-  }, [autoPrintOn, event?.id, run])
-
-  return null
-}
-
 function StaffApp({ session }) {
   const [venues, setVenues] = useState(null)
   const [venueId, setVenueId] = useState(LS.get('noti:venue', null))
@@ -5968,7 +5866,6 @@ function StaffApp({ session }) {
   return (
     <div style={{ ...S.page, paddingBottom: 96 }}>
       <Keyframes />
-      <AutoPrintDaemon event={event} venue={venue} showToast={showToast} />
 
       <div
         style={{
@@ -7025,15 +6922,14 @@ function BarTab({ event, venue, session, onEventChange, showToast }) {
     const { error } = await supabase.from('orders').update({ status }).eq('id', order.id)
     if (error) return showToast(frError(error), 'error')
 
-    // Second ticket, volontairement indépendant de celui de l'arrivée (0050) :
-    // au clic « En prépa », dès que quelqu'un commence effectivement à
-    // traiter la commande. Sur sa propre réservation (0052) — sinon la
-    // première impression aurait déjà bloqué celle-ci.
-    //
-    // Ne dépend PAS de l'interrupteur « impression automatique » : celui-ci
-    // gouverne uniquement le ticket silencieux à l'arrivée. Cliquer
-    // « En prépa » est un geste volontaire du staff — ça doit imprimer dès
-    // qu'une imprimante est configurée, même si l'automatique est éteint.
+    // Seul déclencheur d'impression qui existe désormais (0054) : le clic
+    // « En prépa », un geste volontaire toujours posé au bar. Il n'y a plus
+    // de ticket silencieux à l'arrivée — c'est lui qui produisait des
+    // tickets « fantômes » au bar quand une commande food était encaissée à
+    // la caisse (start_food_prep la faisait passer RECEIVED sans que
+    // personne n'ait cliqué « imprimer »). claim_prep_ticket_print garantit
+    // un seul ticket par commande ; chaque tentative est tracée dans
+    // print_log pour qu'on sache toujours QUI/QUOI a déclenché un ticket.
     if (status === 'IN_PREP' && venue?.printer_url) {
       const { data: won, error: claimErr } = await supabase.rpc('claim_prep_ticket_print', {
         p_order: order.id,
@@ -7042,10 +6938,16 @@ function BarTab({ event, venue, session, onEventChange, showToast }) {
         const res = await sendToPrinter(buildTicket({ order, event, venue }), {
           url: venue.printer_url,
         })
+        await supabase.rpc('log_ticket_print', {
+          p_order: order.id,
+          p_trigger: 'en_prepa',
+          p_result: res.ok ? 'ok' : res.ambiguous ? 'ambiguous' : 'fail',
+          p_reason: res.ok ? null : res.reason,
+        })
         if (!res.ok) {
-          // Même garde-fou que l'impression à l'arrivée (voir AutoPrintDaemon) :
-          // un délai dépassé ne prouve pas que l'impression a raté, donc on
-          // ne relâche pas la réservation dans ce cas.
+          // Un délai dépassé ne prouve pas que l'impression a raté (voir
+          // printer.js) : on ne relâche pas la réservation dans ce cas,
+          // sinon un simple ralentissement redéclenche un second ticket.
           if (!res.ambiguous) await supabase.rpc('release_prep_ticket_print', { p_order: order.id })
           showToast(
             res.ambiguous
@@ -7124,6 +7026,29 @@ function BarTab({ event, venue, session, onEventChange, showToast }) {
     const blob = canvasesToPdfBlob([canvas], { quality: 0.95, pageSize: { w: 226, h: 480 } })
     await shareOrDownload(blob, `ticket-${order.pickup_code}.pdf`, 'Ticket')
     await supabase.from('orders').update({ printed_at: new Date().toISOString() }).eq('id', order.id)
+  }
+
+  // Réimpression volontaire sur l'imprimante réseau, hors de la réservation
+  // automatique (claim_prep_ticket_print) : pour un ticket perdu, déchiré ou
+  // mal lu, sans passer par « En prépa » une seconde fois. Toujours marquée
+  // DUPLICATA sur le papier (ticket.js) pour qu'on ne prépare jamais deux
+  // fois la même commande en la confondant avec une nouvelle arrivée, et
+  // tracée dans print_log comme telle.
+  const [reprinting, setReprinting] = useState(null)
+  async function reprintDuplicate(order) {
+    if (!venue?.printer_url) return
+    setReprinting(order.id)
+    const res = await sendToPrinter(buildTicket({ order, event, venue, duplicate: true }), {
+      url: venue.printer_url,
+    })
+    await supabase.rpc('log_ticket_print', {
+      p_order: order.id,
+      p_trigger: 'reprint_duplicata',
+      p_result: res.ok ? 'ok' : res.ambiguous ? 'ambiguous' : 'fail',
+      p_reason: res.ok ? null : res.reason,
+    })
+    setReprinting(null)
+    showToast(res.ok ? `Duplicata de ${order.pickup_code} envoyé.` : `Imprimante : ${res.reason}`, res.ok ? 'ok' : 'error')
   }
 
   if (loading) return <Spinner />
@@ -7695,6 +7620,16 @@ function BarTab({ event, venue, session, onEventChange, showToast }) {
               <button onClick={() => printTicket(detail)} style={S.btnGhost}>
                 Imprimer le ticket
               </button>
+              {venue?.printer_url && (
+                <button
+                  disabled={reprinting === detail.id}
+                  onClick={() => reprintDuplicate(detail)}
+                  style={{ ...S.btnGhost, opacity: reprinting === detail.id ? 0.6 : 1 }}
+                  title="Renvoie le ticket sur l'imprimante du bar, marqué DUPLICATA pour ne pas préparer deux fois"
+                >
+                  {reprinting === detail.id ? '…' : '🖨 Réimprimer (marqué duplicata)'}
+                </button>
+              )}
               <button
                 onClick={async () => {
                   if (!confirm(`Annuler la commande ${detail.pickup_code} ? Le client en sera prévenu.`)) return
@@ -12642,7 +12577,6 @@ function PresentationLinksCard({ venue, showToast }) {
  */
 function PrinterCard({ venue, onReload, showToast }) {
   const [url, setUrl] = useState(venue.printer_url || '')
-  const [auto, setAuto] = useState(Boolean(venue.printer_auto))
   const [busy, setBusy] = useState(false)
   const [preview, setPreview] = useState(false)
 
@@ -12666,7 +12600,7 @@ function PrinterCard({ venue, onReload, showToast }) {
     setBusy(true)
     const { error } = await supabase
       .from('venues')
-      .update({ printer_url: url.trim() || null, printer_auto: auto })
+      .update({ printer_url: url.trim() || null })
       .eq('id', venue.id)
     setBusy(false)
     if (error) return showToast(frError(error), 'error')
@@ -12687,15 +12621,15 @@ function PrinterCard({ venue, onReload, showToast }) {
     <div style={{ ...S.card, marginBottom: 14 }}>
       <div style={{ ...S.h2, marginBottom: 6 }}>Impression des tickets</div>
       <div style={{ fontSize: 12, color: C.dim, marginBottom: 14, lineHeight: 1.55 }}>
-        Un ticket sort à chaque commande dès qu'une adresse est enregistrée ci-dessous — avec le nom
-        du client, son téléphone, le détail et le code de retrait. Plusieurs tablettes peuvent rester
-        allumées : une seule imprime chaque commande.
+        Un seul moment d'impression : dès qu'une commande passe <strong>« En prépa »</strong> au bar,
+        un ticket de préparation sort — jamais avant (une commande qui vient d'arriver, ou qui vient
+        d'être réglée à la caisse, n'imprime rien toute seule), et jamais deux fois pour la même
+        commande. Plusieurs tablettes peuvent rester allumées : une seule imprime.
       </div>
       <div style={{ fontSize: 12, color: C.dim, marginBottom: 14, lineHeight: 1.55 }}>
-        Deux moments d'impression, indépendants l'un de l'autre : un ticket silencieux dès que la
-        commande <strong>arrive</strong> (à activer ci-dessous), et un second dès qu'elle passe
-        <strong> « En prépa »</strong> — celui-là imprime toujours, même si l'automatique est
-        désactivé, puisque c'est vous qui cliquez.
+        Un ticket perdu ou mal lu se réimprime depuis la fiche de la commande (bouton « ⋯ » au bar) —
+        cette réimpression sort marquée <strong>DUPLICATA</strong> en gros, pour ne jamais préparer
+        deux fois la même commande par erreur.
       </div>
 
       <div style={{ marginBottom: 14 }}>
@@ -12719,20 +12653,6 @@ function PrinterCard({ venue, onReload, showToast }) {
           autoComplete="off"
         />
       </Field>
-
-      <button
-        onClick={() => setAuto(!auto)}
-        style={{
-          ...S.chip,
-          width: '100%',
-          minHeight: 48,
-          marginBottom: 12,
-          borderColor: auto ? C.terracotta : C.lineHi,
-          color: auto ? C.terracotta : C.dim,
-        }}
-      >
-        {auto ? '✓ Impression automatique active' : 'Impression automatique désactivée'}
-      </button>
 
       <div style={{ display: 'grid', gap: 8 }}>
         <button disabled={busy} onClick={save} style={{ ...S.btn, opacity: busy ? 0.6 : 1 }}>
@@ -12763,6 +12683,91 @@ function PrinterCard({ venue, onReload, showToast }) {
         >
           {ticketToText(buildTicket({ order: demo, event: null, venue }))}
         </pre>
+      )}
+    </div>
+  )
+}
+
+const PRINT_TRIGGER_LABEL = {
+  en_prepa: 'Clic « En prépa »',
+  reprint_duplicata: 'Réimpression manuelle (duplicata)',
+}
+const PRINT_RESULT_LABEL = { ok: 'Imprimé', fail: 'Échec', ambiguous: 'Délai dépassé — à vérifier' }
+
+/**
+ * La question posée un soir de ticket fantôme : « d'où vient CE ticket-là ? »
+ * print_log (0054) trace chaque tentative depuis qu'il n'existe plus qu'un
+ * seul déclencheur (« En prépa ») ; ce panneau la rend consultable sans SQL.
+ */
+function PrintLogPanel({ event, showToast }) {
+  const [rows, setRows] = useState(null)
+  const [loading, setLoading] = useState(false)
+
+  async function load() {
+    if (!event?.id) return
+    setLoading(true)
+    const { data, error } = await supabase
+      .from('print_log')
+      .select('*')
+      .eq('event_id', event.id)
+      .order('created_at', { ascending: false })
+      .limit(30)
+    setLoading(false)
+    if (error) return showToast?.(frError(error), 'error')
+    setRows(data || [])
+  }
+
+  useEffect(() => {
+    load()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [event?.id])
+
+  return (
+    <div style={{ ...S.card, marginBottom: 14 }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 6 }}>
+        <div style={{ ...S.h2, flex: 1 }}>Journal d'impression</div>
+        <button onClick={load} disabled={loading} style={{ ...S.btnGhost, opacity: loading ? 0.6 : 1 }}>
+          {loading ? '…' : 'Actualiser'}
+        </button>
+      </div>
+      <div style={{ fontSize: 12, color: C.dim, marginBottom: 12, lineHeight: 1.5 }}>
+        Chaque ticket envoyé, avec sa cause — pour retrouver l'origine d'un ticket inattendu sans
+        avoir à deviner.
+      </div>
+      {!rows?.length ? (
+        <div style={{ fontSize: 12.5, color: C.faint }}>
+          {rows === null ? 'Chargement…' : "Aucun ticket envoyé pour cette soirée pour l'instant."}
+        </div>
+      ) : (
+        <div style={{ display: 'grid', gap: 0 }}>
+          {rows.map((r) => (
+            <div
+              key={r.id}
+              style={{
+                display: 'flex',
+                gap: 10,
+                alignItems: 'baseline',
+                fontSize: 12.5,
+                padding: '7px 0',
+                borderBottom: `1px solid ${C.line}`,
+              }}
+            >
+              <span style={{ color: C.faint, minWidth: 40 }}>
+                {new Date(r.created_at).toLocaleTimeString('fr-FR', { hour: '2-digit', minute: '2-digit' })}
+              </span>
+              <span style={{ fontWeight: 600, minWidth: 46 }}>{r.pickup_code || '—'}</span>
+              <span style={{ flex: 1, color: C.dim }}>{PRINT_TRIGGER_LABEL[r.trigger] || r.trigger}</span>
+              <span
+                style={{
+                  fontWeight: 600,
+                  color: r.result === 'ok' ? C.ok : r.result === 'ambiguous' ? C.warn : C.danger,
+                }}
+              >
+                {PRINT_RESULT_LABEL[r.result] || r.result}
+              </span>
+            </div>
+          ))}
+        </div>
       )}
     </div>
   )
@@ -13022,6 +13027,7 @@ function ReglagesTab({ venue, event, session, role, onReload, showToast }) {
       </div>
 
       <PrinterCard venue={venue} onReload={onReload} showToast={showToast} />
+      <PrintLogPanel event={event} showToast={showToast} />
 
       {role === 'owner' && <TeamCard venue={venue} session={session} showToast={showToast} />}
       {(role === 'owner' || role === 'manager') && (
