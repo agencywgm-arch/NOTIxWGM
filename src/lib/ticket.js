@@ -52,7 +52,6 @@ const money = (n) => `${Number(n ?? 0).toFixed(2).replace('.', ',')} EUR`
  *   · le code de retrait, en très gros — c'est lui qu'on crie ;
  *   · l'heure de la commande, pour servir dans l'ordre d'arrivée ;
  *   · le NOM du client, pour l'appeler plutôt que de brandir un code ;
- *   · son téléphone, pour le joindre s'il ne vient pas ;
  *   · l'état du règlement : une commande food non encaissée ne se prépare
  *     pas, et c'est l'erreur la plus coûteuse à faire en plein rush.
  */
@@ -78,7 +77,6 @@ export function buildTicket({ order, event, venue }) {
 
   L.push({ t: 'line', v: pad(hhmm(order.created_at), food ? 'FOOD' : 'BOISSONS') })
   if (nom) L.push({ t: 'bold', v: nom })
-  if (c.phone) L.push({ t: 'line', v: c.phone })
   if ((c.tags || []).includes('vip')) L.push({ t: 'bold', v: '*** CLIENT VIP ***' })
   L.push({ t: 'sep' })
 

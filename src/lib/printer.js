@@ -68,7 +68,9 @@ function buildEposPrintXml(lines) {
       case 'sep':
         return text('-'.repeat(42))
       case 'title':
-        return text(l.v, ' align="center" width="2" height="2" em="true"')
+        // Taille normale : seul le code de retrait (ci-dessous) doit
+        // dominer le ticket, le nom du lieu n'a pas besoin de rivaliser.
+        return text(l.v, ' align="center" em="true"')
       case 'big':
         // Triple largeur/hauteur : le code doit se lire à bout de bras.
         return text(l.v, ' align="center" width="3" height="3" em="true"')

@@ -663,13 +663,13 @@ function Field({ label, children, hint }) {
  * d'enregistrer d'abord — vérifier un numéro non sauvegardé n'aurait pas de
  * sens, et confirmerait un numéro que la fiche client ne porte pas encore.
  */
-function PhoneVerifyBlock({ lang, customer, phone, showToast, onVerified }) {
+function PhoneVerifyBlock({ lang, customer, phone, showToast, onVerified, enabled = true }) {
   const t = useT(lang)
   const [step, setStep] = useState('idle') // idle | sending | sent | confirming
   const [code, setCode] = useState('')
   const confirmationRef = useRef(null)
 
-  if (!phoneVerificationAvailable || !customer?.phone) return null
+  if (!phoneVerificationAvailable || !enabled || !customer?.phone) return null
 
   const saved = customer.phone
   const unsaved = normalizePhone(phone) !== normalizePhone(saved)
@@ -1669,8 +1669,15 @@ function ClientApp({ scanPointId, session }) {
   // ce laissez-passer, sinon l'écran se remonterait en boucle derrière lui.
   const phoneVerified =
     customer?.phone_verified_at && customer.phone_verified_number === customer.phone
+  // `phone_verify_required` (0053) : interrupteur par soirée, réglable depuis
+  // Réglages sans redéploiement — la vérification peut être mise en pause un
+  // soir donné sans toucher aux variables Firebase.
   const mustVerifyPhone =
-    phoneVerificationAvailable && Boolean(customer) && !phoneVerified && !verifyBypassed
+    phoneVerificationAvailable &&
+    event?.phone_verify_required !== false &&
+    Boolean(customer) &&
+    !phoneVerified &&
+    !verifyBypassed
 
   if (step === 'welcome') {
     // Appareil déjà identifié : l'effet d'aiguillage nous emmène directement
@@ -3313,6 +3320,7 @@ function OrderingApp({
         }}
         onReloadCustomer={onReloadCustomer}
         showToast={showToast}
+        phoneVerifyRequired={event?.phone_verify_required !== false}
       />
 
       <ReviewSheet
@@ -4186,6 +4194,7 @@ function ClientProfileSheet({
   credits = 0,
   orders = [],
   onLogout,
+  phoneVerifyRequired = true,
 }) {
   const t = useT(lang)
   const [phone, setPhone] = useState('')
@@ -4349,6 +4358,7 @@ function ClientProfileSheet({
         lang={lang}
         customer={customer}
         phone={phone}
+        enabled={phoneVerifyRequired}
         showToast={showToast}
         onVerified={onReloadCustomer}
       />
@@ -12755,6 +12765,7 @@ function ReglagesTab({ venue, event, session, role, onReload, showToast }) {
           presence_order_window_min: Math.max(1, Number(e.presence_order_window_min) || 60),
           presence_scan_window_min: Math.max(1, Number(e.presence_scan_window_min) || 30),
           accept_orders: !!e.accept_orders,
+          phone_verify_required: !!e.phone_verify_required,
           service_message: e.service_message || null,
           welcome_message: e.welcome_message || null,
           languages: e.languages?.length ? e.languages : ['fr'],
@@ -12811,6 +12822,44 @@ function ReglagesTab({ venue, event, session, role, onReload, showToast }) {
           </button>
         </div>
       </div>
+
+      {phoneVerificationAvailable && (
+        <div style={{ ...S.card, marginBottom: 14 }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+            <div style={{ fontSize: 24 }}>{e.phone_verify_required ? '🔒' : '⏸️'}</div>
+            <div style={{ flex: 1 }}>
+              <div style={{ fontWeight: 500 }}>
+                {e.phone_verify_required
+                  ? 'Vérification du numéro active'
+                  : 'Vérification du numéro en pause'}
+              </div>
+              <div style={{ fontSize: 12, color: C.dim, marginTop: 2 }}>
+                {e.phone_verify_required
+                  ? 'Numéro vérifié par SMS avant de commander.'
+                  : 'Personne ne reçoit de SMS ce soir — remise en route en un clic.'}
+              </div>
+            </div>
+            <button
+              onClick={() => setE({ ...e, phone_verify_required: !e.phone_verify_required })}
+              style={{
+                minHeight: 44,
+                padding: '0 16px',
+                borderRadius: 12,
+                border: 'none',
+                cursor: 'pointer',
+                fontFamily: FONT.label,
+                fontWeight: 600,
+                letterSpacing: 0.8,
+                fontSize: 12,
+                background: e.phone_verify_required ? C.danger : C.ok,
+                color: '#fff',
+              }}
+            >
+              {e.phone_verify_required ? 'METTRE EN PAUSE' : 'RÉACTIVER'}
+            </button>
+          </div>
+        </div>
+      )}
 
       <div style={{ ...S.card, marginBottom: 14 }}>
         <div style={{ ...S.h2, marginBottom: 14 }}>Soirée</div>
