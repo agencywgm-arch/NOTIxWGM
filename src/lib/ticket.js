@@ -7,21 +7,15 @@
 //  transport : c'est la seule partie qui dépend du modèle acheté.
 // ============================================================================
 
-// 30 caractères utiles, sur un rouleau 58 mm. Vérifié sur un ticket réel :
-// le texte aligné à gauche perdait systématiquement ses 2 premiers
-// caractères (« 18:54 » imprimait « 54 », « TOTAL » imprimait « TAL ») —
-// la marge gauche de l'imprimante ne démarre pas exactement là où
-// commence le papier. Les 2 caractères de marge sont ajoutés dans
-// printer.js, invisibles, pour rattraper ce décalage ; WIDTH ne compte que
-// ce qui doit rester lisible derrière.
-export const WIDTH = 30
-
-const pad = (left, right, w = WIDTH) => {
-  const l = String(left ?? '')
-  const r = String(right ?? '')
-  const gap = Math.max(1, w - l.length - r.length)
-  return l + ' '.repeat(gap) + r
-}
+// 26 caractères utiles, sur un rouleau 58 mm. Deux essais réels avant
+// celui-ci ont encore coupé du texte à 42 puis à 30 — la marge de sécurité
+// est volontairement large plutôt que de retenter un chiffre précis :
+// mieux vaut un ticket un peu plus étroit qu'un caractère perdu dans un
+// prix. Les lignes qui approchaient la largeur totale (prix alignés à
+// droite sur la même ligne que l'article) ont aussi été retirées plus bas
+// — chaque prix est maintenant sur sa propre ligne, courte, jamais près du
+// bord quelle que soit la largeur réelle de l'imprimante.
+export const WIDTH = 26
 
 const wrap = (text, w = WIDTH, indent = '') => {
   const out = []
@@ -92,13 +86,18 @@ export function buildTicket({ order, event, venue, duplicate = false }) {
   L.push({ t: 'big', v: order.pickup_code || '----' })
   L.push({ t: 'sep' })
 
-  L.push({ t: 'line', v: pad(hhmm(order.created_at), food ? 'FOOD' : 'BOISSONS') })
+  L.push({ t: 'line', v: `${hhmm(order.created_at)} - ${food ? 'FOOD' : 'BOISSONS'}` })
   if (nom) L.push({ t: 'bold', v: nom })
   if ((c.tags || []).includes('vip')) L.push({ t: 'bold', v: '*** CLIENT VIP ***' })
   L.push({ t: 'sep' })
 
+  // Prix sur sa propre ligne, jamais aligné à droite sur la même ligne que
+  // l'article : c'est cette ligne pleine largeur qui perdait un chiffre du
+  // prix (« 24,00 EUR » imprimé « 4,00 EUR ») sur un ticket réel — une
+  // ligne courte ne peut pas déborder, quelle que soit la largeur exacte.
   for (const it of items) {
-    L.push({ t: 'bold', v: pad(`${it.quantity}x ${it.name_snapshot}`, money(Number(it.unit_price) * Number(it.quantity))) })
+    L.push({ t: 'bold', v: `${it.quantity}x ${it.name_snapshot}` })
+    L.push({ t: 'line', v: '   ' + money(Number(it.unit_price) * Number(it.quantity)) })
     const extra = [it.variant_label, ...(it.detail?.options || []).map((o) => o.name)]
       .filter(Boolean)
       .join(' + ')
@@ -112,10 +111,10 @@ export function buildTicket({ order, event, venue, duplicate = false }) {
 
   L.push({ t: 'sep' })
   if (Number(order.discount) > 0) {
-    L.push({ t: 'line', v: pad('Sous-total', money(order.subtotal)) })
-    L.push({ t: 'line', v: pad('Remise', '-' + money(order.discount)) })
+    L.push({ t: 'line', v: `Sous-total : ${money(order.subtotal)}` })
+    L.push({ t: 'line', v: `Remise : -${money(order.discount)}` })
   }
-  L.push({ t: 'bold', v: pad('TOTAL', money(order.total)) })
+  L.push({ t: 'bold', v: `TOTAL : ${money(order.total)}` })
 
   L.push({ t: 'sep' })
   L.push({
