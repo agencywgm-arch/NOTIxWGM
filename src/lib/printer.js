@@ -34,6 +34,8 @@
 //  ceci : changer de transport ne change pas une ligne de ce qui s'imprime.
 // ============================================================================
 
+import { WIDTH } from './ticket.js'
+
 /** Message court et parlant, à afficher au staff. Jamais une trace technique. */
 export function printerError(e) {
   const m = String(e?.message || e || '').toLowerCase()
@@ -66,7 +68,10 @@ function buildEposPrintXml(lines) {
   const parts = lines.map((l) => {
     switch (l.t) {
       case 'sep':
-        return text('-'.repeat(42))
+        // Largeur reprise de ticket.js, jamais recopiée en dur ici — c'est
+        // le fait d'avoir deux « 42 » séparés qui a cassé l'alignement au
+        // passage à un rouleau 58 mm plus étroit.
+        return text('-'.repeat(WIDTH))
       case 'title':
         // Taille normale : seul le code de retrait (ci-dessous) doit
         // dominer le ticket, le nom du lieu n'a pas besoin de rivaliser.

@@ -1,5 +1,5 @@
 // ============================================================================
-//  NOTI Calling — ticket de commande pour imprimante thermique 80 mm
+//  NOTI Calling — ticket de commande pour imprimante thermique
 //
 //  buildTicket() décide CE QUI est imprimé — indépendant de toute imprimante,
 //  donc testable seul. La traduction vers le langage de l'imprimante (XML
@@ -7,8 +7,12 @@
 //  transport : c'est la seule partie qui dépend du modèle acheté.
 // ============================================================================
 
-/** 42 caractères : la largeur d'un rouleau 80 mm en police par défaut. */
-export const WIDTH = 42
+// 32 caractères : largeur d'un rouleau 58 mm en police par défaut (Font A) —
+// passé de 42 (80 mm) au changement de rouleau. Cette largeur ne suffit pas
+// à elle seule : l'imprimante doit aussi savoir qu'elle a du 58 mm en face
+// (réglage papier dans son propre Web Config), sinon elle continue de
+// calculer sur 80 mm quoi qu'on lui envoie.
+export const WIDTH = 32
 
 const pad = (left, right, w = WIDTH) => {
   const l = String(left ?? '')
