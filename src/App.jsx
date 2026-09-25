@@ -5790,13 +5790,31 @@ const PRINT_BATCH_THRESHOLD = 3
  * Le reste du temps, invisible — les échecs isolés remontent par showToast.
  */
 function AutoPrintDaemon({ event, venue, showToast }) {
-  const printing = useRef(false)
+  // Verrou couvrant TOUT le cycle — de la décision jusqu'à la toute fin —
+  // pas seulement l'impression elle-même. Une première version ne le posait
+  // qu'à l'intérieur de la boucle d'impression : pendant qu'une rafale
+  // attendait une confirmation du staff, ce verrou était retombé à `false`,
+  // et la moindre commande supplémentaire (temps réel, ou le sondage de
+  // repli) relançait `run()` en parallèle — qui pouvait remplacer la boîte
+  // de confirmation en plein choix du staff, ou lancer un second passage
+  // concurrent. La réservation en base (claim_ticket_print) empêchait déjà
+  // un doublon d'impression, mais ce n'est pas une raison pour laisser
+  // deux cycles se marcher dessus côté écran. Posé dès l'entrée dans run(),
+  // relâché uniquement quand il n'y a plus rien en attente de décision.
+  const busy = useRef(false)
   const failedOnce = useRef(false)
+  // Verrou séparé, propre à printBatch : un double-clic sur « Tout imprimer »
+  // (deux clics avant que React ait eu le temps de démonter le bouton) peut
+  // appeler cette fonction deux fois avec la même liste en fermeture. La
+  // réservation en base empêcherait déjà un doublon de ticket, mais autant
+  // ne pas laisser deux boucles tourner en parallèle pour rien.
+  const printingNow = useRef(false)
   const [ui, setUi] = useState(null) // { mode: 'confirm', queue } | { mode: 'printing', code, done, total }
 
   const printBatch = useCallback(
     async (orders) => {
-      printing.current = true
+      if (printingNow.current) return
+      printingNow.current = true
       try {
         for (let i = 0; i < orders.length; i++) {
           const order = orders[i]
@@ -5814,7 +5832,7 @@ function AutoPrintDaemon({ event, venue, showToast }) {
           showToast(`Imprimante : ${printerError(e)}`, 'error')
         }
       } finally {
-        printing.current = false
+        printingNow.current = false
         setUi(null)
       }
     },
@@ -5822,19 +5840,60 @@ function AutoPrintDaemon({ event, venue, showToast }) {
   )
 
   const run = useCallback(async () => {
-    if (!venue?.printer_auto || !venue?.printer_url || printing.current || !event?.id) return
-    const { data } = await supabase
-      .from('orders')
-      .select('*, order_items ( *, products ( universe ) ), customers ( first_name, last_name, phone, tags )')
-      .eq('event_id', event.id)
-      .is('printed_at', null)
-      .not('status', 'in', '(CANCELLED,AWAITING_PAYMENT)')
-      .order('created_at', { ascending: true })
-    const queue = data || []
-    if (!queue.length) return
-    if (queue.length <= PRINT_BATCH_THRESHOLD) await printBatch(queue)
-    else setUi({ mode: 'confirm', queue })
+    if (!venue?.printer_auto || !venue?.printer_url || busy.current || !event?.id) return
+    busy.current = true
+    try {
+      const { data } = await supabase
+        .from('orders')
+        .select('*, order_items ( *, products ( universe ) ), customers ( first_name, last_name, phone, tags )')
+        .eq('event_id', event.id)
+        .is('printed_at', null)
+        .not('status', 'in', '(CANCELLED,AWAITING_PAYMENT)')
+        .order('created_at', { ascending: true })
+      const queue = data || []
+      if (!queue.length) {
+        busy.current = false
+        return
+      }
+      if (queue.length <= PRINT_BATCH_THRESHOLD) {
+        await printBatch(queue)
+        busy.current = false
+      } else {
+        // On laisse `busy` posé : la confirmation est encore en attente,
+        // aucun autre passage ne doit démarrer avant que le staff choisisse.
+        setUi({ mode: 'confirm', queue })
+      }
+    } catch (e) {
+      busy.current = false
+      if (!failedOnce.current) {
+        failedOnce.current = true
+        showToast(`Imprimante : ${printerError(e)}`, 'error')
+      }
+    }
   }, [event, venue, printBatch])
+
+  async function confirmNext() {
+    if (ui?.mode !== 'confirm') return
+    await printBatch(ui.queue.slice(0, PRINT_BATCH_THRESHOLD))
+    busy.current = false
+    run() // ré-évalue : imprime le reste tout seul s'il tient sous le seuil, redemande sinon
+  }
+  async function confirmAll() {
+    if (ui?.mode !== 'confirm') return
+    await printBatch(ui.queue)
+    busy.current = false
+  }
+
+  // Repasser en mode Manuel (ou retirer l'adresse imprimante) pendant qu'une
+  // rafale attendait une confirmation laisserait sinon cette boîte affichée
+  // à l'écran pour rien — rien ne la referme, puisque run() ne serait plus
+  // jamais rappelé pour la résoudre.
+  useEffect(() => {
+    if (!venue?.printer_auto || !venue?.printer_url) {
+      busy.current = false
+      setUi(null)
+    }
+  }, [venue?.printer_auto, venue?.printer_url])
 
   useEffect(() => {
     if (!venue?.printer_auto || !venue?.printer_url || !event?.id) return
@@ -5897,13 +5956,10 @@ function AutoPrintDaemon({ event, venue, showToast }) {
         🖨 {ui.queue.length} tickets en attente d'impression — trop pour sortir d'un coup.
       </div>
       <div style={{ display: 'flex', gap: 8 }}>
-        <button
-          onClick={() => printBatch(ui.queue.slice(0, PRINT_BATCH_THRESHOLD)).then(run)}
-          style={{ ...S.btnGhost, flex: 1, minHeight: 44 }}
-        >
+        <button onClick={confirmNext} style={{ ...S.btnGhost, flex: 1, minHeight: 44 }}>
           Imprimer les {Math.min(PRINT_BATCH_THRESHOLD, ui.queue.length)} suivants
         </button>
-        <button onClick={() => printBatch(ui.queue)} style={{ ...S.btn, flex: 1, minHeight: 44 }}>
+        <button onClick={confirmAll} style={{ ...S.btn, flex: 1, minHeight: 44 }}>
           Tout imprimer
         </button>
       </div>
