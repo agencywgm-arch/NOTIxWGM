@@ -2767,15 +2767,11 @@ function OrderingApp({
       }
     }
 
-    // Notification de statut « commande reçue » (best-effort).
-    notify({
-      eventId: event?.id,
-      kind: 'status',
-      customerId: customer?.id,
-      orderId: data?.id,
-      title: t.notifReceivedTitle,
-      body: t.notifReceivedBody(data?.pickup_code),
-    })
+    // Pas de notification à l'arrivée de la commande : décision du 25/09 — la
+    // seule notif envoyée au client est celle du passage en « Prête » (voir
+    // move(), plus bas), pour ne pas multiplier les alertes sur son
+    // téléphone. Le client voit sa commande apparaître dans « Mes commandes »
+    // (loadOrders juste au-dessus), ce qui suffit à confirmer l'envoi.
     return data
   }
 
@@ -5728,13 +5724,58 @@ function tabsForRole(role) {
 }
 
 /**
+ * Réservation + envoi + journal d'un ticket « arrivée », partagés entre
+ * l'impression automatique (AutoPrintDaemon) et le bouton « Imprimer »
+ * manuel (BarTab) : les deux se disputent la MÊME réservation
+ * (claim_ticket_print / printed_at), donc un ticket déjà sorti par l'un ne
+ * ressort jamais via l'autre — que la soirée soit en mode auto ou manuel.
+ *
+ * `ambiguous` (délai dépassé côté imprimante) ne relâche jamais la
+ * réservation : la relâcher redéclenchait aussitôt une nouvelle tentative
+ * via le temps réel, qui pouvait retimeouter et relâcher à son tour — une
+ * boucle d'impression sans fin, vécue en soirée (voir printer.js).
+ *
+ * @returns {Promise<'ok'|'failed'|'skipped'>}
+ */
+async function printArrivalTicket({ order, event, venue, trigger, showToast }) {
+  const { data: won, error: claimErr } = await supabase.rpc('claim_ticket_print', { p_order: order.id })
+  if (claimErr || !won) return 'skipped' // déjà imprimé, ou une autre tablette s'en charge
+
+  const res = await sendToPrinter(buildTicket({ order, event, venue }), { url: venue.printer_url })
+  await supabase.rpc('log_ticket_print', {
+    p_order: order.id,
+    p_trigger: trigger,
+    p_result: res.ok ? 'ok' : res.ambiguous ? 'ambiguous' : 'fail',
+    p_reason: res.ok ? null : res.reason,
+  })
+  if (!res.ok) {
+    if (!res.ambiguous) await supabase.rpc('release_ticket_print', { p_order: order.id })
+    showToast?.(
+      res.ambiguous
+        ? `Imprimante : ${res.reason} Vérifiez si le ticket ${order.pickup_code} est sorti avant de réimprimer.`
+        : `Imprimante : ${res.reason}`,
+      'error'
+    )
+    return 'failed'
+  }
+  return 'ok'
+}
+
+// Au-delà de ce nombre de tickets en attente à la fois, le démon s'arrête et
+// demande confirmation plutôt que de tout sortir d'un coup — c'est la
+// « sortie massive » vécue en soirée (une rafale de commandes = une rafale
+// de papier que personne ne peut suivre). En dessous du seuil, rien ne
+// change : impression automatique normale.
+const PRINT_BATCH_THRESHOLD = 3
+
+/**
  * Impression silencieuse dès qu'une commande arrive — montée une fois pour
  * toute la session staff, jamais à l'intérieur d'un onglet, pour qu'elle
  * continue de tourner quel que soit l'écran ouvert sur la tablette (Bar,
- * Caisse, Réglages…). C'est le chemin voulu : le client envoie sa commande,
- * le ticket sort tout seul, sans qu'un membre du staff ait à cliquer quoi
- * que ce soit. La seule autre façon qu'un ticket sorte est le bouton
- * « Réimprimer » sur la fiche d'une commande — toujours marqué DUPLICATA.
+ * Caisse, Réglages…). C'est le chemin voulu par défaut (mode « automatique »,
+ * réglage dans Réglages → Imprimante) : le client envoie sa commande, le
+ * ticket sort tout seul. En mode « manuel », ce démon ne fait rien — c'est
+ * le bouton « Imprimer » de chaque commande (BarTab) qui prend le relais.
  *
  * Limite connue, assumée : ceci tourne dans l'onglet du navigateur — la
  * tablette doit rester allumée avec l'app ouverte (elle n'a pas besoin
@@ -5744,75 +5785,59 @@ function tabsForRole(role) {
  * Direct Print », voir printer.js) — un service cloud à activer côté Epson,
  * pas quelque chose qu'on peut ajouter seulement côté code.
  *
- * Ne rend rien à l'écran : les échecs remontent par showToast (déjà visible
- * depuis n'importe quel onglet), pas par une bannière locale à une vue.
+ * Rend une petite boîte flottante dans deux cas seulement : une rafale à
+ * confirmer, ou une impression en cours (pour suivre la sortie papier).
+ * Le reste du temps, invisible — les échecs isolés remontent par showToast.
  */
 function AutoPrintDaemon({ event, venue, showToast }) {
   const printing = useRef(false)
   const failedOnce = useRef(false)
+  const [ui, setUi] = useState(null) // { mode: 'confirm', queue } | { mode: 'printing', code, done, total }
+
+  const printBatch = useCallback(
+    async (orders) => {
+      printing.current = true
+      try {
+        for (let i = 0; i < orders.length; i++) {
+          const order = orders[i]
+          setUi({ mode: 'printing', code: order.pickup_code, done: i, total: orders.length })
+          const outcome = await printArrivalTicket({ order, event, venue, trigger: 'arrival_auto', showToast })
+          if (outcome === 'failed') {
+            failedOnce.current = true
+            break // imprimante muette : inutile d'insister sur les suivantes
+          }
+          if (outcome === 'ok') failedOnce.current = false
+        }
+      } catch (e) {
+        if (!failedOnce.current) {
+          failedOnce.current = true
+          showToast(`Imprimante : ${printerError(e)}`, 'error')
+        }
+      } finally {
+        printing.current = false
+        setUi(null)
+      }
+    },
+    [event, venue, showToast]
+  )
 
   const run = useCallback(async () => {
-    if (!venue?.printer_url || printing.current || !event?.id) return
+    if (!venue?.printer_auto || !venue?.printer_url || printing.current || !event?.id) return
     const { data } = await supabase
       .from('orders')
       .select('*, order_items ( *, products ( universe ) ), customers ( first_name, last_name, phone, tags )')
       .eq('event_id', event.id)
       .is('printed_at', null)
       .not('status', 'in', '(CANCELLED,AWAITING_PAYMENT)')
+      .order('created_at', { ascending: true })
     const queue = data || []
     if (!queue.length) return
-
-    printing.current = true
-    try {
-      for (const order of queue) {
-        const { data: won, error } = await supabase.rpc('claim_ticket_print', { p_order: order.id })
-        if (error || !won) continue // une autre tablette s'en charge
-
-        const res = await sendToPrinter(buildTicket({ order, event, venue }), { url: venue.printer_url })
-        await supabase.rpc('log_ticket_print', {
-          p_order: order.id,
-          p_trigger: 'arrival_auto',
-          p_result: res.ok ? 'ok' : res.ambiguous ? 'ambiguous' : 'fail',
-          p_reason: res.ok ? null : res.reason,
-        })
-        if (!res.ok) {
-          // Sur un échec AMBIGU (délai dépassé — l'imprimante a peut-être
-          // quand même imprimé, juste lentement) on NE relâche PAS la
-          // réservation : la relâcher redéclenchait aussitôt une nouvelle
-          // tentative via l'abonnement temps réel, qui pouvait retimeouter
-          // et relâcher à son tour — une boucle d'impression sans fin,
-          // vécue en soirée. Seul un refus net (code d'erreur, imprimante
-          // qui répond « non ») libère la commande pour une vraie reprise.
-          if (!res.ambiguous) await supabase.rpc('release_ticket_print', { p_order: order.id })
-          // Un seul avertissement tant que ça ne remarche pas : sinon chaque
-          // commande qui arrive spamme le même message.
-          if (!failedOnce.current) {
-            failedOnce.current = true
-            showToast(
-              res.ambiguous
-                ? `Imprimante : ${res.reason} Vérifiez si le ticket ${order.pickup_code} est sorti avant de réimprimer.`
-                : `Imprimante : ${res.reason}`,
-              'error'
-            )
-          }
-          break // imprimante muette : inutile d'insister sur les suivantes
-        }
-        failedOnce.current = false
-      }
-    } catch (e) {
-      // Filet identique à celui du transport : un incident imprévu ne doit
-      // jamais s'éteindre en silence pour le reste de la soirée.
-      if (!failedOnce.current) {
-        failedOnce.current = true
-        showToast(`Imprimante : ${printerError(e)}`, 'error')
-      }
-    } finally {
-      printing.current = false
-    }
-  }, [event, venue, showToast])
+    if (queue.length <= PRINT_BATCH_THRESHOLD) await printBatch(queue)
+    else setUi({ mode: 'confirm', queue })
+  }, [event, venue, printBatch])
 
   useEffect(() => {
-    if (!venue?.printer_url || !event?.id) return
+    if (!venue?.printer_auto || !venue?.printer_url || !event?.id) return
     run()
     // Abonnement temps réel, propre à ce démon : indépendant de celui de
     // BarTab, qui sert l'affichage et peut être démonté/remonté au gré de la
@@ -5835,9 +5860,55 @@ function AutoPrintDaemon({ event, venue, showToast }) {
       supabase.removeChannel(ch)
       clearInterval(poll)
     }
-  }, [venue?.printer_url, event?.id, run])
+  }, [venue?.printer_auto, venue?.printer_url, event?.id, run])
 
-  return null
+  if (!ui) return null
+
+  const box = {
+    position: 'fixed',
+    left: 16,
+    right: 16,
+    maxWidth: 420,
+    margin: '0 auto',
+    bottom: 'calc(env(safe-area-inset-bottom) + 150px)',
+    zIndex: 8000,
+    background: C.paper,
+    border: `1.5px solid ${C.terracotta}`,
+    color: C.text,
+    borderRadius: 14,
+    padding: '14px 16px',
+    fontSize: 13.5,
+    fontWeight: 500,
+    boxShadow: '0 12px 36px rgba(28,42,74,.16)',
+  }
+
+  if (ui.mode === 'printing') {
+    return (
+      <div style={box} className="no-print">
+        🖨 Impression en cours… {ui.code} ({ui.done + 1}/{ui.total})
+      </div>
+    )
+  }
+
+  // mode === 'confirm' : rafale au-delà du seuil, on laisse la main au staff.
+  return (
+    <div style={box} className="no-print">
+      <div style={{ marginBottom: 10 }}>
+        🖨 {ui.queue.length} tickets en attente d'impression — trop pour sortir d'un coup.
+      </div>
+      <div style={{ display: 'flex', gap: 8 }}>
+        <button
+          onClick={() => printBatch(ui.queue.slice(0, PRINT_BATCH_THRESHOLD)).then(run)}
+          style={{ ...S.btnGhost, flex: 1, minHeight: 44 }}
+        >
+          Imprimer les {Math.min(PRINT_BATCH_THRESHOLD, ui.queue.length)} suivants
+        </button>
+        <button onClick={() => printBatch(ui.queue)} style={{ ...S.btn, flex: 1, minHeight: 44 }}>
+          Tout imprimer
+        </button>
+      </div>
+    </div>
+  )
 }
 
 function StaffApp({ session }) {
@@ -7080,6 +7151,16 @@ function BarTab({ event, venue, session, onEventChange, showToast }) {
     load()
   }
 
+  // Bouton « Imprimer » de la colonne Reçues : un seul geste qui fait les
+  // deux choses à la fois — le ticket part (même réservation que
+  // AutoPrintDaemon, donc pas de doublon si l'automatique l'a déjà imprimé)
+  // et la commande passe en préparation. Non bloquant : la commande avance
+  // tout de suite, le ticket suit en tâche de fond (voir plus haut pourquoi).
+  function printAndPrep(order) {
+    if (venue?.printer_url) printArrivalTicket({ order, event, venue, trigger: 'manual_print', showToast })
+    move(order, 'IN_PREP')
+  }
+
   // Relance de retrait : message urgent adressé au client, horodaté côté base
   // (voir nudge_pickup dans 0022).
   const [nudging, setNudging] = useState(null)
@@ -7434,7 +7515,13 @@ function BarTab({ event, venue, session, onEventChange, showToast }) {
                     <button
                       onClick={() => {
                         acknowledge([o.id])
-                        move(o, col.next)
+                        // Colonne Reçues : un seul bouton qui imprime ET passe en
+                        // prépa (voir printAndPrep) — c'est le geste qu'on fait
+                        // presque toujours. Passer en prépa SANS ticket (client
+                        // déjà au bar) reste possible via le bouton secondaire
+                        // ci-dessous, à la place du ↩ qui n'existe pas ici.
+                        if (col.next === 'IN_PREP') printAndPrep(o)
+                        else move(o, col.next)
                       }}
                       style={{
                         flex: 1,
@@ -7455,9 +7542,9 @@ function BarTab({ event, venue, session, onEventChange, showToast }) {
                         color: '#fff',
                       }}
                     >
-                      {col.action}
+                      {col.next === 'IN_PREP' ? 'Imprimer' : col.action}
                     </button>
-                    {col.prev && (
+                    {col.prev ? (
                       <button
                         onClick={() => move(o, col.prev, { back: true })}
                         title={`Revenir à « ${statusLabel(col.prev, 'fr')} »`}
@@ -7475,7 +7562,28 @@ function BarTab({ event, venue, session, onEventChange, showToast }) {
                       >
                         ↩
                       </button>
-                    )}
+                    ) : col.next === 'IN_PREP' ? (
+                      <button
+                        onClick={() => {
+                          acknowledge([o.id])
+                          move(o, 'IN_PREP')
+                        }}
+                        title="En préparation sans imprimer de ticket — le client est déjà au bar"
+                        style={{
+                          width: 48,
+                          minHeight: 48,
+                          borderRadius: 13,
+                          border: `1.5px solid ${C.lineHi}`,
+                          background: C.paper,
+                          color: C.dim,
+                          cursor: 'pointer',
+                          fontSize: 16,
+                          lineHeight: 1,
+                        }}
+                      >
+                        📋
+                      </button>
+                    ) : null}
                     <button
                       onClick={() => setNotesFor(o)}
                       title="Commenter / signaler cette commande"
@@ -12654,6 +12762,7 @@ function PresentationLinksCard({ venue, showToast }) {
  */
 function PrinterCard({ venue, onReload, showToast }) {
   const [url, setUrl] = useState(venue.printer_url || '')
+  const [auto, setAuto] = useState(Boolean(venue.printer_auto))
   const [busy, setBusy] = useState(false)
   const [preview, setPreview] = useState(false)
 
@@ -12677,7 +12786,7 @@ function PrinterCard({ venue, onReload, showToast }) {
     setBusy(true)
     const { error } = await supabase
       .from('venues')
-      .update({ printer_url: url.trim() || null })
+      .update({ printer_url: url.trim() || null, printer_auto: auto })
       .eq('id', venue.id)
     setBusy(false)
     if (error) return showToast(frError(error), 'error')
@@ -12698,17 +12807,20 @@ function PrinterCard({ venue, onReload, showToast }) {
     <div style={{ ...S.card, marginBottom: 14 }}>
       <div style={{ ...S.h2, marginBottom: 6 }}>Impression des tickets</div>
       <div style={{ fontSize: 12, color: C.dim, marginBottom: 14, lineHeight: 1.55 }}>
-        Un ticket sort automatiquement dès qu'une commande arrive — sans qu'un barman ait besoin de
-        cliquer quoi que ce soit, quel que soit l'onglet ouvert sur la tablette — et jamais deux fois
-        pour la même commande. Plusieurs tablettes peuvent rester allumées : une seule imprime. La
-        tablette doit rester allumée avec l'app ouverte ; imprimer tablette éteinte demanderait que
-        l'imprimante elle-même aille chercher ses tickets sur un serveur (Epson Server Direct Print),
-        un service à activer côté Epson, pas seulement ici.
+        <strong>Automatique</strong> : un ticket sort dès qu'une commande arrive, sans qu'un barman
+        clique quoi que ce soit, quel que soit l'onglet ouvert sur la tablette. Au-delà de{' '}
+        {PRINT_BATCH_THRESHOLD} tickets d'un coup, l'impression s'arrête et demande confirmation —
+        pour ne pas noyer le bar sous le papier si plusieurs commandes arrivent en rafale.{' '}
+        <strong>Manuel</strong> : rien ne sort tout seul, c'est le bouton « Imprimer » de chaque
+        commande, au bar, qui déclenche le ticket. Dans les deux cas : jamais deux fois la même
+        commande, et plusieurs tablettes peuvent rester allumées, une seule imprime.
       </div>
       <div style={{ fontSize: 12, color: C.dim, marginBottom: 14, lineHeight: 1.55 }}>
-        Un ticket perdu ou mal lu se réimprime depuis la fiche de la commande (bouton « ⋯ » au bar) —
-        cette réimpression sort marquée <strong>DUPLICATA</strong> en gros, pour ne jamais préparer
-        deux fois la même commande par erreur.
+        La tablette doit rester allumée avec l'app ouverte ; imprimer tablette éteinte demanderait que
+        l'imprimante elle-même aille chercher ses tickets sur un serveur (Epson Server Direct Print),
+        un service à activer côté Epson, pas seulement ici. Un ticket perdu ou mal lu se réimprime
+        depuis la fiche de la commande (bouton « ⋯ » au bar) — marqué <strong>DUPLICATA</strong> en
+        gros, pour ne jamais préparer deux fois la même commande par erreur.
       </div>
 
       <div style={{ marginBottom: 14 }}>
@@ -12732,6 +12844,33 @@ function PrinterCard({ venue, onReload, showToast }) {
           autoComplete="off"
         />
       </Field>
+
+      <div style={{ display: 'flex', gap: 8, marginBottom: 12 }}>
+        <button
+          onClick={() => setAuto(true)}
+          style={{
+            ...S.chip,
+            flex: 1,
+            minHeight: 48,
+            borderColor: auto ? C.terracotta : C.lineHi,
+            color: auto ? C.terracotta : C.dim,
+          }}
+        >
+          Automatique
+        </button>
+        <button
+          onClick={() => setAuto(false)}
+          style={{
+            ...S.chip,
+            flex: 1,
+            minHeight: 48,
+            borderColor: !auto ? C.terracotta : C.lineHi,
+            color: !auto ? C.terracotta : C.dim,
+          }}
+        >
+          Manuel
+        </button>
+      </div>
 
       <div style={{ display: 'grid', gap: 8 }}>
         <button disabled={busy} onClick={save} style={{ ...S.btn, opacity: busy ? 0.6 : 1 }}>
@@ -12769,6 +12908,7 @@ function PrinterCard({ venue, onReload, showToast }) {
 
 const PRINT_TRIGGER_LABEL = {
   arrival_auto: 'Automatique (arrivée de la commande)',
+  manual_print: 'Bouton « Imprimer » (mode manuel)',
   reprint_duplicata: 'Réimpression manuelle (duplicata)',
   en_prepa: 'Clic « En prépa » (ancien mode)',
 }
