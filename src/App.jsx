@@ -390,6 +390,11 @@ function segmentKey(label) {
 const RELANCE_MIN = 15
 const ESCALADE_MIN = 20
 
+// Sursis avant qu'une commande « Réglée » ne quitte la colonne Retirées
+// (BarTab) — retour terrain : disparaître au tap même était trop brusque,
+// sans confirmation visuelle que ça avait bien été pris en compte.
+const PAID_GRACE_MS = 25000
+
 /** Minutes écoulées depuis que la commande est prête à être retirée. */
 /**
  * Traduit un solde de crédits en langage client. Le barème ne change pas
@@ -7492,21 +7497,32 @@ function BarTab({ event, venue, session, showToast }) {
   }
   const shown = orders.filter(matches)
 
-  const received = orders.filter((o) => o.status === 'RECEIVED')
-  const inPrep = shown.filter((o) => o.status === 'IN_PREP')
-  const ready = orders.filter((o) => o.status === 'READY')
-  const pickedUp = shown.filter((o) => o.status === 'PICKED_UP')
-  const receivedShown = shown.filter((o) => o.status === 'RECEIVED')
-  const readyShown = shown.filter((o) => o.status === 'READY')
-
   // Retraits en retard : deux paliers, alignés sur l'affichage admin.
   //  · RELANCE_MIN  → la commande passe en alerte ici et côté organisation.
   //  · ESCALADE_MIN → l'organisateur prend le relais (contact du client).
+  // 5 s plutôt que 15 : sert aussi le sursis « Réglée » ci-dessous, qui a
+  // besoin d'une granularité à la seconde près, pas à la minute.
   const [now, setNow] = useState(Date.now())
   useEffect(() => {
-    const id = setInterval(() => setNow(Date.now()), 15000)
+    const id = setInterval(() => setNow(Date.now()), 5000)
     return () => clearInterval(id)
   }, [])
+
+  const received = orders.filter((o) => o.status === 'RECEIVED')
+  const inPrep = shown.filter((o) => o.status === 'IN_PREP')
+  const ready = orders.filter((o) => o.status === 'READY')
+  // Retour terrain : une commande « Réglée » disparaissait instantanément de
+  // la colonne Retirées — trop brusque, aucune confirmation visuelle que le
+  // tap avait bien été pris en compte. Elle reste maintenant visible encore
+  // PAID_GRACE_MS après paid_at (posé par move(), voir plus bas) avant de
+  // sortir de la colonne — juste le temps de voir « ✓ Réglée » s'afficher.
+  const pickedUp = shown.filter(
+    (o) =>
+      o.status === 'PICKED_UP' ||
+      (o.status === 'PAID' && o.paid_at && now - new Date(o.paid_at).getTime() < PAID_GRACE_MS)
+  )
+  const receivedShown = shown.filter((o) => o.status === 'RECEIVED')
+  const readyShown = shown.filter((o) => o.status === 'READY')
   const overdue = ready
     .map((o) => ({ o, min: waitingMin(o, now) }))
     .filter((x) => x.min >= RELANCE_MIN)
@@ -8095,78 +8111,106 @@ function BarTab({ event, venue, session, showToast }) {
                       Un retour à la ligne reste largement moins gênant qu'un
                       débordement. */}
                   <div style={{ display: 'flex', flexWrap: 'wrap', gap: 5, marginTop: 11 }}>
-                    <button
-                      onClick={() => {
-                        acknowledge([o.id])
-                        // Colonne Reçues : un seul bouton qui imprime ET passe en
-                        // prépa (voir printAndPrep) — c'est le geste qu'on fait
-                        // presque toujours. Passer en prépa SANS ticket (client
-                        // déjà au bar) reste possible via le bouton secondaire
-                        // ci-dessous, à la place du ↩ qui n'existe pas ici.
-                        if (col.next === 'IN_PREP') printAndPrep(o)
-                        else move(o, col.next)
-                      }}
-                      style={{
-                        flex: '1 1 auto',
-                        minWidth: 90,
-                        minHeight: 42,
-                        borderRadius: 12,
-                        border: 'none',
-                        cursor: 'pointer',
-                        overflow: 'hidden',
-                        whiteSpace: 'nowrap',
-                        textOverflow: 'ellipsis',
-                        fontFamily: FONT.label,
-                        fontWeight: 600,
-                        letterSpacing: 0.6,
-                        fontSize: 13,
-                        textTransform: 'uppercase',
-                        background: col.color,
-                        color: '#fff',
-                      }}
-                    >
-                      {col.next === 'IN_PREP' ? 'Imprimer' : col.action}
-                    </button>
-                    {col.prev ? (
-                      <button
-                        onClick={() => move(o, col.prev, { back: true })}
-                        title={`Revenir à « ${statusLabel(col.prev, 'fr')} »`}
+                    {/* Sursis « Réglée » (voir PAID_GRACE_MS) : la commande est
+                        déjà payée, retaper sur l'action n'aurait aucun effet —
+                        un badge simple confirme que c'est bien pris en compte,
+                        plutôt que de laisser un bouton qui ne sert plus à rien. */}
+                    {o.status === 'PAID' ? (
+                      <div
                         style={{
-                          width: 42,
+                          flex: '1 1 auto',
                           minHeight: 42,
                           borderRadius: 12,
-                          border: `1.5px solid ${C.lineHi}`,
-                          background: C.paper,
-                          color: C.dim,
-                          cursor: 'pointer',
-                          fontSize: 16,
-                          lineHeight: 1,
+                          display: 'flex',
+                          alignItems: 'center',
+                          justifyContent: 'center',
+                          fontFamily: FONT.label,
+                          fontWeight: 600,
+                          letterSpacing: 0.6,
+                          fontSize: 13,
+                          textTransform: 'uppercase',
+                          background: alpha(C.ok, 14),
+                          color: C.ok,
                         }}
                       >
-                        ↩
-                      </button>
-                    ) : col.next === 'IN_PREP' ? (
-                      <button
-                        onClick={() => {
-                          acknowledge([o.id])
-                          move(o, 'IN_PREP')
-                        }}
-                        title="En préparation sans imprimer de ticket — le client est déjà au bar"
-                        style={{
-                          width: 42,
-                          minHeight: 42,
-                          borderRadius: 12,
-                          border: `1.5px solid ${C.lineHi}`,
-                          background: C.paper,
-                          color: C.dim,
-                          cursor: 'pointer',
-                          fontSize: 15,
-                          lineHeight: 1,
-                        }}
-                      >
-                        📋
-                      </button>
-                    ) : null}
+                        ✓ Réglée
+                      </div>
+                    ) : (
+                      <>
+                        <button
+                          onClick={() => {
+                            acknowledge([o.id])
+                            // Colonne Reçues : un seul bouton qui imprime ET passe en
+                            // prépa (voir printAndPrep) — c'est le geste qu'on fait
+                            // presque toujours. Passer en prépa SANS ticket (client
+                            // déjà au bar) reste possible via le bouton secondaire
+                            // ci-dessous, à la place du ↩ qui n'existe pas ici.
+                            if (col.next === 'IN_PREP') printAndPrep(o)
+                            else move(o, col.next)
+                          }}
+                          style={{
+                            flex: '1 1 auto',
+                            minWidth: 90,
+                            minHeight: 42,
+                            borderRadius: 12,
+                            border: 'none',
+                            cursor: 'pointer',
+                            overflow: 'hidden',
+                            whiteSpace: 'nowrap',
+                            textOverflow: 'ellipsis',
+                            fontFamily: FONT.label,
+                            fontWeight: 600,
+                            letterSpacing: 0.6,
+                            fontSize: 13,
+                            textTransform: 'uppercase',
+                            background: col.color,
+                            color: '#fff',
+                          }}
+                        >
+                          {col.next === 'IN_PREP' ? 'Imprimer' : col.action}
+                        </button>
+                        {col.prev ? (
+                          <button
+                            onClick={() => move(o, col.prev, { back: true })}
+                            title={`Revenir à « ${statusLabel(col.prev, 'fr')} »`}
+                            style={{
+                              width: 42,
+                              minHeight: 42,
+                              borderRadius: 12,
+                              border: `1.5px solid ${C.lineHi}`,
+                              background: C.paper,
+                              color: C.dim,
+                              cursor: 'pointer',
+                              fontSize: 16,
+                              lineHeight: 1,
+                            }}
+                          >
+                            ↩
+                          </button>
+                        ) : col.next === 'IN_PREP' ? (
+                          <button
+                            onClick={() => {
+                              acknowledge([o.id])
+                              move(o, 'IN_PREP')
+                            }}
+                            title="En préparation sans imprimer de ticket — le client est déjà au bar"
+                            style={{
+                              width: 42,
+                              minHeight: 42,
+                              borderRadius: 12,
+                              border: `1.5px solid ${C.lineHi}`,
+                              background: C.paper,
+                              color: C.dim,
+                              cursor: 'pointer',
+                              fontSize: 15,
+                              lineHeight: 1,
+                            }}
+                          >
+                            📋
+                          </button>
+                        ) : null}
+                      </>
+                    )}
                     {o.status === 'READY' && (
                       <button
                         onClick={() => nudge(o)}
