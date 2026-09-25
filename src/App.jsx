@@ -3309,7 +3309,6 @@ function OrderingApp({
         promoCode={promoCode}
         subtotal={subtotal}
         creditsTotal={creditsTotal}
-        prepMin={event.default_prep_min ?? 1}
         onClose={() => setCartCheckout(false)}
         onSubmit={async (payload) => {
           try {
@@ -4538,7 +4537,6 @@ function CheckoutSheet({
   pass,
   promoCode,
   subtotal,
-  prepMin,
   creditsTotal = 0,
   onClose,
   onSubmit,
@@ -4700,10 +4698,15 @@ function CheckoutSheet({
         <PayAtBar lang={lang} />
       </div>
 
+      {/* Plus d'estimation de temps de préparation ici — retour terrain : un
+          chiffre annoncé (même ajustable en direct depuis l'onglet Bar) finit
+          toujours par être pris pour une promesse, et un Wi-Fi engorgé peut le
+          rendre faux d'une minute à l'autre. Le client est prévenu par
+          message (push/SMS) dès que sa commande est réellement prête — voir
+          move() dans BarTab — ce qui n'a pas besoin d'un délai annoncé pour
+          fonctionner. */}
       <div style={{ marginBottom: 16 }}>
-        <Banner tone="info">
-          <strong>{t.readyIn(prepMin)}</strong> {t.pickup5}
-        </Banner>
+        <Banner tone="info">{t.pickup5}</Banner>
       </div>
 
       {pending ? (
@@ -6236,7 +6239,7 @@ function StaffApp({ session }) {
         ) : (
           <>
             {activeTab === 'dashboard' && <DashboardTab event={event} onNavigate={setTab} />}
-            {activeTab === 'bar' && <BarTab event={event} venue={venue} session={session} onEventChange={loadEvents} showToast={showToast} />}
+            {activeTab === 'bar' && <BarTab event={event} venue={venue} session={session} showToast={showToast} />}
             {activeTab === 'caisse' && <CaisseTab event={event} venue={venue} showToast={showToast} />}
             {activeTab === 'orga' && <OrgaTab event={event} venue={venue} showToast={showToast} onEventChange={loadEvents} />}
             {activeTab === 'carte' && <CarteTab venue={venue} showToast={showToast} />}
@@ -7054,10 +7057,9 @@ function GiftBanner({ orderId }) {
   )
 }
 
-function BarTab({ event, venue, session, onEventChange, showToast }) {
+function BarTab({ event, venue, session, showToast }) {
   const [orders, setOrders] = useState([])
   const [loading, setLoading] = useState(true)
-  const [prep, setPrep] = useState(event.default_prep_min ?? 1)
   const [detail, setDetail] = useState(null)
   const [notesFor, setNotesFor] = useState(null)
   // Retour terrain 5.3 : « depuis une commande, rebondir directement sur la
@@ -7086,8 +7088,6 @@ function BarTab({ event, venue, session, onEventChange, showToast }) {
     LS.set('noti:ringtone', ringtone)
     alarm.current?.setKind(ringtone)
   }, [ringtone])
-
-  useEffect(() => setPrep(event.default_prep_min ?? 1), [event.default_prep_min])
 
   const load = useCallback(async () => {
     // Les annulées SONT chargées, contrairement à avant. Sans elles, une
@@ -7311,13 +7311,6 @@ function BarTab({ event, venue, session, onEventChange, showToast }) {
         : `Relance envoyée pour ${order.pickup_code} (${res.sms} SMS, ${res.push} notif push).`,
       'ok'
     )
-  }
-
-  async function savePrep(v) {
-    const val = Math.max(1, Math.min(60, v))
-    setPrep(val)
-    await supabase.from('events').update({ default_prep_min: val }).eq('id', event.id)
-    onEventChange?.()
   }
 
   async function printTicket(order) {
@@ -7757,24 +7750,6 @@ function BarTab({ event, venue, session, onEventChange, showToast }) {
           commandes qui doit rester la première chose visible à l'écran. */}
       <div style={{ marginTop: 24, paddingTop: 18, borderTop: `1px solid ${C.line}` }} className="no-print">
         <div style={{ ...S.label, marginBottom: 10 }}>Réglages du poste</div>
-
-        <div style={{ ...S.card, padding: 14, marginBottom: 10 }}>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
-            <div style={{ flex: 1 }}>
-              <div style={{ fontWeight: 600, fontSize: 13.5 }}>Temps annoncé</div>
-              <div style={{ fontSize: 12, color: C.dim }}>Appliqué aux nouvelles commandes</div>
-            </div>
-            <button onClick={() => savePrep(prep - 1)} style={stepBtn}>
-              −
-            </button>
-            <div style={{ ...S.money, fontSize: 22, fontWeight: 600, minWidth: 56, textAlign: 'center' }}>
-              {prep} min
-            </div>
-            <button onClick={() => savePrep(prep + 1)} style={stepBtn}>
-              +
-            </button>
-          </div>
-        </div>
 
         <div style={{ ...S.card, padding: 14, marginBottom: 10 }}>
           <div style={{ fontWeight: 600, fontSize: 13.5, marginBottom: 8 }}>🔔 Sonnerie des nouvelles commandes</div>
@@ -13274,16 +13249,6 @@ function ReglagesTab({ venue, event, session, role, onReload, showToast }) {
         <div style={{ ...S.h2, marginBottom: 14 }}>Soirée</div>
         <Field label="Nom">
           <input style={S.input} value={e.name || ''} onChange={(ev) => setE({ ...e, name: ev.target.value })} />
-        </Field>
-        <Field label={`Temps de préparation par défaut : ${e.default_prep_min} min`}>
-          <input
-            type="range"
-            min={1}
-            max={30}
-            value={e.default_prep_min || 1}
-            onChange={(ev) => setE({ ...e, default_prep_min: Number(ev.target.value) })}
-            style={{ width: '100%', accentColor: C.terracotta }}
-          />
         </Field>
         <Field label="Heure de fermeture" hint="Déclenche la relance renforcée une heure avant.">
           <input

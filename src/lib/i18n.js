@@ -270,7 +270,6 @@ export const T = {
         : 'Vos crédits seront épuisés après cette commande.',
     codeApplied: (c, v) => `Code ${c} — réduction de ${v} appliquée ci-dessous.`,
     codeInvalid: (c) => `Code ${c} invalide, expiré, épuisé ou panier insuffisant pour ce code.`,
-    readyIn: (min) => `Prête dans environ ${min} min.`,
     pickup5:
       'Merci de récupérer votre commande dans les 5 minutes une fois prête — elle reste due même si elle n’est pas retirée.',
 
@@ -570,7 +569,6 @@ export const T = {
         : 'Your credits will be used up after this order.',
     codeApplied: (c, v) => `Code ${c} — ${v} discount applied below.`,
     codeInvalid: (c) => `Code ${c} is invalid, expired, used up, or your cart is too small for it.`,
-    readyIn: (min) => `Ready in about ${min} min.`,
     pickup5:
       'Please collect your order within 5 minutes once it is ready — it remains due even if it is not collected.',
 
@@ -863,7 +861,6 @@ export const T = {
         : 'Tus créditos se agotarán después de este pedido.',
     codeApplied: (c, v) => `Código ${c} — descuento de ${v} aplicado abajo.`,
     codeInvalid: (c) => `Código ${c} no válido, caducado, agotado o carrito insuficiente.`,
-    readyIn: (min) => `Listo en unos ${min} min.`,
     pickup5:
       'Recoge tu pedido en los 5 minutos siguientes a estar listo — se debe igualmente aunque no se recoja.',
 
@@ -1154,7 +1151,6 @@ export const T = {
         : 'После этого заказа кредиты закончатся.',
     codeApplied: (c, v) => `Код ${c} — скидка ${v} применена ниже.`,
     codeInvalid: (c) => `Код ${c} недействителен, истёк, израсходован, или ваша корзина для него слишком мала.`,
-    readyIn: (min) => `Будет готово примерно через ${min} мин.`,
     pickup5:
       'Пожалуйста, заберите заказ в течение 5 минут после готовности — он подлежит оплате, даже если его не забрали.',
 
@@ -1443,7 +1439,6 @@ export const T = {
       n > 0 ? `这笔订单后您还剩 ${n} 个点数。` : '这笔订单后您的点数将用完。',
     codeApplied: (c, v) => `优惠码 ${c}——已在下方抵扣 ${v}。`,
     codeInvalid: (c) => `优惠码 ${c} 无效、已过期、已用完，或您的购物车金额不足。`,
-    readyIn: (min) => `大约 ${min} 分钟后做好。`,
     pickup5:
       '订单做好后请在 5 分钟内取走——即使未取走，仍需付款。',
 
