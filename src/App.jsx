@@ -433,6 +433,28 @@ function orderSummary(order, max = 3) {
 
 const tr = trProduct
 
+/**
+ * Catégories mises en avant côté client, dans cet ordre précis, avant tout
+ * le reste (qui garde son ordre habituel derrière). Comparaison insensible
+ * à la casse et aux accents plutôt qu'une égalité stricte : le libellé exact
+ * en base peut varier légèrement (« Bar à Spritz » vs « Spritz »…) sans que
+ * ça casse la mise en avant.
+ */
+const SUBCAT_PRIORITY = ['spritz', 'cocktail', 'biere', 'vin', 'soft']
+const normalizeCat = (s) =>
+  String(s || '')
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/[̀-ͯ]/g, '')
+function sortSubcatsByPriority(list) {
+  const rank = (name) => {
+    const n = normalizeCat(name)
+    const i = SUBCAT_PRIORITY.findIndex((k) => n.includes(k))
+    return i === -1 ? SUBCAT_PRIORITY.length : i
+  }
+  return [...list].sort((a, b) => rank(a) - rank(b))
+}
+
 // Libellés de statut côté client : mêmes étapes que ORDER_STATUS (qui reste en
 // français pour l'espace staff), traduites via le dictionnaire.
 const ST_KEY = {
@@ -2610,7 +2632,10 @@ function OrderingApp({
   }, [universesAvailable, universe])
 
   const subcats = useMemo(
-    () => [...new Set(products.filter((p) => p.universe === universe).map((p) => p.subcategory))],
+    () =>
+      sortSubcatsByPriority([
+        ...new Set(products.filter((p) => p.universe === universe).map((p) => p.subcategory)),
+      ]),
     [products, universe]
   )
 
