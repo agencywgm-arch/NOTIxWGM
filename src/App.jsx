@@ -412,6 +412,22 @@ function waitingMin(order, now = Date.now()) {
   return Math.max(0, Math.floor((now - new Date(from).getTime()) / 60000))
 }
 
+/**
+ * Résumé court du contenu d'une commande pour un SMS — retour terrain : un
+ * client avec plusieurs commandes en cours ne sait pas laquelle est prête
+ * avec juste le code de retrait. Tronqué pour rester lisible en SMS ; vide
+ * si les articles ne sont pas chargés (l'appelant l'intègre alors sans
+ * casser le message).
+ */
+function orderSummary(order, max = 3) {
+  const items = order?.order_items || []
+  if (!items.length) return ''
+  const parts = items.map((it) => `${it.quantity}× ${it.name_snapshot}`)
+  const shown = parts.slice(0, max)
+  const rest = parts.length - shown.length
+  return shown.join(', ') + (rest > 0 ? ` +${rest}` : '')
+}
+
 // Multilingue FR / EN / ES — le dictionnaire complet du parcours client vit
 // dans src/lib/i18n.js (voir useT / dict / trProduct).
 
@@ -7541,7 +7557,7 @@ function BarTab({ event, venue, session, showToast }) {
         customerId: order.customer_id,
         orderId: order.id,
         title: 'Votre commande est prête',
-        body: `Commande ${order.pickup_code} : c’est prêt ! Présentez votre code au bar et réglez sur place.`,
+        body: `Commande ${order.pickup_code}${orderSummary(order) ? ` (${orderSummary(order)})` : ''} : c’est prêt ! Présentez votre code au bar et réglez sur place.`,
         requireInteraction: true,
       })
     }
@@ -7607,7 +7623,7 @@ function BarTab({ event, venue, session, showToast }) {
       customerId: order.customer_id,
       orderId: order.id,
       title: 'Votre commande vous attend',
-      body: `Votre commande ${order.pickup_code} vous attend au bar depuis ${waiting} min. Merci de venir la récupérer.`,
+      body: `Votre commande ${order.pickup_code}${orderSummary(order) ? ` (${orderSummary(order)})` : ''} vous attend au bar depuis ${waiting} min. Merci de venir la récupérer.`,
       urgent: true,
       requireInteraction: true,
       channels: ['push', 'sms'],
