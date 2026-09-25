@@ -7652,8 +7652,8 @@ function BarTab({ event, venue, session, showToast }) {
           <div
             key={col.key}
             style={{
-              minWidth: 300,
-              flex: '1 0 300px',
+              minWidth: 260,
+              flex: '1 0 260px',
               // Fond + bordure propres à chaque colonne : sans ça, la limite
               // entre deux colonnes ne tenait qu'à un `gap` de quelques
               // pixels — invisible sous l'éclairage d'une soirée (constaté
@@ -7720,8 +7720,9 @@ function BarTab({ event, venue, session, showToast }) {
                   style={{
                     background: C.paper,
                     border: `1.5px solid ${!ack.has(o.id) && o.status === 'RECEIVED' ? C.terracotta : C.line}`,
-                    borderRadius: 16,
-                    padding: 18,
+                    borderRadius: 14,
+                    padding: 13,
+                    maxWidth: '100%',
                   }}
                 >
                   <div style={{ display: 'flex', justifyContent: 'space-between', gap: 8 }}>
@@ -7729,18 +7730,18 @@ function BarTab({ event, venue, session, showToast }) {
                       <div
                         style={{
                           fontFamily: FONT.label,
-                          fontSize: 34,
+                          fontSize: 26,
                           fontWeight: 700,
-                          letterSpacing: 2,
+                          letterSpacing: 1.5,
                           color: C.navy,
                         }}
                       >
                         {o.pickup_code}
                       </div>
-                      <div style={{ fontSize: 15, marginTop: 3, fontWeight: 600 }}>
+                      <div style={{ fontSize: 13.5, marginTop: 2, fontWeight: 600 }}>
                         {o.customers?.first_name} {o.customers?.last_name}
                       </div>
-                      <div style={{ fontSize: 12.5, color: C.faint, marginTop: 1 }}>
+                      <div style={{ fontSize: 11.5, color: C.faint, marginTop: 1 }}>
                         {timeFR(o.created_at)}
                         {(o.customers?.tags || []).includes('vip') && (
                           <span style={{ color: C.indigo, fontWeight: 600 }}> · VIP</span>
@@ -7771,12 +7772,12 @@ function BarTab({ event, venue, session, showToast }) {
                         </div>
                       )}
                     </div>
-                    <div style={{ ...S.money, fontWeight: 700, fontSize: 20, color: C.terracotta }}>{eur(o.total)}</div>
+                    <div style={{ ...S.money, fontWeight: 700, fontSize: 17, color: C.terracotta }}>{eur(o.total)}</div>
                   </div>
 
-                  <div style={{ marginTop: 11, display: 'grid', gap: 5 }}>
+                  <div style={{ marginTop: 9, display: 'grid', gap: 4 }}>
                     {(o.order_items || []).slice(0, 5).map((it) => (
-                      <div key={it.id} style={{ fontSize: 15, lineHeight: 1.35, color: C.dim }}>
+                      <div key={it.id} style={{ fontSize: 13, lineHeight: 1.3, color: C.dim }}>
                         <strong style={{ color: C.text, fontWeight: 700 }}>{it.quantity}×</strong>{' '}
                         {it.name_snapshot}
                         {it.variant_label ? ` (${it.variant_label})` : ''}
@@ -7813,7 +7814,13 @@ function BarTab({ event, venue, session, showToast }) {
                     </div>
                   )}
 
-                  <div style={{ display: 'flex', gap: 6, marginTop: 13 }}>
+                  {/* `flexWrap: 'wrap'` — filet de sécurité : avec jusqu'à 6
+                      boutons sur une commande « Prête » (relance incluse),
+                      la rangée ne tenait plus dans une colonne resserrée et
+                      débordait visiblement de la carte (constaté en soirée).
+                      Un retour à la ligne reste largement moins gênant qu'un
+                      débordement. */}
+                  <div style={{ display: 'flex', flexWrap: 'wrap', gap: 5, marginTop: 11 }}>
                     <button
                       onClick={() => {
                         acknowledge([o.id])
@@ -7826,10 +7833,10 @@ function BarTab({ event, venue, session, showToast }) {
                         else move(o, col.next)
                       }}
                       style={{
-                        flex: 1,
-                        minWidth: 0,
-                        minHeight: 48,
-                        borderRadius: 13,
+                        flex: '1 1 auto',
+                        minWidth: 90,
+                        minHeight: 42,
+                        borderRadius: 12,
                         border: 'none',
                         cursor: 'pointer',
                         overflow: 'hidden',
@@ -7837,8 +7844,8 @@ function BarTab({ event, venue, session, showToast }) {
                         textOverflow: 'ellipsis',
                         fontFamily: FONT.label,
                         fontWeight: 600,
-                        letterSpacing: 0.8,
-                        fontSize: 14,
+                        letterSpacing: 0.6,
+                        fontSize: 13,
                         textTransform: 'uppercase',
                         background: col.color,
                         color: '#fff',
@@ -7851,14 +7858,14 @@ function BarTab({ event, venue, session, showToast }) {
                         onClick={() => move(o, col.prev, { back: true })}
                         title={`Revenir à « ${statusLabel(col.prev, 'fr')} »`}
                         style={{
-                          width: 48,
-                          minHeight: 48,
-                          borderRadius: 13,
+                          width: 42,
+                          minHeight: 42,
+                          borderRadius: 12,
                           border: `1.5px solid ${C.lineHi}`,
                           background: C.paper,
                           color: C.dim,
                           cursor: 'pointer',
-                          fontSize: 18,
+                          fontSize: 16,
                           lineHeight: 1,
                         }}
                       >
@@ -7872,14 +7879,14 @@ function BarTab({ event, venue, session, showToast }) {
                         }}
                         title="En préparation sans imprimer de ticket — le client est déjà au bar"
                         style={{
-                          width: 48,
-                          minHeight: 48,
-                          borderRadius: 13,
+                          width: 42,
+                          minHeight: 42,
+                          borderRadius: 12,
                           border: `1.5px solid ${C.lineHi}`,
                           background: C.paper,
                           color: C.dim,
                           cursor: 'pointer',
-                          fontSize: 16,
+                          fontSize: 15,
                           lineHeight: 1,
                         }}
                       >
@@ -7891,7 +7898,7 @@ function BarTab({ event, venue, session, showToast }) {
                         onClick={() => nudge(o)}
                         disabled={nudging === o.id}
                         title="Relancer par SMS/notif — sans attendre l'alerte automatique"
-                        style={{ ...stepBtn, width: 48, height: 48, fontSize: 16, opacity: nudging === o.id ? 0.5 : 1 }}
+                        style={{ ...stepBtn, width: 42, height: 42, fontSize: 15, opacity: nudging === o.id ? 0.5 : 1 }}
                       >
                         {nudging === o.id ? '…' : '📣'}
                       </button>
@@ -7901,18 +7908,18 @@ function BarTab({ event, venue, session, showToast }) {
                       title="Commenter / signaler cette commande"
                       style={{
                         ...stepBtn,
-                        width: 48,
-                        height: 48,
-                        fontSize: 16,
+                        width: 42,
+                        height: 42,
+                        fontSize: 15,
                         borderColor: o.flag ? flagOf(o.flag)?.color : undefined,
                       }}
                     >
                       {o.flag ? flagOf(o.flag)?.emoji : '💬'}
                     </button>
-                    <button onClick={() => printTicket(o)} title="Imprimer le ticket (optionnel)" style={{ ...stepBtn, width: 48, height: 48, fontSize: 16 }}>
+                    <button onClick={() => printTicket(o)} title="Imprimer le ticket (optionnel)" style={{ ...stepBtn, width: 42, height: 42, fontSize: 15 }}>
                       🖨
                     </button>
-                    <button onClick={() => setDetail(o)} style={{ ...stepBtn, width: 48, height: 48, fontSize: 16 }}>
+                    <button onClick={() => setDetail(o)} style={{ ...stepBtn, width: 42, height: 42, fontSize: 15 }}>
                       ⋯
                     </button>
                   </div>
