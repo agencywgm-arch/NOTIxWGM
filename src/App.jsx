@@ -5752,6 +5752,207 @@ function tabsForRole(role) {
 }
 
 /**
+ * Mode démo — retour terrain : « une aide si le serveur oublie un truc ». Un
+ * rappel des fonctions principales de l'espace équipe, en diapositives, sans
+ * rien modifier ni exiger d'être branché à une vraie soirée. Volontairement
+ * indépendant de tout état (pas de fetch, pas d'écriture) : c'est un mémo,
+ * pas un tutoriel interactif — au personnel de le fermer dès qu'il a trouvé
+ * sa réponse.
+ */
+const DEMO_SLIDES = [
+  {
+    e: '👋',
+    t: 'Aide rapide',
+    body: [
+      'Un rappel des fonctions principales de l’espace équipe.',
+      'Naviguez avec les flèches, quittez quand vous voulez avec la croix en haut.',
+      'Ça ne modifie ni n’enregistre rien — c’est juste un mémo.',
+    ],
+  },
+  {
+    e: '🏠',
+    t: 'Dashboard',
+    body: [
+      'Vue d’ensemble en direct de la soirée : arrivées, ventes, alertes.',
+      'Le premier écran à regarder pour prendre la température.',
+    ],
+  },
+  {
+    e: '🍸',
+    t: 'Bar',
+    body: [
+      'Le cœur du service : Reçue → En préparation → Prête → Retirée.',
+      'Mode Cadrans (rapide, dense) ou Colonnes (détaillé, colonnes réordonnables).',
+      '« Imprimer » envoie le ticket ET passe la commande en préparation.',
+      'Le bouton 📣 relance le client par SMS s’il tarde à venir chercher.',
+    ],
+  },
+  {
+    e: '🧾',
+    t: 'Caisse',
+    body: [
+      'Suivi de l’encaissement du « food » (payé sur place).',
+      'Aucun paiement n’est traité ici : c’est juste le pointage de qui a réglé.',
+    ],
+  },
+  {
+    e: '📡',
+    t: 'Orga',
+    body: [
+      'Pilotage temps réel : affluence, retraits en retard, reporting.',
+      'Envoyer un message (diffusion ou individuel) à un ou tous les clients.',
+    ],
+  },
+  {
+    e: '📋',
+    t: 'Carte',
+    body: [
+      'Gestion du menu : produits, prix, variantes.',
+      'Marquer un article épuisé — il reste visible, grisé, sans le supprimer.',
+    ],
+  },
+  {
+    e: '👥',
+    t: 'Clients',
+    body: [
+      'Fiches clients, historique cross-événement, tags (VIP, habitué…).',
+      'Recherche par nom, téléphone ou code de retrait.',
+    ],
+  },
+  {
+    e: '🕓',
+    t: 'Historique',
+    body: ['Toutes les commandes de la soirée, quel que soit leur sort — servies ou annulées.'],
+  },
+  {
+    e: '⬛',
+    t: 'QR',
+    body: ['Les codes QR à afficher ou imprimer pour que les clients scannent et commandent.'],
+  },
+  {
+    e: '⚙️',
+    t: 'Réglages',
+    body: ['Imprimante, équipe, vérification du numéro, paramètres de la soirée (fermeture, etc.).'],
+  },
+  {
+    e: '✅',
+    t: 'C’est tout !',
+    body: ['Quittez à tout moment avec la croix.', 'Bon service 🙌'],
+  },
+]
+
+function DemoModeOverlay({ onClose }) {
+  const [i, setI] = useState(0)
+  const last = i === DEMO_SLIDES.length - 1
+  const slide = DEMO_SLIDES[i]
+
+  useEffect(() => {
+    function onKey(e) {
+      if (e.key === 'Escape') onClose()
+      if (e.key === 'ArrowRight') setI((n) => Math.min(DEMO_SLIDES.length - 1, n + 1))
+      if (e.key === 'ArrowLeft') setI((n) => Math.max(0, n - 1))
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [onClose])
+
+  return (
+    <div
+      style={{
+        position: 'fixed',
+        inset: 0,
+        zIndex: 20000,
+        background: C.cream,
+        display: 'flex',
+        flexDirection: 'column',
+      }}
+      className="no-print"
+    >
+      <div style={{ display: 'flex', alignItems: 'center', padding: '16px 18px 0' }}>
+        <div style={{ ...S.label, color: C.faint }}>
+          Mode démo · {i + 1}/{DEMO_SLIDES.length}
+        </div>
+        <button
+          onClick={onClose}
+          title="Quitter le mode démo"
+          style={{
+            marginLeft: 'auto',
+            width: 40,
+            height: 40,
+            borderRadius: 20,
+            border: `1.5px solid ${C.lineHi}`,
+            background: C.paper,
+            color: C.dim,
+            fontSize: 18,
+            cursor: 'pointer',
+          }}
+        >
+          ✕
+        </button>
+      </div>
+
+      <div
+        style={{
+          flex: 1,
+          display: 'flex',
+          flexDirection: 'column',
+          alignItems: 'center',
+          justifyContent: 'center',
+          padding: '20px 28px',
+          textAlign: 'center',
+        }}
+      >
+        <div style={{ fontSize: 56, marginBottom: 14 }}>{slide.e}</div>
+        <div style={{ ...S.h1, fontSize: 26, marginBottom: 18 }}>{slide.t}</div>
+        <div style={{ display: 'grid', gap: 10, maxWidth: 440 }}>
+          {slide.body.map((line, k) => (
+            <div key={k} style={{ fontSize: 15.5, lineHeight: 1.5, color: C.dim }}>
+              {line}
+            </div>
+          ))}
+        </div>
+      </div>
+
+      <div style={{ display: 'flex', gap: 8, padding: '0 18px 4px' }}>
+        {DEMO_SLIDES.map((_, k) => (
+          <div
+            key={k}
+            style={{
+              flex: 1,
+              height: 4,
+              borderRadius: 2,
+              background: k === i ? C.terracotta : C.line,
+            }}
+          />
+        ))}
+      </div>
+
+      <div
+        style={{
+          display: 'flex',
+          gap: 10,
+          padding: '14px 18px calc(env(safe-area-inset-bottom) + 18px)',
+        }}
+      >
+        <button
+          onClick={() => setI((n) => Math.max(0, n - 1))}
+          disabled={i === 0}
+          style={{ ...S.btnGhost, flex: 1, minHeight: 52, opacity: i === 0 ? 0.4 : 1 }}
+        >
+          ‹ Précédent
+        </button>
+        <button
+          onClick={() => (last ? onClose() : setI((n) => Math.min(DEMO_SLIDES.length - 1, n + 1)))}
+          style={{ ...S.btn, flex: 1, minHeight: 52 }}
+        >
+          {last ? 'Terminer' : 'Suivant ›'}
+        </button>
+      </div>
+    </div>
+  )
+}
+
+/**
  * Réservation + envoi + journal d'un ticket « arrivée », partagés entre
  * l'impression automatique (AutoPrintDaemon) et le bouton « Imprimer »
  * manuel (BarTab) : les deux se disputent la MÊME réservation
@@ -6058,6 +6259,10 @@ function StaffApp({ session }) {
     }
   }
 
+  // Mode démo : une aide de secours si un serveur oublie une fonction en
+  // plein service — jamais automatique, jamais lié à une vraie soirée.
+  const [demoMode, setDemoMode] = useState(false)
+
   const loadVenues = useCallback(async () => {
     // Une invitation adressée à cet e-mail devient une adhésion dès la première
     // connexion — c'est ce qui permet d'inviter quelqu'un qui n'a pas encore de
@@ -6230,6 +6435,27 @@ function StaffApp({ session }) {
             {fullscreen ? '⤡' : '⛶'}
           </button>
         )}
+        <button
+          onClick={() => setDemoMode(true)}
+          title="Mode démo — rappel des fonctions de l'espace équipe"
+          className="no-print"
+          style={{
+            width: 38,
+            height: 38,
+            flexShrink: 0,
+            borderRadius: 12,
+            border: `1.5px solid ${C.lineHi}`,
+            background: C.paper,
+            color: C.dim,
+            cursor: 'pointer',
+            fontSize: 16,
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+          }}
+        >
+          🎓
+        </button>
         <Logo size={0.6} />
       </div>
 
@@ -6369,6 +6595,8 @@ function StaffApp({ session }) {
       </Sheet>
 
       <Toast toast={toast} />
+
+      {demoMode && <DemoModeOverlay onClose={() => setDemoMode(false)} />}
     </div>
   )
 }
