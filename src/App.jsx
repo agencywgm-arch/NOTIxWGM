@@ -6813,7 +6813,7 @@ function OrderNotesSheet({ order, onClose, onSaved, showToast }) {
  *    c'est ce qui rend la ressaisie en caisse rapide (§3), et une ressaisie
  *    laborieuse est bâclée puis abandonnée.
  */
-function BarCadrans({ orders, onDone, onDetail }) {
+function BarCadrans({ orders, onDone, onDetail, onNudge, nudging }) {
   // Premier arrivé, premier servi — l'ordre est celui de la création, et le
   // rang est affiché pour qu'il ne soit jamais ambigu.
   const list = useMemo(
@@ -6972,6 +6972,26 @@ function BarCadrans({ orders, onDone, onDetail }) {
                   >
                     {o.status === 'READY' ? 'Retirée' : 'Fait'}
                   </button>
+                  {o.status === 'READY' && (
+                    <button
+                      onClick={() => onNudge(o)}
+                      disabled={nudging === o.id}
+                      title="Relancer par SMS/notif — sans attendre l'alerte automatique"
+                      style={{
+                        width: 46,
+                        minHeight: btnH,
+                        borderRadius: 12,
+                        cursor: 'pointer',
+                        fontSize: 16,
+                        border: `1.5px solid ${C.lineHi}`,
+                        background: C.paper,
+                        color: C.dim,
+                        opacity: nudging === o.id ? 0.5 : 1,
+                      }}
+                    >
+                      {nudging === o.id ? '…' : '📣'}
+                    </button>
+                  )}
                   <button
                     onClick={() => onDetail(o)}
                     title="Détail, commentaire, ticket"
@@ -7056,6 +7076,18 @@ function GiftBanner({ orderId }) {
     </div>
   )
 }
+
+// Métadonnées fixes des colonnes du mode « colonnes » (BarTab) — seul
+// l'ORDRE dans lequel elles s'affichent est modifiable (par poste, voir
+// colOrder ci-dessous) ; ce qu'elles contiennent reste déterminé par le
+// statut de la commande, jamais par la colonne elle-même.
+const BAR_COLUMNS = {
+  received: { title: 'Reçues', color: C.indigo, action: 'En prépa', next: 'IN_PREP', prev: null },
+  prep: { title: 'En préparation', color: C.warn, action: 'Prête', next: 'READY', prev: 'RECEIVED' },
+  ready: { title: 'Prêtes', color: C.terracotta, action: 'Retirée', next: 'PICKED_UP', prev: 'IN_PREP' },
+  pickedup: { title: 'Retirées', color: C.ok, action: 'Réglée', next: 'PAID', prev: 'READY' },
+}
+const BAR_COL_KEYS = Object.keys(BAR_COLUMNS)
 
 function BarTab({ event, venue, session, showToast }) {
   const [orders, setOrders] = useState([])
@@ -7313,6 +7345,76 @@ function BarTab({ event, venue, session, showToast }) {
     )
   }
 
+  // Ordre des colonnes (mode « colonnes »), mémorisé par poste — comme le
+  // mode d'affichage ou la sonnerie, c'est une préférence de tablette, pas
+  // une donnée de soirée. Retour terrain : certains postes veulent « Reçues »
+  // à droite plutôt qu'à gauche. Réordonnable par un appui long sur
+  // l'en-tête d'une colonne puis un glissement — un simple clic/tap ne
+  // déclenche rien, pour ne jamais gêner le défilement horizontal normal de
+  // la rangée quand il y a plus de colonnes que d'écran.
+  const [colOrder, setColOrder] = useState(() => {
+    const saved = LS.get('noti:barColOrder', null)
+    if (!Array.isArray(saved)) return BAR_COL_KEYS
+    const kept = saved.filter((k) => BAR_COL_KEYS.includes(k))
+    return [...kept, ...BAR_COL_KEYS.filter((k) => !kept.includes(k))]
+  })
+  useEffect(() => LS.set('noti:barColOrder', colOrder), [colOrder])
+
+  const [dragCol, setDragCol] = useState(null)
+  const [overCol, setOverCol] = useState(null)
+  const holdTimer = useRef(null)
+  const dragStart = useRef(null)
+  const colRefs = useRef({})
+
+  function colPointerDown(key, e) {
+    if (e.pointerType === 'mouse' && e.button !== 0) return
+    dragStart.current = { x: e.clientX, y: e.clientY }
+    clearTimeout(holdTimer.current)
+    const el = e.currentTarget
+    const pointerId = e.pointerId
+    holdTimer.current = setTimeout(() => {
+      try {
+        el.setPointerCapture(pointerId)
+      } catch (_) {}
+      setDragCol(key)
+      setOverCol(key)
+    }, 350)
+  }
+  function colPointerMove(e) {
+    if (!dragStart.current) return
+    const dx = Math.abs(e.clientX - dragStart.current.x)
+    const dy = Math.abs(e.clientY - dragStart.current.y)
+    if (!dragCol) {
+      // Bougé avant la fin de l'appui long : c'est un geste de défilement,
+      // pas une intention de glisser — on laisse tomber sans rien déclencher.
+      if (dx > 8 || dy > 8) {
+        clearTimeout(holdTimer.current)
+        dragStart.current = null
+      }
+      return
+    }
+    e.preventDefault()
+    const hit = Object.entries(colRefs.current).find(([, el]) => {
+      if (!el) return false
+      const r = el.getBoundingClientRect()
+      return e.clientX >= r.left && e.clientX <= r.right
+    })
+    setOverCol(hit ? hit[0] : dragCol)
+  }
+  function colPointerUp() {
+    clearTimeout(holdTimer.current)
+    if (dragCol && overCol && dragCol !== overCol) {
+      setColOrder((prev) => {
+        const next = prev.filter((k) => k !== dragCol)
+        next.splice(next.indexOf(overCol), 0, dragCol)
+        return next
+      })
+    }
+    dragStart.current = null
+    setDragCol(null)
+    setOverCol(null)
+  }
+
   async function printTicket(order) {
     const canvas = await renderTicketCanvas({ venue, event, order })
     const blob = canvasesToPdfBlob([canvas], { quality: 0.95, pageSize: { w: 226, h: 480 } })
@@ -7511,30 +7613,50 @@ function BarTab({ event, venue, session, showToast }) {
             move(o, o.status === 'READY' ? 'PICKED_UP' : 'READY')
           }}
           onDetail={setDetail}
+          onNudge={nudge}
+          nudging={nudging}
         />
       )}
 
       <div style={{ display: mode === 'colonnes' ? 'flex' : 'none', gap: 12, overflowX: 'auto', paddingBottom: 8 }}>
-        {[
-          // `prev` : un tap de trop sur « Prête » notifiait le client, qui
-          // venait attendre devant le bar — exactement ce que l'outil est censé
-          // éviter. Mieux vaut pouvoir revenir en arrière et ne pas s'en servir.
-          { title: 'Reçues', list: receivedShown, color: C.indigo, action: 'En prépa', next: 'IN_PREP', prev: null },
-          { title: 'En préparation', list: inPrep, color: C.warn, action: 'Prête', next: 'READY', prev: 'RECEIVED' },
-          { title: 'Prêtes', list: readyShown, color: C.terracotta, action: 'Retirée', next: 'PICKED_UP', prev: 'IN_PREP' },
-          { title: 'Retirées', list: pickedUp, color: C.ok, action: 'Réglée', next: 'PAID', prev: 'READY' },
-        ].map((col) => (
-          <div key={col.title} style={{ minWidth: 300, flex: '1 0 300px' }}>
+        {colOrder
+          .map((key) => ({
+            key,
+            ...BAR_COLUMNS[key],
+            list: { received: receivedShown, prep: inPrep, ready: readyShown, pickedup: pickedUp }[key],
+          }))
+          .map((col) => (
+          <div
+            key={col.key}
+            ref={(el) => (colRefs.current[col.key] = el)}
+            style={{
+              minWidth: 300,
+              flex: '1 0 300px',
+              transition: dragCol ? 'none' : 'transform .15s ease',
+              opacity: dragCol === col.key ? 0.45 : 1,
+            }}
+          >
             <div
+              onPointerDown={(e) => colPointerDown(col.key, e)}
+              onPointerMove={colPointerMove}
+              onPointerUp={colPointerUp}
+              onPointerCancel={colPointerUp}
+              title="Rester appuyé pour déplacer cette colonne"
               style={{
                 display: 'flex',
                 alignItems: 'center',
                 gap: 8,
                 paddingBottom: 8,
                 marginBottom: 10,
-                borderBottom: `2px solid ${alpha(col.color, 27)}`,
+                borderBottom: `2px solid ${
+                  overCol === col.key && dragCol && dragCol !== col.key ? col.color : alpha(col.color, 27)
+                }`,
+                cursor: 'grab',
+                touchAction: 'none',
+                userSelect: 'none',
               }}
             >
+              <span style={{ color: C.faint, fontSize: 13, lineHeight: 1 }}>⠿</span>
               <div style={{ width: 8, height: 8, borderRadius: 4, background: col.color }} />
               <div style={{ fontFamily: FONT.label, fontWeight: 600, letterSpacing: 1 }}>
                 {col.title.toUpperCase()}
@@ -7718,6 +7840,16 @@ function BarTab({ event, venue, session, showToast }) {
                         📋
                       </button>
                     ) : null}
+                    {o.status === 'READY' && (
+                      <button
+                        onClick={() => nudge(o)}
+                        disabled={nudging === o.id}
+                        title="Relancer par SMS/notif — sans attendre l'alerte automatique"
+                        style={{ ...stepBtn, width: 48, height: 48, fontSize: 16, opacity: nudging === o.id ? 0.5 : 1 }}
+                      >
+                        {nudging === o.id ? '…' : '📣'}
+                      </button>
+                    )}
                     <button
                       onClick={() => setNotesFor(o)}
                       title="Commenter / signaler cette commande"
