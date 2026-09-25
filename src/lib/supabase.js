@@ -93,6 +93,11 @@ const ERROR_KEYS = [
   'unknown_link',
   'link_revoked',
   'forbidden',
+  'rate_limited',
+  'code_expired',
+  'too_many_attempts',
+  'no_pending_code',
+  'sms_failed',
 ]
 
 export function errorKey(err) {

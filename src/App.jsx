@@ -15,7 +15,7 @@ import QRCode from 'qrcode'
 import { supabase, isConfigured, frError, errorKey, BASE_PATH, scanUrl, isPreviewDeployment, presentationUrl } from './lib/supabase.js'
 import { C, S, FONT, GRADIENT, RADIUS, alpha, eur, timeFR, dateFR, phoneFR, normalizePhone, isValidPhone } from './lib/theme.js'
 import { dict, useT, trProduct, trSubcat, LANG_LABEL, LANGS } from './lib/i18n.js'
-import { phoneVerificationAvailable, sendPhoneCode, confirmPhoneCode } from './lib/firebase.js'
+import { phoneVerificationAvailable, sendOtpCode, confirmOtpCode } from './lib/otp.js'
 import { buildTicket, ticketToText } from './lib/ticket.js'
 import { sendToPrinter, printerError } from './lib/printer.js'
 import {
@@ -667,7 +667,6 @@ function PhoneVerifyBlock({ lang, customer, phone, showToast, onVerified, enable
   const t = useT(lang)
   const [step, setStep] = useState('idle') // idle | sending | sent | confirming
   const [code, setCode] = useState('')
-  const confirmationRef = useRef(null)
 
   if (!phoneVerificationAvailable || !enabled || !customer?.phone) return null
 
@@ -691,50 +690,50 @@ function PhoneVerifyBlock({ lang, customer, phone, showToast, onVerified, enable
     )
   }
 
-  function mapFirebaseError(e, forCode) {
-    const code = e?.code || ''
-    if (code.includes('invalid-phone-number')) return t.phoneVerifyErrInvalid
-    if (code.includes('too-many-requests')) return t.phoneVerifyErrRate
-    if (forCode && (code.includes('invalid-verification-code') || code.includes('code-expired'))) {
-      return t.phoneVerifyErrCode
-    }
+  // Mêmes textes que du temps de Firebase (0039) — seules les clés d'erreur
+  // changent (nos propres codes RPC, voir 0055, plutôt que ceux de Firebase).
+  function mapOtpError(e) {
+    const k = errorKey(e)
+    if (k === 'rate_limited' || k === 'too_many_attempts') return t.phoneVerifyErrRate
+    if (k === 'code_expired') return t.phoneVerifyErrCode
     return t.phoneVerifyErrGeneric
   }
 
   async function send() {
     setStep('sending')
     try {
-      confirmationRef.current = await sendPhoneCode(normalizePhone(saved), 'noti-recaptcha-container')
+      await sendOtpCode()
       setCode('')
       setStep('sent')
     } catch (e) {
       console.error('[Noti] envoi code vérification', e)
-      showToast(mapFirebaseError(e, false), 'error')
+      showToast(mapOtpError(e), 'error')
       setStep('idle')
     }
   }
 
   async function confirm() {
-    if (!confirmationRef.current) return
     setStep('confirming')
     try {
-      await confirmPhoneCode(confirmationRef.current, code)
-      const { error } = await supabase.rpc('mark_phone_verified')
-      if (error) throw error
+      const ok = await confirmOtpCode(code)
+      if (!ok) {
+        showToast(t.phoneVerifyErrCode, 'error')
+        setStep('sent')
+        return
+      }
       showToast(t.phoneVerifySuccess, 'ok')
       setCode('')
       setStep('idle')
       await onVerified?.()
     } catch (e) {
       console.error('[Noti] confirmation code vérification', e)
-      showToast(mapFirebaseError(e, true), 'error')
+      showToast(mapOtpError(e), 'error')
       setStep('sent')
     }
   }
 
   return (
     <div style={{ marginTop: -10, marginBottom: 16 }}>
-      <div id="noti-recaptcha-container" />
       {step === 'idle' || step === 'sending' ? (
         <>
           <div style={{ fontSize: 11.5, color: C.faint, marginBottom: 8 }}>{t.phoneVerifyIntro}</div>
@@ -795,17 +794,16 @@ function PhoneVerifyGate({ lang, customer, onVerified, onBypass }) {
   const [step, setStep] = useState('intro') // intro | sending | sent | confirming
   const [code, setCode] = useState('')
   const [error, setError] = useState('')
-  const confirmationRef = useRef(null)
 
-  function classify(e, forCode) {
-    const code = e?.code || ''
-    if (code.includes('invalid-phone-number')) return { message: t.phoneVerifyErrInvalid, blocking: true }
-    if (code.includes('too-many-requests')) return { message: t.phoneVerifyErrRate, blocking: true }
-    if (forCode && (code.includes('invalid-verification-code') || code.includes('code-expired'))) {
-      return { message: t.phoneVerifyErrCode, blocking: true }
-    }
-    // Tout le reste (réseau, panne Firebase, erreur interne, code inconnu) :
-    // un incident technique n'est pas une faute du client.
+  // rate_limited / code_expired : une faute attribuable au client (ou une
+  // attente légitime), on bloque et on le dit. Tout le reste — échec
+  // d'envoi SMS (sms_failed), fiche introuvable, réseau, code inconnu — est
+  // un incident technique qui n'est pas de son fait : on laisse entrer
+  // plutôt que de bloquer toute la soirée dessus.
+  function classify(e) {
+    const k = errorKey(e)
+    if (k === 'rate_limited' || k === 'too_many_attempts') return { message: t.phoneVerifyErrRate, blocking: true }
+    if (k === 'code_expired') return { message: t.phoneVerifyErrCode, blocking: true }
     return { message: null, blocking: false }
   }
 
@@ -813,12 +811,12 @@ function PhoneVerifyGate({ lang, customer, onVerified, onBypass }) {
     setError('')
     setStep('sending')
     try {
-      confirmationRef.current = await sendPhoneCode(normalizePhone(customer.phone), 'noti-recaptcha-entry')
+      await sendOtpCode()
       setCode('')
       setStep('sent')
     } catch (e) {
       console.error('[Noti] envoi code vérification (commande)', e)
-      const { message, blocking } = classify(e, false)
+      const { message, blocking } = classify(e)
       if (blocking) {
         setError(message)
         setStep('intro')
@@ -829,17 +827,19 @@ function PhoneVerifyGate({ lang, customer, onVerified, onBypass }) {
   }
 
   async function confirm() {
-    if (!confirmationRef.current) return
     setError('')
     setStep('confirming')
     try {
-      await confirmPhoneCode(confirmationRef.current, code)
-      const { error: rpcError } = await supabase.rpc('mark_phone_verified')
-      if (rpcError) throw rpcError
+      const ok = await confirmOtpCode(code)
+      if (!ok) {
+        setError(t.phoneVerifyErrCode)
+        setStep('sent')
+        return
+      }
       await onVerified()
     } catch (e) {
       console.error('[Noti] confirmation code vérification (commande)', e)
-      const { message, blocking } = classify(e, true)
+      const { message, blocking } = classify(e)
       if (blocking) {
         setError(message)
         setStep('sent')
@@ -858,7 +858,6 @@ function PhoneVerifyGate({ lang, customer, onVerified, onBypass }) {
         background: 'rgba(185,106,76,.06)',
       }}
     >
-      <div id="noti-recaptcha-entry" />
       <div style={{ fontSize: 14, fontWeight: 600, marginBottom: 8 }}>{t.phoneVerify}</div>
 
       {error && (
