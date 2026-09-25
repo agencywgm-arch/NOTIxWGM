@@ -3387,6 +3387,12 @@ function OrderingApp({
         onReloadCustomer={onReloadCustomer}
         showToast={showToast}
         phoneVerifyRequired={event?.phone_verify_required !== false}
+        pass={pass}
+        gifts={gifts}
+        promoCode={promoCode}
+        onRedeemCode={redeemCode}
+        onClearCode={clearCode}
+        onConvert={convertFoodToken}
       />
 
       <ReviewSheet
@@ -4261,6 +4267,12 @@ function ClientProfileSheet({
   orders = [],
   onLogout,
   phoneVerifyRequired = true,
+  pass,
+  gifts,
+  promoCode,
+  onRedeemCode,
+  onClearCode,
+  onConvert,
 }) {
   const t = useT(lang)
   const [phone, setPhone] = useState('')
@@ -4356,6 +4368,26 @@ function ClientProfileSheet({
           </div>
         )}
       </div>
+
+      {/* Retour terrain : le code n'était saisissable que depuis la carte —
+          un client déjà dans son espace, par ex. pour vérifier son numéro,
+          devait en ressortir pour l'activer. Même carte, même logique
+          (onRedeemCode etc. viennent d'OrderingApp), juste un second endroit
+          où la trouver. */}
+      {onRedeemCode && (
+        <div style={{ marginBottom: 16 }}>
+          <PromoCodeCard
+            lang={lang}
+            pass={pass}
+            gifts={gifts}
+            promoCode={promoCode}
+            onRedeemCode={onRedeemCode}
+            onClearCode={onClearCode}
+            onConvert={onConvert}
+            showToast={showToast}
+          />
+        </div>
+      )}
 
       <div style={{ ...S.card, marginBottom: 16 }}>
         <div style={{ ...S.label, marginBottom: 10 }}>{t.myOrdersHere}</div>
