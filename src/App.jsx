@@ -5923,8 +5923,12 @@ function AutoPrintDaemon({ event, venue, showToast }) {
       })
     // Repli si le canal reste muet (Wi-Fi capricieux) : sans lui, une coupure
     // silencieuse du WebSocket arrêterait l'impression sans que personne ne
-    // le remarque avant la fin de la soirée.
-    const poll = setInterval(run, 20000)
+    // le remarque avant la fin de la soirée. 45 s plutôt que 20 : ce n'est
+    // qu'un filet (le temps réel fait le travail en temps normal), et avec
+    // plusieurs tablettes ouvertes en même temps, chacune avec son propre
+    // sondage, les 20 s d'origine ajoutaient une charge en continu sur une
+    // base déjà tendue un soir de rush (voir aussi BarTab, CaisseTab, OrgaTab).
+    const poll = setInterval(run, 45000)
     return () => {
       supabase.removeChannel(ch)
       clearInterval(poll)
@@ -7097,12 +7101,15 @@ function BarTab({ event, venue, session, onEventChange, showToast }) {
       )
       // Une coupure de WebSocket fait manquer les commandes arrivées pendant
       // le trou. Sans resynchronisation à la reconnexion, elles n'apparaissent
-      // qu'au prochain sondage — jusqu'à 20 s d'attente pour un client, et une
-      // commande qu'on croit perdue. « Zéro perte » se joue ici.
+      // qu'au prochain sondage — jusqu'à 45 s d'attente pour un client, et une
+      // commande qu'on croit perdue. « Zéro perte » se joue ici. 45 s plutôt
+      // que 20 : simple filet derrière le temps réel, allégé pour ne pas
+      // cumuler les sondages de plusieurs tablettes en même temps un soir où
+      // la base est déjà sollicitée.
       .subscribe((status) => {
         if (status === 'SUBSCRIBED') load()
       })
-    const poll = setInterval(load, 20000)
+    const poll = setInterval(load, 45000)
     return () => {
       supabase.removeChannel(ch)
       clearInterval(poll)
@@ -8084,11 +8091,13 @@ function CaisseTab({ event, venue, showToast }) {
       })
     // La caisse n'avait AUCUN repli : une coupure de WebSocket la figeait
     // jusqu'au prochain changement d'onglet. En fin de soirée, c'est l'écran
-    // sur lequel on compte l'argent — il ne peut pas être muet.
+    // sur lequel on compte l'argent — il ne peut pas être muet. 45 s plutôt
+    // que 20 : simple filet, allégé pour la même raison que Bar/Orga/
+    // l'imprimante (plusieurs tablettes = plusieurs sondages cumulés).
     const poll = setInterval(() => {
       load()
       loadEntries()
-    }, 20000)
+    }, 45000)
     return () => {
       supabase.removeChannel(ch)
       clearInterval(poll)
@@ -9185,7 +9194,10 @@ function OrgaTab({ event, venue, showToast, onEventChange }) {
       .subscribe((status) => {
         if (status === 'SUBSCRIBED') load()
       })
-    const poll = setInterval(load, 25000)
+    // 45 s plutôt que 25 : même allègement que Bar/Caisse/l'imprimante, pour
+    // la même raison — un simple filet derrière le temps réel, pas une
+    // source principale de mise à jour.
+    const poll = setInterval(load, 45000)
     return () => {
       supabase.removeChannel(ch)
       clearInterval(poll)
