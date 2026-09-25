@@ -13733,6 +13733,116 @@ function PrintLogPanel({ event, showToast }) {
   )
 }
 
+/**
+ * Réinitialisation des commandes de la soirée — retour terrain : des
+ * commandes de test se mélangent aux vraies pendant les réglages avant
+ * ouverture, et jusqu'ici la seule façon de les nettoyer était de me
+ * demander du SQL à coller dans Supabase à chaque fois. Réservé au
+ * propriétaire du lieu (ROLE_TABS), et scopé STRICTEMENT à CET événement —
+ * jamais les autres soirées du lieu, jamais un autre lieu.
+ *
+ * Pas de distinction « vraie » / « fausse » commande possible ici (rien ne
+ * les différencie en base) : c'est tout ou rien pour cette soirée, d'où la
+ * confirmation par saisie plutôt qu'un simple bouton — irréversible, comme
+ * la suppression en base qu'on donnait par SQL plus tôt ce soir.
+ */
+function DangerZoneCard({ event, onReload, showToast }) {
+  const [open, setOpen] = useState(false)
+  const [confirmText, setConfirmText] = useState('')
+  const [busy, setBusy] = useState(false)
+  const [count, setCount] = useState(null)
+
+  useEffect(() => {
+    if (!open) return
+    let dead = false
+    supabase
+      .from('orders')
+      .select('id', { count: 'exact', head: true })
+      .eq('event_id', event.id)
+      .then(({ count: c }) => {
+        if (!dead) setCount(c ?? 0)
+      })
+    return () => {
+      dead = true
+    }
+  }, [open, event.id])
+
+  async function reset() {
+    if (confirmText.trim().toUpperCase() !== 'RESET') return
+    setBusy(true)
+    const { error } = await supabase.from('orders').delete().eq('event_id', event.id)
+    setBusy(false)
+    if (error) return showToast(frError(error), 'error')
+    showToast('Commandes de cette soirée supprimées — chiffre d’affaires remis à zéro.', 'ok')
+    setOpen(false)
+    setConfirmText('')
+    onReload?.()
+  }
+
+  return (
+    <div style={{ ...S.card, marginBottom: 14, border: `1.5px solid ${C.danger}` }}>
+      <div style={{ ...S.h2, marginBottom: 6, color: C.danger }}>⚠️ Zone dangereuse</div>
+      <div style={{ fontSize: 12, color: C.dim, marginBottom: 14, lineHeight: 1.55 }}>
+        Supprime <strong>toutes</strong> les commandes de « {event.name} » — et donc le chiffre
+        d’affaires, qui se recalcule toujours en direct depuis elles. Utile pour repartir de zéro
+        après des commandes de test. Irréversible. N’affecte que cette soirée : ni les autres
+        soirées du lieu, ni les fiches clients.
+      </div>
+
+      {!open ? (
+        <button
+          onClick={() => setOpen(true)}
+          style={{ ...S.btnGhost, borderColor: C.danger, color: C.danger }}
+        >
+          Réinitialiser les commandes de cette soirée
+        </button>
+      ) : (
+        <>
+          <div style={{ marginBottom: 12 }}>
+            <Banner tone="danger">
+              {count === null
+                ? 'Chargement…'
+                : `${count} commande${count > 1 ? 's' : ''} seront supprimées définitivement.`}
+            </Banner>
+          </div>
+          <Field label='Tapez "RESET" pour confirmer'>
+            <input
+              style={S.input}
+              value={confirmText}
+              onChange={(e) => setConfirmText(e.target.value)}
+              placeholder="RESET"
+              autoComplete="off"
+            />
+          </Field>
+          <div style={{ display: 'flex', gap: 8, marginTop: 12 }}>
+            <button
+              onClick={() => {
+                setOpen(false)
+                setConfirmText('')
+              }}
+              style={{ ...S.btnGhost, flex: 1 }}
+            >
+              Annuler
+            </button>
+            <button
+              disabled={confirmText.trim().toUpperCase() !== 'RESET' || busy || count === null}
+              onClick={reset}
+              style={{
+                ...S.btn,
+                flex: 1,
+                background: C.danger,
+                opacity: confirmText.trim().toUpperCase() !== 'RESET' || busy ? 0.5 : 1,
+              }}
+            >
+              {busy ? '…' : 'Supprimer définitivement'}
+            </button>
+          </div>
+        </>
+      )}
+    </div>
+  )
+}
+
 function ReglagesTab({ venue, event, session, role, onReload, showToast }) {
   const [v, setV] = useState(venue)
   const [e, setE] = useState(event)
@@ -13983,6 +14093,7 @@ function ReglagesTab({ venue, event, session, role, onReload, showToast }) {
       {(role === 'owner' || role === 'manager') && (
         <PresentationLinksCard venue={venue} showToast={showToast} />
       )}
+      {role === 'owner' && <DangerZoneCard event={event} onReload={onReload} showToast={showToast} />}
 
       <div style={{ ...S.card, marginBottom: 14 }}>
         <div style={{ ...S.h2, marginBottom: 14 }}>Lieu & mentions légales</div>
