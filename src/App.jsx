@@ -7150,7 +7150,12 @@ function BarTab({ event, venue, session, showToast }) {
       // était du poids mort, et c'est le gros du volume en fin de soirée.
       .neq('status', 'PAID')
       .or(`status.in.(AWAITING_PAYMENT,RECEIVED,IN_PREP,READY),created_at.gte.${depuis}`)
-      .order('created_at', { ascending: true })
+      // Plus récente en premier — retour terrain : en colonnes, une nouvelle
+      // commande arrivant tout en bas d'une colonne déjà longue passait
+      // inaperçue sans scroller. Le mode cadrans garde son propre tri
+      // (premier arrivé, premier servi) : il a son rang affiché précisément
+      // pour indiquer l'ordre de service, ce que ce changement ne touche pas.
+      .order('created_at', { ascending: false })
     setOrders(data || [])
     setLoading(false)
   }, [event.id])
