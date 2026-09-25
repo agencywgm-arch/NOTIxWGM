@@ -789,7 +789,7 @@ function PhoneVerifyBlock({ lang, customer, phone, showToast, onVerified, enable
  * saisie (numéro invalide, mauvais code, trop de tentatives) gardent la porte
  * fermée.
  */
-function PhoneVerifyGate({ lang, customer, onVerified, onBypass }) {
+function PhoneVerifyGate({ lang, customer, onVerified, onBypass, onEditPhone }) {
   const t = useT(lang)
   const [step, setStep] = useState('intro') // intro | sending | sent | confirming
   const [code, setCode] = useState('')
@@ -915,6 +915,25 @@ function PhoneVerifyGate({ lang, customer, onVerified, onBypass }) {
           </button>
         </>
       )}
+
+      {onEditPhone && (
+        <button
+          onClick={onEditPhone}
+          disabled={step === 'sending' || step === 'confirming'}
+          style={{
+            display: 'block',
+            margin: '10px auto 0',
+            background: 'none',
+            border: 'none',
+            color: C.dim,
+            fontSize: 11.5,
+            textDecoration: 'underline',
+            cursor: 'pointer',
+          }}
+        >
+          {t.phoneVerifyChangeNumber}
+        </button>
+      )}
     </div>
   )
 }
@@ -925,14 +944,20 @@ function PhoneVerifyGate({ lang, customer, onVerified, onBypass }) {
  * même logo, même carte — pour se lire comme la suite immédiate de l'entrée,
  * et non comme une interruption.
  */
-function PhoneVerifyScreen({ lang, customer, onVerified, onBypass }) {
+function PhoneVerifyScreen({ lang, customer, onVerified, onBypass, onEditPhone }) {
   return (
     <div style={{ ...S.page, padding: 26, display: 'flex', flexDirection: 'column', justifyContent: 'center' }}>
       <Keyframes />
       <div style={{ textAlign: 'center', marginBottom: 26 }}>
         <Logo size={1.1} />
       </div>
-      <PhoneVerifyGate lang={lang} customer={customer} onVerified={onVerified} onBypass={onBypass} />
+      <PhoneVerifyGate
+        lang={lang}
+        customer={customer}
+        onVerified={onVerified}
+        onBypass={onBypass}
+        onEditPhone={onEditPhone}
+      />
     </div>
   )
 }
@@ -1722,6 +1747,7 @@ function ClientApp({ scanPointId, session }) {
           showToast(dict(lang).phoneVerifyBypassed, 'info')
           setVerifyBypassed(true)
         }}
+        onEditPhone={() => setStep('identify')}
       />
     )
 
