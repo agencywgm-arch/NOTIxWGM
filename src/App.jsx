@@ -5727,6 +5727,119 @@ function tabsForRole(role) {
   return STAFF_TABS.filter((t) => allowed.includes(t.k))
 }
 
+/**
+ * Impression silencieuse dès qu'une commande arrive — montée une fois pour
+ * toute la session staff, jamais à l'intérieur d'un onglet, pour qu'elle
+ * continue de tourner quel que soit l'écran ouvert sur la tablette (Bar,
+ * Caisse, Réglages…). C'est le chemin voulu : le client envoie sa commande,
+ * le ticket sort tout seul, sans qu'un membre du staff ait à cliquer quoi
+ * que ce soit. La seule autre façon qu'un ticket sorte est le bouton
+ * « Réimprimer » sur la fiche d'une commande — toujours marqué DUPLICATA.
+ *
+ * Limite connue, assumée : ceci tourne dans l'onglet du navigateur — la
+ * tablette doit rester allumée avec l'app ouverte (elle n'a pas besoin
+ * d'être au premier plan, ni sur le bon onglet du SaaS, mais elle doit être
+ * en vie). Imprimer même tablette éteinte demanderait que l'imprimante
+ * aille chercher elle-même ses tickets sur un serveur (Epson « Server
+ * Direct Print », voir printer.js) — un service cloud à activer côté Epson,
+ * pas quelque chose qu'on peut ajouter seulement côté code.
+ *
+ * Ne rend rien à l'écran : les échecs remontent par showToast (déjà visible
+ * depuis n'importe quel onglet), pas par une bannière locale à une vue.
+ */
+function AutoPrintDaemon({ event, venue, showToast }) {
+  const printing = useRef(false)
+  const failedOnce = useRef(false)
+
+  const run = useCallback(async () => {
+    if (!venue?.printer_url || printing.current || !event?.id) return
+    const { data } = await supabase
+      .from('orders')
+      .select('*, order_items ( *, products ( universe ) ), customers ( first_name, last_name, phone, tags )')
+      .eq('event_id', event.id)
+      .is('printed_at', null)
+      .not('status', 'in', '(CANCELLED,AWAITING_PAYMENT)')
+    const queue = data || []
+    if (!queue.length) return
+
+    printing.current = true
+    try {
+      for (const order of queue) {
+        const { data: won, error } = await supabase.rpc('claim_ticket_print', { p_order: order.id })
+        if (error || !won) continue // une autre tablette s'en charge
+
+        const res = await sendToPrinter(buildTicket({ order, event, venue }), { url: venue.printer_url })
+        await supabase.rpc('log_ticket_print', {
+          p_order: order.id,
+          p_trigger: 'arrival_auto',
+          p_result: res.ok ? 'ok' : res.ambiguous ? 'ambiguous' : 'fail',
+          p_reason: res.ok ? null : res.reason,
+        })
+        if (!res.ok) {
+          // Sur un échec AMBIGU (délai dépassé — l'imprimante a peut-être
+          // quand même imprimé, juste lentement) on NE relâche PAS la
+          // réservation : la relâcher redéclenchait aussitôt une nouvelle
+          // tentative via l'abonnement temps réel, qui pouvait retimeouter
+          // et relâcher à son tour — une boucle d'impression sans fin,
+          // vécue en soirée. Seul un refus net (code d'erreur, imprimante
+          // qui répond « non ») libère la commande pour une vraie reprise.
+          if (!res.ambiguous) await supabase.rpc('release_ticket_print', { p_order: order.id })
+          // Un seul avertissement tant que ça ne remarche pas : sinon chaque
+          // commande qui arrive spamme le même message.
+          if (!failedOnce.current) {
+            failedOnce.current = true
+            showToast(
+              res.ambiguous
+                ? `Imprimante : ${res.reason} Vérifiez si le ticket ${order.pickup_code} est sorti avant de réimprimer.`
+                : `Imprimante : ${res.reason}`,
+              'error'
+            )
+          }
+          break // imprimante muette : inutile d'insister sur les suivantes
+        }
+        failedOnce.current = false
+      }
+    } catch (e) {
+      // Filet identique à celui du transport : un incident imprévu ne doit
+      // jamais s'éteindre en silence pour le reste de la soirée.
+      if (!failedOnce.current) {
+        failedOnce.current = true
+        showToast(`Imprimante : ${printerError(e)}`, 'error')
+      }
+    } finally {
+      printing.current = false
+    }
+  }, [event, venue, showToast])
+
+  useEffect(() => {
+    if (!venue?.printer_url || !event?.id) return
+    run()
+    // Abonnement temps réel, propre à ce démon : indépendant de celui de
+    // BarTab, qui sert l'affichage et peut être démonté/remonté au gré de la
+    // navigation. Celui-ci ne l'est jamais tant que la session staff dure.
+    const ch = supabase
+      .channel(`autoprint-${event.id}`)
+      .on(
+        'postgres_changes',
+        { event: '*', schema: 'public', table: 'orders', filter: `event_id=eq.${event.id}` },
+        () => run()
+      )
+      .subscribe((status) => {
+        if (status === 'SUBSCRIBED') run()
+      })
+    // Repli si le canal reste muet (Wi-Fi capricieux) : sans lui, une coupure
+    // silencieuse du WebSocket arrêterait l'impression sans que personne ne
+    // le remarque avant la fin de la soirée.
+    const poll = setInterval(run, 20000)
+    return () => {
+      supabase.removeChannel(ch)
+      clearInterval(poll)
+    }
+  }, [venue?.printer_url, event?.id, run])
+
+  return null
+}
+
 function StaffApp({ session }) {
   const [venues, setVenues] = useState(null)
   const [venueId, setVenueId] = useState(LS.get('noti:venue', null))
@@ -5866,6 +5979,7 @@ function StaffApp({ session }) {
   return (
     <div style={{ ...S.page, paddingBottom: 96 }}>
       <Keyframes />
+      <AutoPrintDaemon event={event} venue={venue} showToast={showToast} />
 
       <div
         style={{
@@ -6917,69 +7031,10 @@ function BarTab({ event, venue, session, onEventChange, showToast }) {
     }
   }, [orders, showToast])
 
-  // Impression du ticket « En prépa », VOLONTAIREMENT non attendue par move()
-  // (voir plus bas) : l'imprimante peut mettre plusieurs secondes à répondre
-  // (jusqu'au timeoutMs de sendToPrinter), et faire attendre tout l'écran
-  // staff sur ce délai avant de faire bouger la commande à l'écran rendait
-  // chaque clic « En prépa » poussif. Le ticket part en tâche de fond dès
-  // que le statut est enregistré ; un souci d'impression remonte quand même,
-  // juste après coup, via showToast.
-  async function printPrepTicket(order) {
-    try {
-      const { data: won, error: claimErr } = await supabase.rpc('claim_prep_ticket_print', {
-        p_order: order.id,
-      })
-      if (claimErr || !won) return
-      const res = await sendToPrinter(buildTicket({ order, event, venue }), {
-        url: venue.printer_url,
-      })
-      await supabase.rpc('log_ticket_print', {
-        p_order: order.id,
-        p_trigger: 'en_prepa',
-        p_result: res.ok ? 'ok' : res.ambiguous ? 'ambiguous' : 'fail',
-        p_reason: res.ok ? null : res.reason,
-      })
-      if (!res.ok) {
-        // Un délai dépassé ne prouve pas que l'impression a raté (voir
-        // printer.js) : on ne relâche pas la réservation dans ce cas, sinon
-        // un simple ralentissement redéclenche un second ticket.
-        if (!res.ambiguous) await supabase.rpc('release_prep_ticket_print', { p_order: order.id })
-        showToast(
-          res.ambiguous
-            ? `Imprimante : ${res.reason} Vérifiez si le ticket ${order.pickup_code} est sorti avant de réimprimer.`
-            : `Imprimante : ${res.reason}`,
-          'error'
-        )
-      }
-    } catch (e) {
-      showToast(`Imprimante : ${printerError(e)}`, 'error')
-    }
-  }
-
   async function move(order, status, opts = {}) {
     unlockAudio()
     const { error } = await supabase.from('orders').update({ status }).eq('id', order.id)
     if (error) return showToast(frError(error), 'error')
-
-    // Seul déclencheur d'impression qui existe désormais (0054) : le clic
-    // « En prépa », un geste volontaire toujours posé au bar. Il n'y a plus
-    // de ticket silencieux à l'arrivée — c'est lui qui produisait des
-    // tickets « fantômes » au bar quand une commande food était encaissée à
-    // la caisse (start_food_prep la faisait passer RECEIVED sans que
-    // personne n'ait cliqué « imprimer »). claim_prep_ticket_print garantit
-    // un seul ticket par commande ; chaque tentative est tracée dans
-    // print_log pour qu'on sache toujours QUI/QUOI a déclenché un ticket.
-    //
-    // !opts.back exclut explicitement le bouton ↩ (retour de « Prête » à
-    // « En prépa ») : ce n'est pas une nouvelle décision de préparer, juste
-    // une correction de statut, ça ne doit jamais réimprimer — même si un
-    // jour la garde côté base changeait, celle-ci ne dépend d'aucune requête
-    // réseau pour être sûre.
-    //
-    // Pas de `await` ici : voir printPrepTicket ci-dessus.
-    if (status === 'IN_PREP' && !opts.back && venue?.printer_url) {
-      printPrepTicket(order)
-    }
 
     if (status === 'READY') {
       notify({
@@ -7051,11 +7106,11 @@ function BarTab({ event, venue, session, onEventChange, showToast }) {
   }
 
   // Réimpression volontaire sur l'imprimante réseau, hors de la réservation
-  // automatique (claim_prep_ticket_print) : pour un ticket perdu, déchiré ou
-  // mal lu, sans passer par « En prépa » une seconde fois. Toujours marquée
-  // DUPLICATA sur le papier (ticket.js) pour qu'on ne prépare jamais deux
-  // fois la même commande en la confondant avec une nouvelle arrivée, et
-  // tracée dans print_log comme telle.
+  // automatique (claim_ticket_print, dans AutoPrintDaemon) : pour un ticket
+  // perdu, déchiré ou mal lu. Seule autre façon qu'un ticket sorte, en
+  // dehors de l'arrivée automatique. Toujours marquée DUPLICATA sur le
+  // papier (ticket.js) pour qu'on ne prépare jamais deux fois la même
+  // commande, et tracée dans print_log comme telle.
   const [reprinting, setReprinting] = useState(null)
   async function reprintDuplicate(order) {
     if (!venue?.printer_url) return
@@ -12643,10 +12698,12 @@ function PrinterCard({ venue, onReload, showToast }) {
     <div style={{ ...S.card, marginBottom: 14 }}>
       <div style={{ ...S.h2, marginBottom: 6 }}>Impression des tickets</div>
       <div style={{ fontSize: 12, color: C.dim, marginBottom: 14, lineHeight: 1.55 }}>
-        Un seul moment d'impression : dès qu'une commande passe <strong>« En prépa »</strong> au bar,
-        un ticket de préparation sort — jamais avant (une commande qui vient d'arriver, ou qui vient
-        d'être réglée à la caisse, n'imprime rien toute seule), et jamais deux fois pour la même
-        commande. Plusieurs tablettes peuvent rester allumées : une seule imprime.
+        Un ticket sort automatiquement dès qu'une commande arrive — sans qu'un barman ait besoin de
+        cliquer quoi que ce soit, quel que soit l'onglet ouvert sur la tablette — et jamais deux fois
+        pour la même commande. Plusieurs tablettes peuvent rester allumées : une seule imprime. La
+        tablette doit rester allumée avec l'app ouverte ; imprimer tablette éteinte demanderait que
+        l'imprimante elle-même aille chercher ses tickets sur un serveur (Epson Server Direct Print),
+        un service à activer côté Epson, pas seulement ici.
       </div>
       <div style={{ fontSize: 12, color: C.dim, marginBottom: 14, lineHeight: 1.55 }}>
         Un ticket perdu ou mal lu se réimprime depuis la fiche de la commande (bouton « ⋯ » au bar) —
@@ -12711,8 +12768,9 @@ function PrinterCard({ venue, onReload, showToast }) {
 }
 
 const PRINT_TRIGGER_LABEL = {
-  en_prepa: 'Clic « En prépa »',
+  arrival_auto: 'Automatique (arrivée de la commande)',
   reprint_duplicata: 'Réimpression manuelle (duplicata)',
+  en_prepa: 'Clic « En prépa » (ancien mode)',
 }
 const PRINT_RESULT_LABEL = { ok: 'Imprimé', fail: 'Échec', ambiguous: 'Délai dépassé — à vérifier' }
 

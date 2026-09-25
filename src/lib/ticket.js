@@ -60,10 +60,11 @@ const money = (n) => `${Number(n ?? 0).toFixed(2).replace('.', ',')} EUR`
  * nom du lieu, pour qu'on ne prépare jamais deux fois la même commande en
  * la confondant avec une nouvelle arrivée.
  *
- * Hors duplicata, un bandeau CONFIRMATION DE PREPARATION en tête à la place :
- * ce ticket n'existe QUE parce qu'un barman a cliqué « En prépa » — ce
- * bandeau le dit explicitement, pour qu'un ticket sans lui saute aux yeux
- * comme anormal si le bug des tickets fantômes revenait un jour.
+ * Hors duplicata, un bandeau NOUVELLE COMMANDE en tête à la place : ce
+ * ticket sort automatiquement dès que la commande arrive (AutoPrintDaemon,
+ * App.jsx), sans qu'un barman ait à cliquer quoi que ce soit — ce bandeau
+ * le dit explicitement, pour qu'un ticket sans lui saute aux yeux comme
+ * anormal.
  */
 export function buildTicket({ order, event, venue, duplicate = false }) {
   const L = []
@@ -84,7 +85,7 @@ export function buildTicket({ order, event, venue, duplicate = false }) {
     // Volontairement court : les lignes pleine largeur en gras/em ont déjà
     // débordé une fois (voir plus haut) — mieux vaut une marge large que de
     // retenter au plus près des 26 caractères.
-    L.push({ t: 'title', v: 'PREPARATION CONFIRMEE' })
+    L.push({ t: 'title', v: 'NOUVELLE COMMANDE' })
   }
   L.push({ t: 'sep' })
 
