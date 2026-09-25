@@ -7217,15 +7217,36 @@ function BarTab({ event, venue, session, onEventChange, showToast }) {
     move(order, 'IN_PREP')
   }
 
-  // Relance de retrait : message urgent adressé au client, horodaté côté base
-  // (voir nudge_pickup dans 0022).
+  // Relance de retrait : message urgent adressé au client. Passe désormais par
+  // notify() (push.js) plutôt que par le seul nudge_pickup (0022), qui
+  // n'écrivait que le message interne à l'app — jamais de vraie notif push ni
+  // de SMS. notify() écrit ce même message ET pousse sur les deux canaux
+  // configurés (best-effort, ne bloque jamais : voir push.js). Le calcul de
+  // l'attente est fait ici plutôt que côté base pour rester sur ce seul appel.
   const [nudging, setNudging] = useState(null)
   async function nudge(order) {
     setNudging(order.id)
-    const { error } = await supabase.rpc('nudge_pickup', { p_order: order.id, p_body: null })
+    const waitStart = order.ready_at || order.created_at
+    const waiting = Math.max(0, Math.round((Date.now() - new Date(waitStart).getTime()) / 60000))
+    const res = await notify({
+      eventId: event.id,
+      kind: 'status',
+      customerId: order.customer_id,
+      orderId: order.id,
+      title: 'Votre commande vous attend',
+      body: `Votre commande ${order.pickup_code} vous attend au bar depuis ${waiting} min. Merci de venir la récupérer.`,
+      urgent: true,
+      requireInteraction: true,
+      channels: ['push', 'sms'],
+    })
     setNudging(null)
-    if (error) return showToast(frError(error), 'error')
-    showToast(`Relance envoyée pour ${order.pickup_code}.`, 'ok')
+    if (!res) return showToast('Relance : envoi impossible pour le moment.', 'error')
+    showToast(
+      res.degraded
+        ? `Relance envoyée pour ${order.pickup_code} — message interne seulement (SMS/push pas encore configurés).`
+        : `Relance envoyée pour ${order.pickup_code} (${res.sms} SMS, ${res.push} notif push).`,
+      'ok'
+    )
   }
 
   async function savePrep(v) {
