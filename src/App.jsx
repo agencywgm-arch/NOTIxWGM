@@ -7348,10 +7348,13 @@ function BarTab({ event, venue, session, showToast }) {
   // Ordre des colonnes (mode « colonnes »), mémorisé par poste — comme le
   // mode d'affichage ou la sonnerie, c'est une préférence de tablette, pas
   // une donnée de soirée. Retour terrain : certains postes veulent « Reçues »
-  // à droite plutôt qu'à gauche. Réordonnable par un appui long sur
-  // l'en-tête d'une colonne puis un glissement — un simple clic/tap ne
-  // déclenche rien, pour ne jamais gêner le défilement horizontal normal de
-  // la rangée quand il y a plus de colonnes que d'écran.
+  // à droite plutôt qu'à gauche.
+  //
+  // D'abord tenté au glisser (appui long + déplacement, Pointer Events) —
+  // retour terrain : peu fiable et peu lisible au toucher sur tablette, en
+  // plus de gêner la lecture pendant le geste. Remplacé par un bouton
+  // « Réorganiser » qui fait apparaître des flèches ◀ ▶ sur chaque colonne :
+  // un tap, un résultat immédiat et visible, rien à deviner.
   const [colOrder, setColOrder] = useState(() => {
     const saved = LS.get('noti:barColOrder', null)
     if (!Array.isArray(saved)) return BAR_COL_KEYS
@@ -7359,60 +7362,17 @@ function BarTab({ event, venue, session, showToast }) {
     return [...kept, ...BAR_COL_KEYS.filter((k) => !kept.includes(k))]
   })
   useEffect(() => LS.set('noti:barColOrder', colOrder), [colOrder])
+  const [reorderCols, setReorderCols] = useState(false)
 
-  const [dragCol, setDragCol] = useState(null)
-  const [overCol, setOverCol] = useState(null)
-  const holdTimer = useRef(null)
-  const dragStart = useRef(null)
-  const colRefs = useRef({})
-
-  function colPointerDown(key, e) {
-    if (e.pointerType === 'mouse' && e.button !== 0) return
-    dragStart.current = { x: e.clientX, y: e.clientY }
-    clearTimeout(holdTimer.current)
-    const el = e.currentTarget
-    const pointerId = e.pointerId
-    holdTimer.current = setTimeout(() => {
-      try {
-        el.setPointerCapture(pointerId)
-      } catch (_) {}
-      setDragCol(key)
-      setOverCol(key)
-    }, 350)
-  }
-  function colPointerMove(e) {
-    if (!dragStart.current) return
-    const dx = Math.abs(e.clientX - dragStart.current.x)
-    const dy = Math.abs(e.clientY - dragStart.current.y)
-    if (!dragCol) {
-      // Bougé avant la fin de l'appui long : c'est un geste de défilement,
-      // pas une intention de glisser — on laisse tomber sans rien déclencher.
-      if (dx > 8 || dy > 8) {
-        clearTimeout(holdTimer.current)
-        dragStart.current = null
-      }
-      return
-    }
-    e.preventDefault()
-    const hit = Object.entries(colRefs.current).find(([, el]) => {
-      if (!el) return false
-      const r = el.getBoundingClientRect()
-      return e.clientX >= r.left && e.clientX <= r.right
+  function moveCol(key, dir) {
+    setColOrder((prev) => {
+      const i = prev.indexOf(key)
+      const j = i + dir
+      if (i < 0 || j < 0 || j >= prev.length) return prev
+      const next = [...prev]
+      ;[next[i], next[j]] = [next[j], next[i]]
+      return next
     })
-    setOverCol(hit ? hit[0] : dragCol)
-  }
-  function colPointerUp() {
-    clearTimeout(holdTimer.current)
-    if (dragCol && overCol && dragCol !== overCol) {
-      setColOrder((prev) => {
-        const next = prev.filter((k) => k !== dragCol)
-        next.splice(next.indexOf(overCol), 0, dragCol)
-        return next
-      })
-    }
-    dragStart.current = null
-    setDragCol(null)
-    setOverCol(null)
   }
 
   async function printTicket(order) {
@@ -7618,55 +7578,97 @@ function BarTab({ event, venue, session, showToast }) {
         />
       )}
 
-      <div style={{ display: mode === 'colonnes' ? 'flex' : 'none', gap: 12, overflowX: 'auto', paddingBottom: 8 }}>
+      {mode === 'colonnes' && (
+        <div style={{ display: 'flex', justifyContent: 'flex-end', marginBottom: 10 }}>
+          <button
+            onClick={() => setReorderCols((v) => !v)}
+            style={{
+              ...S.chip,
+              minHeight: 38,
+              padding: '6px 14px',
+              fontSize: 12.5,
+              ...(reorderCols
+                ? { background: C.text, color: '#fff', borderColor: C.text }
+                : null),
+            }}
+          >
+            {reorderCols ? '✓ Terminé' : '↔ Réorganiser les colonnes'}
+          </button>
+        </div>
+      )}
+
+      <div style={{ display: mode === 'colonnes' ? 'flex' : 'none', gap: 14, overflowX: 'auto', paddingBottom: 8 }}>
         {colOrder
           .map((key) => ({
             key,
             ...BAR_COLUMNS[key],
             list: { received: receivedShown, prep: inPrep, ready: readyShown, pickedup: pickedUp }[key],
           }))
-          .map((col) => (
+          .map((col, i, arr) => (
           <div
             key={col.key}
-            ref={(el) => (colRefs.current[col.key] = el)}
             style={{
               minWidth: 300,
               flex: '1 0 300px',
-              transition: dragCol ? 'none' : 'transform .15s ease',
-              opacity: dragCol === col.key ? 0.45 : 1,
+              // Fond + bordure propres à chaque colonne : sans ça, la limite
+              // entre deux colonnes ne tenait qu'à un `gap` de quelques
+              // pixels — invisible sous l'éclairage d'une soirée (constaté
+              // sur les tablettes du bar, confondu avec un chevauchement).
+              background: C.creamSoft,
+              border: `1.5px solid ${C.line}`,
+              borderRadius: 18,
+              padding: 12,
             }}
           >
             <div
-              onPointerDown={(e) => colPointerDown(col.key, e)}
-              onPointerMove={colPointerMove}
-              onPointerUp={colPointerUp}
-              onPointerCancel={colPointerUp}
-              title="Rester appuyé pour déplacer cette colonne"
               style={{
                 display: 'flex',
                 alignItems: 'center',
                 gap: 8,
                 paddingBottom: 8,
                 marginBottom: 10,
-                borderBottom: `2px solid ${
-                  overCol === col.key && dragCol && dragCol !== col.key ? col.color : alpha(col.color, 27)
-                }`,
-                cursor: 'grab',
-                touchAction: 'none',
-                userSelect: 'none',
+                borderBottom: `2px solid ${alpha(col.color, 27)}`,
               }}
             >
-              <span style={{ color: C.faint, fontSize: 13, lineHeight: 1 }}>⠿</span>
-              <div style={{ width: 8, height: 8, borderRadius: 4, background: col.color }} />
-              <div style={{ fontFamily: FONT.label, fontWeight: 600, letterSpacing: 1 }}>
+              <div style={{ width: 8, height: 8, borderRadius: 4, background: col.color, flexShrink: 0 }} />
+              <div style={{ fontFamily: FONT.label, fontWeight: 600, letterSpacing: 1, fontSize: 13 }}>
                 {col.title.toUpperCase()}
               </div>
               <div style={{ marginLeft: 'auto', color: C.faint, fontWeight: 600 }}>{col.list.length}</div>
+              {reorderCols && (
+                <div style={{ display: 'flex', gap: 4, marginLeft: 8 }}>
+                  <button
+                    onClick={() => moveCol(col.key, -1)}
+                    disabled={i === 0}
+                    style={{ ...stepBtn, width: 32, height: 32, fontSize: 14, opacity: i === 0 ? 0.3 : 1 }}
+                  >
+                    ◀
+                  </button>
+                  <button
+                    onClick={() => moveCol(col.key, 1)}
+                    disabled={i === arr.length - 1}
+                    style={{ ...stepBtn, width: 32, height: 32, fontSize: 14, opacity: i === arr.length - 1 ? 0.3 : 1 }}
+                  >
+                    ▶
+                  </button>
+                </div>
+              )}
             </div>
 
             <div style={{ display: 'grid', gap: 10 }}>
               {col.list.length === 0 && (
-                <div style={{ color: C.faint, fontSize: 12, textAlign: 'center', padding: '16px 0' }}>—</div>
+                <div
+                  style={{
+                    color: C.faint,
+                    fontSize: 12.5,
+                    textAlign: 'center',
+                    padding: '28px 0',
+                    border: `1.5px dashed ${C.line}`,
+                    borderRadius: 12,
+                  }}
+                >
+                  Aucune commande
+                </div>
               )}
               {col.list.map((o) => (
                 <div
