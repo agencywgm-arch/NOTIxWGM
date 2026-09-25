@@ -5809,16 +5809,25 @@ function AutoPrintDaemon({ event, venue, showToast }) {
   // ne pas laisser deux boucles tourner en parallèle pour rien.
   const printingNow = useRef(false)
   const [ui, setUi] = useState(null) // { mode: 'confirm', queue } | { mode: 'printing', code, done, total }
+  // Profondeur de la file, tenue à jour en continu (pas seulement pendant un
+  // envoi actif) — retour du terrain : l'impression étant devenue lente (le
+  // même Wi-Fi chargé que le reste), la boîte « impression en cours »
+  // n'apparaissait que par éclairs entre deux tickets, sans rien montrer le
+  // reste du temps. Ce compteur reste affiché tant qu'il reste des tickets
+  // non imprimés, même entre deux tentatives ou après un échec.
+  const [pendingCount, setPendingCount] = useState(0)
 
   const printBatch = useCallback(
     async (orders) => {
       if (printingNow.current) return
       printingNow.current = true
+      setPendingCount(orders.length)
       try {
         for (let i = 0; i < orders.length; i++) {
           const order = orders[i]
           setUi({ mode: 'printing', code: order.pickup_code, done: i, total: orders.length })
           const outcome = await printArrivalTicket({ order, event, venue, trigger: 'arrival_auto', showToast })
+          setPendingCount(orders.length - i - 1)
           if (outcome === 'failed') {
             failedOnce.current = true
             break // imprimante muette : inutile d'insister sur les suivantes
@@ -5850,6 +5859,7 @@ function AutoPrintDaemon({ event, venue, showToast }) {
         .not('status', 'in', '(CANCELLED,AWAITING_PAYMENT)')
         .order('created_at', { ascending: true })
       const queue = data || []
+      setPendingCount(queue.length)
       if (!queue.length) {
         busy.current = false
         return
@@ -5891,6 +5901,7 @@ function AutoPrintDaemon({ event, venue, showToast }) {
     if (!venue?.printer_auto || !venue?.printer_url) {
       busy.current = false
       setUi(null)
+      setPendingCount(0)
     }
   }, [venue?.printer_auto, venue?.printer_url])
 
@@ -5920,8 +5931,6 @@ function AutoPrintDaemon({ event, venue, showToast }) {
     }
   }, [venue?.printer_auto, venue?.printer_url, event?.id, run])
 
-  if (!ui) return null
-
   const box = {
     position: 'fixed',
     left: 16,
@@ -5940,7 +5949,7 @@ function AutoPrintDaemon({ event, venue, showToast }) {
     boxShadow: '0 12px 36px rgba(28,42,74,.16)',
   }
 
-  if (ui.mode === 'printing') {
+  if (ui?.mode === 'printing') {
     return (
       <div style={box} className="no-print">
         🖨 Impression en cours… {ui.code} ({ui.done + 1}/{ui.total})
@@ -5948,22 +5957,38 @@ function AutoPrintDaemon({ event, venue, showToast }) {
     )
   }
 
-  // mode === 'confirm' : rafale au-delà du seuil, on laisse la main au staff.
-  return (
-    <div style={box} className="no-print">
-      <div style={{ marginBottom: 10 }}>
-        🖨 {ui.queue.length} tickets en attente d'impression — trop pour sortir d'un coup.
+  if (ui?.mode === 'confirm') {
+    // Rafale au-delà du seuil, on laisse la main au staff.
+    return (
+      <div style={box} className="no-print">
+        <div style={{ marginBottom: 10 }}>
+          🖨 {ui.queue.length} tickets en attente d'impression — trop pour sortir d'un coup.
+        </div>
+        <div style={{ display: 'flex', gap: 8 }}>
+          <button onClick={confirmNext} style={{ ...S.btnGhost, flex: 1, minHeight: 44 }}>
+            Imprimer les {Math.min(PRINT_BATCH_THRESHOLD, ui.queue.length)} suivants
+          </button>
+          <button onClick={confirmAll} style={{ ...S.btn, flex: 1, minHeight: 44 }}>
+            Tout imprimer
+          </button>
+        </div>
       </div>
-      <div style={{ display: 'flex', gap: 8 }}>
-        <button onClick={confirmNext} style={{ ...S.btnGhost, flex: 1, minHeight: 44 }}>
-          Imprimer les {Math.min(PRINT_BATCH_THRESHOLD, ui.queue.length)} suivants
-        </button>
-        <button onClick={confirmAll} style={{ ...S.btn, flex: 1, minHeight: 44 }}>
-          Tout imprimer
-        </button>
+    )
+  }
+
+  // Rien d'actif en ce moment (ni envoi, ni confirmation à donner) mais des
+  // tickets restent non imprimés — un indicateur discret, mais permanent
+  // tant que la file n'est pas vide, plutôt que de ne plus rien montrer
+  // entre deux passages du démon.
+  if (pendingCount > 0) {
+    return (
+      <div style={{ ...box, border: `1.5px solid ${C.lineHi}`, fontWeight: 500 }} className="no-print">
+        🖨 {pendingCount} ticket{pendingCount > 1 ? 's' : ''} en attente d'impression…
       </div>
-    </div>
-  )
+    )
+  }
+
+  return null
 }
 
 function StaffApp({ session }) {
