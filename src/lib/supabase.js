@@ -32,6 +32,38 @@ export function scanUrl(scanPointId) {
 }
 
 /**
+ * URL d'un lien de présentation staff — /staff-preview/{presentation_link_id}
+ * Ouvre l'espace équipe sans connexion, sur les vraies données du lieu, via
+ * une session anonyme (voir redeem_presentation_link côté SQL).
+ */
+export function presentationUrl(linkId) {
+  const origin = typeof window !== 'undefined' ? window.location.origin : ''
+  return `${origin}${BASE_PATH}staff-preview/${linkId}`.replace(/([^:]\/)\/+/g, '$1')
+}
+
+/**
+ * Un QR imprimé depuis un déploiement d'aperçu Vercel (un lien différent à
+ * chaque déploiement de branche/PR) casse dès que cet aperçu expire — c'est
+ * arrivé une fois en soirée. `scanUrl()` fige `window.location.origin` au
+ * moment de la génération : générer depuis le mauvais lien y grave l'erreur
+ * pour de bon, sur le papier.
+ *
+ * Détection sans connaître à l'avance le vrai domaine de prod : chaque
+ * déploiement Vercel reçoit un identifiant aléatoire (9-10 caractères,
+ * lettres ET chiffres mélangés, ex. « 4wp5dmqbv ») inséré dans le nom
+ * d'hôte — le domaine de production stable n'en a pas.
+ */
+export function isPreviewDeployment() {
+  if (typeof window === 'undefined') return false
+  const host = window.location.hostname
+  if (!host.endsWith('.vercel.app')) return false
+  return host
+    .split('.')[0]
+    .split('-')
+    .some((seg) => /^[a-z0-9]{8,12}$/.test(seg) && /[0-9]/.test(seg) && /[a-z]/.test(seg))
+}
+
+/**
  * Clé stable d'une erreur métier, indépendante de la langue : le parcours
  * client la traduit via son dictionnaire (voir lib/i18n.js), l'espace staff
  * garde frError() ci-dessous.
@@ -58,7 +90,14 @@ const ERROR_KEYS = [
   'no_food_token',
   'no_pass',
   'unknown_order',
+  'unknown_link',
+  'link_revoked',
   'forbidden',
+  'rate_limited',
+  'code_expired',
+  'too_many_attempts',
+  'no_pending_code',
+  'sms_failed',
 ]
 
 export function errorKey(err) {
@@ -104,6 +143,8 @@ export function frError(err) {
   if (m.includes('no_food_token')) return 'Aucun jeton food disponible à convertir.'
   if (m.includes('no_pass')) return 'Aucun forfait actif pour cette soirée.'
   if (m.includes('unknown_order')) return 'Commande introuvable.'
+  if (m.includes('unknown_link')) return 'Ce lien de présentation n’existe plus.'
+  if (m.includes('link_revoked')) return 'Ce lien de présentation a été révoqué.'
   if (m.includes('invalid_flag')) return 'Type de signalement inconnu.'
   if (m.includes('empty_note')) return 'Le commentaire ne peut pas être vide.'
 

@@ -1,5 +1,9 @@
 // ============================================================================
-//  NOTI Calling — parcours client en FR / EN / ES
+//  NOTI Calling — parcours client en FR / EN / ES / RU / ZH
+//
+//  Russe et mandarin ajoutés après le test terrain : clientèle internationale
+//  au pied de la Tour Eiffel. « Si tu veux être bon, tu mets les langues qui
+//  comptent. »
 //
 //  Retour terrain : « la langue ne change que le bouton ; si vous proposez
 //  plusieurs langues, allez au bout ». Tout le texte que l'application écrit
@@ -16,11 +20,35 @@
 //  Une valeur peut être une fonction quand il faut accorder ou insérer.
 // ============================================================================
 
-export const LANGS = ['fr', 'en', 'es']
+export const LANGS = ['fr', 'en', 'es', 'ru', 'zh']
 
-export const LANG_LABEL = { fr: 'Français', en: 'English', es: 'Español' }
+// Chaque langue est nommée dans sa propre langue : quelqu'un qui ne lit pas
+// l'alphabet latin doit pouvoir trouver la sienne dans la liste.
+export const LANG_LABEL = {
+  fr: 'Français',
+  en: 'English',
+  es: 'Español',
+  ru: 'Русский',
+  zh: '中文',
+}
 
 const s = (n) => (n > 1 ? 's' : '')
+
+/**
+ * Accord pluriel russe : trois formes, choisies sur les deux derniers
+ * chiffres. 1, 21, 31 prennent le singulier ; 2 à 4, 22 à 24 une forme
+ * intermédiaire ; le reste la forme longue. L'exception 11-14 suit la forme
+ * longue malgré leur dernier chiffre — « 11 кредитов », pas « 11 кредит ».
+ * Sans ça, un client russophone lit des accords faux toute la soirée.
+ */
+const ru = (n, one, few, many) => {
+  const d = n % 10
+  const dd = n % 100
+  if (dd >= 11 && dd <= 14) return many
+  if (d === 1) return one
+  if (d >= 2 && d <= 4) return few
+  return many
+}
 
 export const T = {
   // -------------------------------------------------------------- FRANÇAIS
@@ -93,6 +121,29 @@ export const T = {
     errEmail: 'Adresse e-mail invalide.',
     errBirthInvalid: 'Date de naissance invalide — vérifiez le jour, le mois et l’année.',
 
+    // Vérification du numéro (facultative, qualité des données)
+    phoneVerified: 'Numéro vérifié',
+    phoneVerify: 'Vérifier mon numéro',
+    phoneVerifyUnsaved: 'Enregistrez d’abord vos modifications pour vérifier ce numéro.',
+    phoneVerifyIntro: 'Un code à 6 chiffres va être envoyé par SMS à ce numéro.',
+    phoneVerifyChangeNumber: 'Ce n’est pas le bon numéro ? Le modifier',
+    phoneVerifySend: 'Recevoir le code',
+    phoneVerifySending: 'Envoi…',
+    phoneVerifyCodeSent: 'Code envoyé par SMS.',
+    phoneVerifyCodeLabel: 'Code reçu par SMS',
+    phoneVerifyConfirm: 'Confirmer',
+    phoneVerifyConfirming: 'Vérification…',
+    phoneVerifyResend: 'Renvoyer le code',
+    phoneVerifySuccess: 'Numéro vérifié !',
+    phoneVerifyErrInvalid: 'Ce numéro ne peut pas recevoir de SMS. Vérifiez qu’il est correct.',
+    phoneVerifyErrRate: 'Trop de tentatives sur ce numéro — réessayez dans quelques minutes.',
+    phoneVerifyErrCode: 'Ce code ne correspond pas. Vérifiez les 6 chiffres reçus par SMS.',
+    phoneVerifyErrGeneric: 'La vérification a échoué. Réessayez dans un instant.',
+    phoneVerifyRequiredIntro:
+      'Votre numéro doit être vérifié avant de commander — un code à 6 chiffres va être envoyé par SMS.',
+    phoneVerifyBypassed:
+      'La vérification SMS est momentanément indisponible — votre commande part quand même.',
+
     // Reconnaissance
     gladToSeeYou: 'Ravi de vous revoir',
     backAgain: 'Bon retour parmi nous',
@@ -116,6 +167,9 @@ export const T = {
     assistantThinking: 'Réponse en cours…',
     assistantError: 'L’assistant est momentanément indisponible. Un membre de l’équipe peut vous aider via Messages.',
     assistantSlowDown: 'Beaucoup de questions d’un coup ! Laissez-moi quelques instants et reposez votre question.',
+    uniDrinks: 'Boissons',
+    uniFood: 'Food',
+    uniBottles: 'Bouteilles',
     tabMenu: 'La carte',
     tabOrders: 'Mes commandes',
     tabMessages: 'Messages',
@@ -216,7 +270,6 @@ export const T = {
         : 'Vos crédits seront épuisés après cette commande.',
     codeApplied: (c, v) => `Code ${c} — réduction de ${v} appliquée ci-dessous.`,
     codeInvalid: (c) => `Code ${c} invalide, expiré, épuisé ou panier insuffisant pour ce code.`,
-    readyIn: (min) => `Prête dans environ ${min} min.`,
     pickup5:
       'Merci de récupérer votre commande dans les 5 minutes une fois prête — elle reste due même si elle n’est pas retirée.',
 
@@ -239,19 +292,11 @@ export const T = {
     showCodeAtBar: 'Présentez ce code au bar et réglez sur place',
     orderedAt: (h) => `Commande de ${h}`,
 
-    // Retard : le compte à rebours est passé et la commande n'est toujours pas
-    // prête. Plutôt qu'un compteur négatif ou un silence, on assume le retard
-    // avec le ton de la maison. La dernière ligne sert aux gros retards.
-    delayNotes: [
-      'T’as le temps d’aller danser 💃 ta commande n’est pas encore prête.',
-      'Le bar est pris d’assaut 🍸 encore un morceau ou deux et c’est à toi.',
-      'Petit retard, grande soif — on accélère, promis.',
-      'On n’a pas oublié ta commande, il y a juste du monde devant 🙃',
-      'Ça prend un peu plus longtemps que prévu. Profites-en pour refaire le monde.',
-      'Le shaker chauffe ! Encore un instant et c’est prêt.',
-    ],
-    delayNoteLate: 'Là, on avoue, ça traîne vraiment 😅 toute l’équipe est dessus.',
-    delayBadge: 'Un peu de retard',
+    // File d'attente. On ne dit jamais combien de temps ça va prendre — un
+    // temps annoncé est une promesse que le bar ne tient pas un soir de rush,
+    // et elle revient en réclamation. Le rang, lui, ne promet rien.
+    queueAhead: (n) => `${n} personne${s(n)} ${n > 1 ? 'ont' : 'a'} commandé avant vous`,
+    queueNext: 'Vous êtes le prochain servi',
     unpaidOrder:
       'Cette commande n’a pas été réglée en fin de soirée. Elle reste due — merci de vous rapprocher de l’établissement.',
     noteLabel: 'Note :',
@@ -262,7 +307,7 @@ export const T = {
     stAwaitingPayment: 'En attente de règlement',
     stAwaitingPaymentShort: 'À régler',
     awaitingPaymentTitle: 'Passez d’abord en caisse.',
-    awaitingPaymentSub: 'La préparation démarre dès que votre commande est réglée — le compte à rebours ne tourne pas encore.',
+    awaitingPaymentSub: 'La préparation démarre dès que votre commande est réglée — elle n’est pas encore dans la file.',
     orderSplitFood: 'Vos boissons partent tout de suite ; la food démarre après passage en caisse. Deux codes de retrait.',
     graceTitle: 'Envoi dans quelques secondes…',
     graceSub: (n) => `Encore ${n} seconde${n > 1 ? 's' : ''} pour modifier ou annuler. Rien n’est encore parti au bar.`,
@@ -386,6 +431,27 @@ export const T = {
     errEmail: 'Invalid email address.',
     errBirthInvalid: 'Invalid date of birth — check the day, month and year.',
 
+    // Phone verification (optional, data quality)
+    phoneVerified: 'Number verified',
+    phoneVerify: 'Verify my number',
+    phoneVerifyUnsaved: 'Save your changes first to verify this number.',
+    phoneVerifyIntro: 'A 6-digit code will be sent by SMS to this number.',
+    phoneVerifyChangeNumber: 'Wrong number? Change it',
+    phoneVerifySend: 'Send code',
+    phoneVerifySending: 'Sending…',
+    phoneVerifyCodeSent: 'Code sent by SMS.',
+    phoneVerifyCodeLabel: 'Code received by SMS',
+    phoneVerifyConfirm: 'Confirm',
+    phoneVerifyConfirming: 'Verifying…',
+    phoneVerifyResend: 'Resend code',
+    phoneVerifySuccess: 'Number verified!',
+    phoneVerifyErrInvalid: 'This number can’t receive SMS. Check that it’s correct.',
+    phoneVerifyErrRate: 'Too many attempts on this number — try again in a few minutes.',
+    phoneVerifyErrCode: 'That code doesn’t match. Check the 6 digits received by SMS.',
+    phoneVerifyErrGeneric: 'Verification failed. Try again in a moment.',
+    phoneVerifyRequiredIntro: 'Your number must be verified before ordering — a 6-digit code will be sent by SMS.',
+    phoneVerifyBypassed: 'SMS verification is temporarily unavailable — your order is going through anyway.',
+
     gladToSeeYou: 'Good to see you again',
     backAgain: 'Welcome back',
     secondNight: 'Second night with us — glad to have you back.',
@@ -407,6 +473,9 @@ export const T = {
     assistantThinking: 'Thinking…',
     assistantError: 'The assistant is briefly unavailable. A team member can help you via Messages.',
     assistantSlowDown: 'That’s a lot of questions at once! Give me a moment, then ask again.',
+    uniDrinks: 'Drinks',
+    uniFood: 'Food',
+    uniBottles: 'Bottles',
     tabMenu: 'Menu',
     tabOrders: 'My orders',
     tabMessages: 'Messages',
@@ -500,7 +569,6 @@ export const T = {
         : 'Your credits will be used up after this order.',
     codeApplied: (c, v) => `Code ${c} — ${v} discount applied below.`,
     codeInvalid: (c) => `Code ${c} is invalid, expired, used up, or your cart is too small for it.`,
-    readyIn: (min) => `Ready in about ${min} min.`,
     pickup5:
       'Please collect your order within 5 minutes once it is ready — it remains due even if it is not collected.',
 
@@ -521,16 +589,8 @@ export const T = {
     showCodeAtBar: 'Show this code at the bar and pay there',
     orderedAt: (h) => `Ordered at ${h}`,
 
-    delayNotes: [
-      'Time for one more dance 💃 your order isn’t ready yet.',
-      'The bar is packed 🍸 another track or two and it’s yours.',
-      'Running a little late, thanks for the patience — we’re on it.',
-      'We haven’t forgotten you, there’s just a queue ahead 🙃',
-      'Taking a bit longer than expected. Good time to put the world to rights.',
-      'The shaker is working! Just a moment longer.',
-    ],
-    delayNoteLate: 'Alright, this really is taking a while 😅 the whole team is on it.',
-    delayBadge: 'Running late',
+    queueAhead: (n) => `${n} ${n > 1 ? 'people' : 'person'} ordered before you`,
+    queueNext: 'You’re next in line',
     unpaidOrder:
       'This order was not paid at the end of the night. It remains due — please get in touch with the venue.',
     noteLabel: 'Note:',
@@ -541,7 +601,7 @@ export const T = {
     stAwaitingPayment: 'Awaiting payment',
     stAwaitingPaymentShort: 'To pay',
     awaitingPaymentTitle: 'Head to the till first.',
-    awaitingPaymentSub: 'Preparation starts once your order is paid — the countdown hasn’t started yet.',
+    awaitingPaymentSub: 'Preparation starts once your order is paid — it isn’t in the queue yet.',
     orderSplitFood: 'Your drinks are on their way; the food starts after you pay at the till. Two pickup codes.',
     graceTitle: 'Sending in a few seconds…',
     graceSub: (n) => `${n} second${n > 1 ? 's' : ''} left to edit or cancel. Nothing has reached the bar yet.`,
@@ -663,6 +723,27 @@ export const T = {
     errEmail: 'Correo electrónico no válido.',
     errBirthInvalid: 'Fecha de nacimiento no válida — revisa el día, el mes y el año.',
 
+    // Verificación del número (opcional, calidad de datos)
+    phoneVerified: 'Número verificado',
+    phoneVerify: 'Verificar mi número',
+    phoneVerifyUnsaved: 'Guarda antes tus cambios para verificar este número.',
+    phoneVerifyIntro: 'Se enviará un código de 6 dígitos por SMS a este número.',
+    phoneVerifyChangeNumber: '¿Número incorrecto? Cambiarlo',
+    phoneVerifySend: 'Recibir el código',
+    phoneVerifySending: 'Enviando…',
+    phoneVerifyCodeSent: 'Código enviado por SMS.',
+    phoneVerifyCodeLabel: 'Código recibido por SMS',
+    phoneVerifyConfirm: 'Confirmar',
+    phoneVerifyConfirming: 'Verificando…',
+    phoneVerifyResend: 'Reenviar el código',
+    phoneVerifySuccess: '¡Número verificado!',
+    phoneVerifyErrInvalid: 'Este número no puede recibir SMS. Comprueba que sea correcto.',
+    phoneVerifyErrRate: 'Demasiados intentos con este número — vuelve a intentarlo en unos minutos.',
+    phoneVerifyErrCode: 'Ese código no coincide. Revisa los 6 dígitos recibidos por SMS.',
+    phoneVerifyErrGeneric: 'La verificación falló. Vuelve a intentarlo en un momento.',
+    phoneVerifyRequiredIntro: 'Tu número debe verificarse antes de pedir — se enviará un código de 6 dígitos por SMS.',
+    phoneVerifyBypassed: 'La verificación por SMS no está disponible por ahora — tu pedido se envía de todos modos.',
+
     gladToSeeYou: 'Encantados de verte de nuevo',
     backAgain: 'Bienvenido de nuevo',
     secondNight: 'Segunda noche con nosotros — nos alegra verte.',
@@ -684,6 +765,9 @@ export const T = {
     assistantThinking: 'Respondiendo…',
     assistantError: 'El asistente no está disponible por el momento. Un miembro del equipo puede ayudarte en Mensajes.',
     assistantSlowDown: '¡Cuántas preguntas de golpe! Dame un momento y vuelve a preguntar.',
+    uniDrinks: 'Bebidas',
+    uniFood: 'Comida',
+    uniBottles: 'Botellas',
     tabMenu: 'La carta',
     tabOrders: 'Mis pedidos',
     tabMessages: 'Mensajes',
@@ -777,7 +861,6 @@ export const T = {
         : 'Tus créditos se agotarán después de este pedido.',
     codeApplied: (c, v) => `Código ${c} — descuento de ${v} aplicado abajo.`,
     codeInvalid: (c) => `Código ${c} no válido, caducado, agotado o carrito insuficiente.`,
-    readyIn: (min) => `Listo en unos ${min} min.`,
     pickup5:
       'Recoge tu pedido en los 5 minutos siguientes a estar listo — se debe igualmente aunque no se recoja.',
 
@@ -798,16 +881,8 @@ export const T = {
     showCodeAtBar: 'Muestra este código en la barra y paga allí',
     orderedAt: (h) => `Pedido de las ${h}`,
 
-    delayNotes: [
-      'Te da tiempo a bailar otra 💃 tu pedido aún no está listo.',
-      'La barra está a tope 🍸 una canción más y es tuyo.',
-      'Un pelín de retraso, mucha sed — vamos a por ello.',
-      'No nos hemos olvidado de ti, es que hay cola 🙃',
-      'Está tardando un poco más de lo previsto. Aprovecha para arreglar el mundo.',
-      '¡La coctelera no para! Un momentito más.',
-    ],
-    delayNoteLate: 'Vale, esto se está alargando de verdad 😅 todo el equipo está en ello.',
-    delayBadge: 'Con algo de retraso',
+    queueAhead: (n) => `${n} persona${s(n)} ${n > 1 ? 'han' : 'ha'} pedido antes que tú`,
+    queueNext: 'Eres el siguiente',
     unpaidOrder:
       'Este pedido no se pagó al final de la noche. Sigue pendiente — ponte en contacto con el local.',
     noteLabel: 'Nota:',
@@ -818,7 +893,7 @@ export const T = {
     stAwaitingPayment: 'Pendiente de pago',
     stAwaitingPaymentShort: 'Por pagar',
     awaitingPaymentTitle: 'Pasa primero por caja.',
-    awaitingPaymentSub: 'La preparación empieza en cuanto se pague el pedido — la cuenta atrás aún no corre.',
+    awaitingPaymentSub: 'La preparación empieza en cuanto se pague el pedido — todavía no está en la cola.',
     orderSplitFood: 'Tus bebidas salen ya; la comida empieza tras pasar por caja. Dos códigos de recogida.',
     graceTitle: 'Enviando en unos segundos…',
     graceSub: (n) => `Quedan ${n} segundo${n > 1 ? 's' : ''} para modificar o cancelar. Aún no ha salido a la barra.`,
@@ -874,6 +949,583 @@ export const T = {
     err_network: 'Conexión inestable. Vuelve a intentarlo en un momento.',
     err_generic: 'Se ha producido un error.',
   },
+
+  // ----------------------------------------------------------------- РУССКИЙ
+  ru: {
+    welcome: 'Добро пожаловать',
+    start: 'Заказать',
+    order: 'Заказ',
+    cart: 'Корзина',
+    total: 'Итого',
+    send: 'Отправить заказ',
+    sending: 'Отправляем…',
+    soldOut: 'Закончилось',
+    note: 'Пожелание бару',
+    promo: 'Промокод',
+    pickupCode: 'Код получения',
+    save: 'Сохранить',
+    sendShort: 'Отправить',
+    add: 'Добавить',
+    continue: 'Продолжить',
+    removeCode: 'Убрать',
+    activate: 'Активировать',
+    seeMenu: 'Открыть меню',
+    see: 'Посмотреть',
+    loadingMenu: 'Загружаем меню…',
+    opening: 'Открываем…',
+    backSoon: 'С возвращением…',
+    unknownQr: 'Неизвестный QR-код',
+
+    payTitle: 'Оплата у барной стойки',
+    paySub: 'Онлайн-оплаты нет. Вы платите у стойки, когда забираете заказ.',
+    ordersClosed: 'Приём заказов сейчас закрыт.',
+    closedStillHere: 'Меню остаётся доступным, и команда по-прежнему может вам написать.',
+    allMenuHere: 'Всё меню заказывается здесь, с телефона.',
+    noQueueStrong: 'забрать',
+    noQueueBottles: 'бутылками',
+    noQueue: (recup, bouteilles) =>
+      `Больше никаких очередей: к бару вы подходите только чтобы ${recup} заказ, и за ${bouteilles} (их подают сразу).`,
+    step1t: 'Вы заказываете здесь',
+    step1s: 'Всё меню, без очереди',
+    step2t: 'Бар готовит',
+    step2s: 'Мы сообщим, как только всё будет готово — оставайтесь на месте',
+    step3t: 'Вы забираете у бара',
+    step3s: 'По своему коду, без ожидания',
+    step4t: 'Вы платите на месте',
+    step4s: 'У стойки, как обычно',
+
+    identify: 'Давайте познакомимся',
+    identifySub: 'Чтобы заказать: ваши данные, чтобы позвать вас при выдаче и держать в курсе.',
+    firstName: 'Имя',
+    lastName: 'Фамилия',
+    phone: 'Телефон',
+    postalCode: 'Индекс',
+    birthdate: 'Дата рождения',
+    email: 'Эл. почта',
+    instagram: 'Instagram',
+    optional: 'Необязательно',
+    addOptional: '+ Почта / Instagram (необязательно — можно добавить позже)',
+    cgu: 'Оформляя заказ, вы принимаете наши условия: заказ нужно забрать и оплатить у бара.',
+    dataEu: 'Данные хранятся в Европейском союзе. Онлайн-оплаты нет.',
+    errNames: 'Имя и фамилия обязательны.',
+    errPhone: 'Нужен номер телефона.',
+    errPhoneInvalid: 'Номер выглядит некорректно. Пример: +33 6 12 34 56 78.',
+    errPostal: 'Нужен почтовый индекс.',
+    errBirth: 'Нужна дата рождения.',
+    errEmail: 'Неверный адрес эл. почты.',
+    errBirthInvalid: 'Неверная дата рождения — проверьте день, месяц и год.',
+
+    phoneVerified: 'Номер подтверждён',
+    phoneVerify: 'Подтвердить номер',
+    phoneVerifyUnsaved: 'Сначала сохраните изменения, чтобы подтвердить этот номер.',
+    phoneVerifyIntro: 'На этот номер придёт SMS с кодом из 6 цифр.',
+    phoneVerifyChangeNumber: 'Неверный номер? Изменить',
+    phoneVerifySend: 'Отправить код',
+    phoneVerifySending: 'Отправляем…',
+    phoneVerifyCodeSent: 'Код отправлен по SMS.',
+    phoneVerifyCodeLabel: 'Код из SMS',
+    phoneVerifyConfirm: 'Подтвердить',
+    phoneVerifyConfirming: 'Проверяем…',
+    phoneVerifyResend: 'Отправить код ещё раз',
+    phoneVerifySuccess: 'Номер подтверждён!',
+    phoneVerifyErrInvalid: 'На этот номер нельзя отправить SMS. Проверьте, что он верный.',
+    phoneVerifyErrRate: 'Слишком много попыток для этого номера — попробуйте через несколько минут.',
+    phoneVerifyErrCode: 'Код не совпадает. Проверьте 6 цифр из SMS.',
+    phoneVerifyErrGeneric: 'Подтвердить не удалось. Попробуйте ещё раз через минуту.',
+    phoneVerifyRequiredIntro: 'Перед заказом номер нужно подтвердить — мы отправим SMS с кодом из 6 цифр.',
+    phoneVerifyBypassed: 'Подтверждение по SMS временно недоступно — ваш заказ всё равно принят.',
+
+    gladToSeeYou: 'Рады снова вас видеть',
+    backAgain: 'С возвращением',
+    secondNight: 'Второй вечер с нами — рады, что вы вернулись.',
+    nNights: (n) => `${n} ${ru(n, 'вечер', 'вечера', 'вечеров')} с нами. Спасибо, что вы с нами.`,
+    vipStatus: 'СТАТУС VIP',
+    unpaidPast:
+      'Заказ с прошлого вечера остался неоплаченным. Пожалуйста, рассчитайтесь у бара — команда поможет.',
+
+    backHome: 'На главную',
+    backToTop: 'Наверх',
+    back: 'Назад',
+
+    assistantOpen: 'Нужна помощь?',
+    assistantTitle: 'Помощник Noti',
+    assistantIntro: 'Вопрос о меню, заказе или кредитах? Я здесь.',
+    assistantPlaceholder: 'Напишите свой вопрос…',
+    assistantSend: 'Отправить',
+    assistantThinking: 'Думаю…',
+    assistantError: 'Помощник ненадолго недоступен. Команда поможет вам через «Сообщения».',
+    assistantSlowDown: 'Слишком много вопросов сразу! Дайте мне минуту и спросите снова.',
+    uniDrinks: 'Напитки',
+    uniFood: 'Еда',
+    uniBottles: 'Бутылки',
+    tabMenu: 'Меню',
+    tabOrders: 'Мои заказы',
+    tabMessages: 'Сообщения',
+    myAccount: 'Мой профиль',
+
+    completeProfile: 'Заполните профиль',
+    fPostal: 'индекс',
+    fBirth: 'дату рождения',
+    fEmail: 'почту',
+    fInstagram: 'Instagram',
+    goToAccount: 'заполнить в профиле',
+    blockedStrong: 'Ваш заказ готов к выдаче.',
+    blockedRest: 'Сначала заберите его у бара, потом оформляйте новый — код',
+    newMessages: (n) => `${n} ${ru(n, 'новое сообщение', 'новых сообщения', 'новых сообщений')} от команды`,
+    nothingHere: 'В этой подборке пусто',
+    pushOk: 'Мы сообщим, даже если экран заблокирован.',
+    pushKo: 'Уведомления отклонены.',
+    profileSaved: 'Профиль обновлён.',
+    reviewThanks: 'Спасибо за отзыв!',
+
+    popular: 'ПОПУЛЯРНОЕ',
+    priceFrom: (p) => `от ${p}`,
+    pickupFirst: 'Сначала заберите готовый заказ',
+
+    format: 'Объём',
+    requiredCaps: 'ОБЯЗАТЕЛЬНО',
+    optionalCaps: 'НА ВЫБОР',
+    maxCaps: 'МАКС.',
+    included: 'включено',
+    chooseFirst: (name) => `Выберите: ${name}`,
+
+    creditsIntroTitle: 'Ваши кредиты готовы',
+    creditsIntroYouHave: (n) => `У вас ${n} ${ru(n, 'кредит', 'кредита', 'кредитов')}`,
+    creditsIntroSoft: '1 кредит = 1 безалкогольный напиток',
+    creditsIntroAlcohol: '2 кредита = 1 алкогольный напиток',
+    creditsIntroHow:
+      'Они списываются сами, когда вы добавляете позицию в корзину. Больше ничего делать не нужно.',
+    creditsIntroCta: 'Открыть меню',
+    creditBadge: 'За ваши кредиты',
+    myCredits: 'Мои кредиты',
+    nAvailable: (n) => `${n} доступно`,
+    nCredits: (n) => `${n} ${ru(n, 'кредит', 'кредита', 'кредитов')}`,
+    menuItem: 'позиция из меню',
+    ofChoice: (cat) => `${cat} на ваш выбор`,
+    creditAuto:
+      'Кредиты списываются сами, когда вы добавляете позицию в корзину. 1 кредит = 1 безалкогольный напиток, 2 кредита = 1 алкогольный.',
+    promoPlaceholder: 'Скидка, кредиты или групповой пакет',
+    promoCta: '🎟️ Есть промокод или групповой пакет? Активируйте здесь',
+    creditsAdded: 'Кредиты добавлены — они наверху меню!',
+    passActivated: 'Пакет активирован!',
+    codeActivated: 'Код активирован!',
+    codeAlreadyUsed: 'Этот код уже использован — ваши кредиты не изменились.',
+    activeCode: 'Активный код',
+    activePass: '🎟️ Активный пакет',
+    creditsLeft: (n) => `Осталось ${n} ${ru(n, 'кредит', 'кредита', 'кредитов')}`,
+    foodToken: 'Талон на еду',
+    tokenAvailable: 'доступен',
+    tokenUsed: 'использован',
+    convertToken: 'Обменять талон на еду на 2 кредита (1 алкогольный или 2 безалкогольных напитка)',
+    tokenConverted: 'Талон на еду обменян на 2 кредита.',
+    creditsEmpty: 'Кредитов не осталось',
+    nSofts: (n) => `${n} ${ru(n, 'безалкогольный напиток', 'безалкогольных напитка', 'безалкогольных напитков')}`,
+    nAlcohols: (n) => `${n} ${ru(n, 'алкогольный напиток', 'алкогольных напитка', 'алкогольных напитков')}`,
+    plusOneSoft: ' + 1 безалкогольный напиток',
+    orNSofts: (n) => `, или ${n} ${ru(n, 'безалкогольный напиток', 'безалкогольных напитка', 'безалкогольных напитков')}`,
+    catFood: 'Еда',
+    catBottle: 'Бутылка',
+    catDrink: 'Напиток',
+
+    logout: 'Выйти на этом устройстве',
+    logoutHint:
+      'Вы снова пройдёте через экран приветствия и форму регистрации. Ничего не теряется: укажите тот же номер телефона — и вернутся ваш профиль, заказы и кредиты.',
+    logoutConfirm:
+      'Выйти на этом устройстве? Чтобы заказать, придётся снова ввести свои данные.',
+    clientSpace: 'Мой профиль',
+    yourInfo: 'Ваши данные',
+    myNights: (n) => `${n} ${ru(n, 'вечер', 'вечера', 'вечеров')} с нами`,
+    firstNight: 'Первый вечер с нами',
+    myOrdersHere: 'Ваши заказы сегодня',
+    noOrdersHere: 'Сегодня заказов пока нет.',
+    creditsNone: 'Сейчас кредитов нет',
+
+    emptyCart: 'Корзина пуста',
+
+    validateOrder: 'Подтвердите заказ',
+    notePlaceholder: 'Без льда, меньше сахара, аллергия…',
+    checkingCode: (c) => `Проверяем код ${c}…`,
+    creditsLeftAfter: (n) =>
+      n > 0
+        ? `После этого заказа у вас останется ${n} ${ru(n, 'кредит', 'кредита', 'кредитов')}.`
+        : 'После этого заказа кредиты закончатся.',
+    codeApplied: (c, v) => `Код ${c} — скидка ${v} применена ниже.`,
+    codeInvalid: (c) => `Код ${c} недействителен, истёк, израсходован, или ваша корзина для него слишком мала.`,
+    pickup5:
+      'Пожалуйста, заберите заказ в течение 5 минут после готовности — он подлежит оплате, даже если его не забрали.',
+
+    noMessages: 'Сообщений пока нет',
+    noMessagesSub: 'Здесь появятся сообщения, адресованные вам.',
+    msgForYou: 'Сообщение для вас',
+    msgOrder: 'Статус заказа',
+    seeMyOrder: 'Посмотреть заказ',
+    msgUrgent: 'Срочное сообщение',
+    newUrgent: (n) => `${n} ${ru(n, 'срочное сообщение', 'срочных сообщения', 'срочных сообщений')}`,
+    announcement: 'Объявление',
+    markRead: 'Отметить прочитанным',
+
+    noOrders: 'Заказов пока нет',
+    noOrdersSub: 'Здесь появятся ваши заказы за вечер.',
+    notifOn: '✓ Уведомления включены',
+    notifCta: 'Сообщить, когда будет готово',
+    showCodeAtBar: 'Покажите этот код у бара и оплатите там',
+    orderedAt: (h) => `Заказ от ${h}`,
+
+    queueAhead: (n) => `${n} ${ru(n, 'человек заказал', 'человека заказали', 'человек заказали')} раньше вас`,
+    queueNext: 'Вы следующий',
+    unpaidOrder:
+      'Этот заказ не был оплачен в конце вечера. Он подлежит оплате — пожалуйста, свяжитесь с заведением.',
+    noteLabel: 'Пожелание:',
+    paidAtBar: 'Оплачено у бара — спасибо!',
+    pdfRecap: 'Чек в PDF',
+    rateService: 'Оценить обслуживание',
+    stReceived: 'Принят',
+    stAwaitingPayment: 'Ожидает оплаты',
+    stAwaitingPaymentShort: 'К оплате',
+    awaitingPaymentTitle: 'Сначала подойдите к кассе.',
+    awaitingPaymentSub: 'Приготовление начнётся после оплаты — пока заказ не в очереди.',
+    orderSplitFood: 'Напитки уже готовятся; еда — после оплаты на кассе. Два кода получения.',
+    graceTitle: 'Отправляем через несколько секунд…',
+    graceSub: (n) => `Ещё ${n} ${ru(n, 'секунда', 'секунды', 'секунд')}, чтобы изменить или отменить. В бар пока ничего не ушло.`,
+    graceCancel: 'Изменить заказ',
+    cancelOrder: 'Отменить заказ',
+    cancelConfirm: 'Отменить этот заказ? Использованные кредиты вернутся к вам.',
+    cancelDone: 'Заказ отменён.',
+    cancelTooLate: 'Слишком поздно: бар уже начал готовить. Отменить больше нельзя.',
+    stInPrep: 'Готовится',
+    stInPrepShort: 'Готовится',
+    stReady: 'Готов к выдаче',
+    stReadyShort: 'Готов',
+    stPickedUp: 'Получен',
+    stPaid: 'Оплачен',
+    stUnpaid: 'Не оплачен',
+    stCancelled: 'Отменён',
+
+    yourNight: 'Ваш вечер',
+    howWasService: 'Как вам обслуживание?',
+    reviewPlaceholder: 'Пара слов команде (необязательно)',
+
+    codeNotApplied:
+      'Заказ отправлен, но код не применён (недействителен, истёк или условия не выполнены).',
+    creditsExhausted:
+      'Кредиты закончились — следующий напиток по цене меню, оплата при получении заказа.',
+    notifReceivedTitle: 'Заказ принят',
+    notifReceivedBody: (code) =>
+      `Ваш заказ ${code} принят баром. Мы сообщим, как только он будет готов.`,
+
+    err_pickup_pending:
+      'Ваш заказ готов к выдаче. Сначала заберите его у бара, затем оформляйте новый.',
+    err_orders_closed: 'Приём заказов сейчас закрыт.',
+    err_empty_cart: 'Ваша корзина пуста.',
+    err_product_unavailable: 'Одной из позиций в корзине больше нет в наличии.',
+    err_variant_required: 'Выберите объём для каждой позиции.',
+    err_not_a_customer: 'Представьтесь, чтобы сделать заказ.',
+    err_forbidden: 'Действие не разрешено.',
+    err_scan_point_orphan:
+      'Этот QR-код больше не ведёт на действующий вечер. Попросите у персонала актуальный QR-код.',
+    err_missing_profile: 'Имя и фамилия обязательны.',
+    err_missing_phone: 'Нужен номер телефона.',
+    err_invalid_phone: 'Неверный номер телефона. Пример: +33 6 12 34 56 78.',
+    err_phone_already_used: 'Этот номер уже используется другим профилем.',
+    err_missing_postal_code: 'Нужен почтовый индекс.',
+    err_invalid_birthdate: 'Неверная дата рождения.',
+    err_invalid_email: 'Неверный адрес эл. почты.',
+    err_code_exhausted: 'Код израсходован: все его активации уже использованы.',
+    err_invalid_pass_code: 'Код недействителен, истёк или полностью использован.',
+    err_conversion_closed: 'Обмен талона на еду закрыт (доступен до 22:00).',
+    err_no_food_token: 'Нет талона на еду для обмена.',
+    err_no_pass: 'На этот вечер нет активного пакета.',
+    err_unknown_order: 'Заказ не найден.',
+    err_network: 'Нестабильное соединение. Попробуйте через минуту.',
+    err_generic: 'Что-то пошло не так.',
+  },
+
+  // ------------------------------------------------------------------- 中文
+  zh: {
+    welcome: '欢迎',
+    start: '点单',
+    order: '订单',
+    cart: '购物车',
+    total: '合计',
+    send: '提交订单',
+    sending: '提交中…',
+    soldOut: '已售罄',
+    note: '给吧台的备注',
+    promo: '优惠码',
+    pickupCode: '取单码',
+    save: '保存',
+    sendShort: '提交',
+    add: '加入',
+    continue: '继续',
+    removeCode: '移除',
+    activate: '激活',
+    seeMenu: '查看菜单',
+    see: '查看',
+    loadingMenu: '正在加载菜单…',
+    opening: '正在打开…',
+    backSoon: '欢迎回来…',
+    unknownQr: '无法识别的二维码',
+
+    payTitle: '在吧台付款',
+    paySub: '不支持在线支付。取单时在吧台付款。',
+    ordersClosed: '目前暂停接单。',
+    closedStillHere: '菜单仍可浏览，团队也仍可以给您留言。',
+    allMenuHere: '整份菜单都在手机上点。',
+    noQueueStrong: '取单',
+    noQueueBottles: '买瓶装酒',
+    noQueue: (recup, bouteilles) =>
+      `不用再排队：只有${recup}和${bouteilles}时才需要到吧台（瓶装酒即时供应）。`,
+    step1t: '在这里点单',
+    step1s: '整份菜单，无需排队',
+    step2t: '吧台为您准备',
+    step2s: '做好会立刻通知您——待在原地就好',
+    step3t: '到吧台取单',
+    step3s: '凭取单码，无需等待',
+    step4t: '当场付款',
+    step4s: '在吧台，和平常一样',
+
+    identify: '先认识一下',
+    identifySub: '点单需要留下您的信息，以便取单时叫您，并随时告知进度。',
+    firstName: '名字',
+    lastName: '姓氏',
+    phone: '手机号',
+    postalCode: '邮政编码',
+    birthdate: '出生日期',
+    email: '邮箱',
+    instagram: 'Instagram',
+    optional: '选填',
+    addOptional: '+ 邮箱 / Instagram（选填，之后也可以补）',
+    cgu: '下单即表示您接受我们的条款：需到吧台取单并付款。',
+    dataEu: '数据存储于欧盟境内。不支持在线支付。',
+    errNames: '请填写姓名。',
+    errPhone: '请填写手机号。',
+    errPhoneInvalid: '这个号码看起来不正确。例如：+33 6 12 34 56 78。',
+    errPostal: '请填写邮政编码。',
+    errBirth: '请填写出生日期。',
+    errEmail: '邮箱地址无效。',
+    errBirthInvalid: '出生日期无效——请检查日、月、年。',
+
+    phoneVerified: '号码已验证',
+    phoneVerify: '验证我的号码',
+    phoneVerifyUnsaved: '请先保存修改，再验证此号码。',
+    phoneVerifyIntro: '我们会向该号码发送一条 6 位数字验证码短信。',
+    phoneVerifyChangeNumber: '号码不对？修改号码',
+    phoneVerifySend: '发送验证码',
+    phoneVerifySending: '发送中…',
+    phoneVerifyCodeSent: '验证码已通过短信发送。',
+    phoneVerifyCodeLabel: '短信收到的验证码',
+    phoneVerifyConfirm: '确认',
+    phoneVerifyConfirming: '验证中…',
+    phoneVerifyResend: '重新发送验证码',
+    phoneVerifySuccess: '号码已验证！',
+    phoneVerifyErrInvalid: '该号码无法接收短信，请检查是否填写正确。',
+    phoneVerifyErrRate: '该号码尝试次数过多，请几分钟后再试。',
+    phoneVerifyErrCode: '验证码不正确。请核对短信中的 6 位数字。',
+    phoneVerifyErrGeneric: '验证失败，请稍后再试。',
+    phoneVerifyRequiredIntro: '下单前需要验证您的号码——我们会发送一条 6 位数字验证码短信。',
+    phoneVerifyBypassed: '短信验证暂时不可用——您的订单仍已提交。',
+
+    gladToSeeYou: '很高兴再次见到您',
+    backAgain: '欢迎回来',
+    secondNight: '第二次光临——很高兴您回来。',
+    nNights: (n) => `已与我们共度 ${n} 晚。感谢您的支持。`,
+    vipStatus: 'VIP 身份',
+    unpaidPast:
+      '您之前有一笔订单未结清。请到吧台结清——团队会协助您。',
+
+    backHome: '返回首页',
+    backToTop: '回到顶部',
+    back: '返回',
+
+    assistantOpen: '需要帮助？',
+    assistantTitle: 'Noti 助手',
+    assistantIntro: '关于菜单、订单或点数有疑问？我在这里。',
+    assistantPlaceholder: '输入您的问题…',
+    assistantSend: '发送',
+    assistantThinking: '思考中…',
+    assistantError: '助手暂时不可用。团队成员可以通过「消息」协助您。',
+    assistantSlowDown: '一次问题太多了！稍等片刻再问吧。',
+    uniDrinks: '饮品',
+    uniFood: '餐食',
+    uniBottles: '瓶装',
+    tabMenu: '菜单',
+    tabOrders: '我的订单',
+    tabMessages: '消息',
+    myAccount: '我的账户',
+
+    completeProfile: '完善您的资料',
+    fPostal: '邮政编码',
+    fBirth: '出生日期',
+    fEmail: '邮箱',
+    fInstagram: 'Instagram',
+    goToAccount: '到账户里填写',
+    blockedStrong: '您有一笔订单已可取。',
+    blockedRest: '请先到吧台取走，再下新订单——取单码',
+    newMessages: (n) => `团队发来 ${n} 条新消息`,
+    nothingHere: '此分类暂无内容',
+    pushOk: '即使锁屏我们也会通知您。',
+    pushKo: '通知已被拒绝。',
+    profileSaved: '资料已更新。',
+    reviewThanks: '感谢您的反馈！',
+
+    popular: '热门',
+    priceFrom: (p) => `${p} 起`,
+    pickupFirst: '请先取走已做好的订单',
+
+    format: '规格',
+    requiredCaps: '必选',
+    optionalCaps: '可选',
+    maxCaps: '最多',
+    included: '已包含',
+    chooseFirst: (name) => `请选择：${name}`,
+
+    creditsIntroTitle: '您的点数已就绪',
+    creditsIntroYouHave: (n) => `您有 ${n} 个点数`,
+    creditsIntroSoft: '1 点数 = 1 杯无酒精饮品',
+    creditsIntroAlcohol: '2 点数 = 1 杯含酒精饮品',
+    creditsIntroHow:
+      '加入购物车时会自动扣除，无需其他操作。',
+    creditsIntroCta: '查看菜单',
+    creditBadge: '用您的点数',
+    myCredits: '我的点数',
+    nAvailable: (n) => `${n} 个可用`,
+    nCredits: (n) => `${n} 个点数`,
+    menuItem: '菜单上的一份',
+    ofChoice: (cat) => `任选一份${cat}`,
+    creditAuto:
+      '加入购物车时点数会自动扣除。1 点数 = 1 杯无酒精饮品，2 点数 = 1 杯含酒精饮品。',
+    promoPlaceholder: '折扣码、点数或团体套餐',
+    promoCta: '🎟️ 有优惠码或团体套餐？在这里激活',
+    creditsAdded: '点数已到账——在菜单顶部查看！',
+    passActivated: '套餐已激活！',
+    codeActivated: '优惠码已激活！',
+    codeAlreadyUsed: '此码已使用过——您的点数没有变化。',
+    activeCode: '生效中的优惠码',
+    activePass: '🎟️ 生效中的套餐',
+    creditsLeft: (n) => `还剩 ${n} 个点数`,
+    foodToken: '餐食券',
+    tokenAvailable: '可用',
+    tokenUsed: '已使用',
+    convertToken: '把餐食券兑换成 2 个点数（1 杯含酒精或 2 杯无酒精饮品）',
+    tokenConverted: '餐食券已兑换为 2 个点数。',
+    creditsEmpty: '点数已用完',
+    nSofts: (n) => `${n} 杯无酒精饮品`,
+    nAlcohols: (n) => `${n} 杯含酒精饮品`,
+    plusOneSoft: ' + 1 杯无酒精饮品',
+    orNSofts: (n) => `，或 ${n} 杯无酒精饮品`,
+    catFood: '餐食',
+    catBottle: '瓶装',
+    catDrink: '饮品',
+
+    logout: '在本设备退出',
+    logoutHint:
+      '您会回到欢迎页并重新填写登记表。不会丢失任何东西：填写同一个手机号，您的资料、订单和点数都会回来。',
+    logoutConfirm:
+      '在本设备退出？下次点单需要重新填写您的信息。',
+    clientSpace: '我的账户',
+    yourInfo: '您的信息',
+    myNights: (n) => `与我们共度 ${n} 晚`,
+    firstNight: '第一次光临',
+    myOrdersHere: '您今晚的订单',
+    noOrdersHere: '今晚还没有订单。',
+    creditsNone: '目前没有点数',
+
+    emptyCart: '购物车是空的',
+
+    validateOrder: '确认您的订单',
+    notePlaceholder: '不加冰、少糖、过敏…',
+    checkingCode: (c) => `正在校验优惠码 ${c}…`,
+    creditsLeftAfter: (n) =>
+      n > 0 ? `这笔订单后您还剩 ${n} 个点数。` : '这笔订单后您的点数将用完。',
+    codeApplied: (c, v) => `优惠码 ${c}——已在下方抵扣 ${v}。`,
+    codeInvalid: (c) => `优惠码 ${c} 无效、已过期、已用完，或您的购物车金额不足。`,
+    pickup5:
+      '订单做好后请在 5 分钟内取走——即使未取走，仍需付款。',
+
+    noMessages: '暂无消息',
+    noMessagesSub: '发给您的消息会显示在这里。',
+    msgForYou: '给您的消息',
+    msgOrder: '订单动态',
+    seeMyOrder: '查看我的订单',
+    msgUrgent: '紧急消息',
+    newUrgent: (n) => `${n} 条紧急消息`,
+    announcement: '公告',
+    markRead: '标为已读',
+
+    noOrders: '暂无订单',
+    noOrdersSub: '您今晚的订单会显示在这里。',
+    notifOn: '✓ 通知已开启',
+    notifCta: '做好时通知我',
+    showCodeAtBar: '在吧台出示此码并付款',
+    orderedAt: (h) => `${h} 下单`,
+
+    queueAhead: (n) => `有 ${n} 位在您之前下单`,
+    queueNext: '下一个就是您',
+    unpaidOrder:
+      '这笔订单在当晚结束时未付款，仍需结清——请与门店联系。',
+    noteLabel: '备注：',
+    paidAtBar: '已在吧台付款——谢谢！',
+    pdfRecap: 'PDF 小票',
+    rateService: '评价服务',
+    stReceived: '已接单',
+    stAwaitingPayment: '待付款',
+    stAwaitingPaymentShort: '待付',
+    awaitingPaymentTitle: '请先到收银台。',
+    awaitingPaymentSub: '付款后才开始制作——目前尚未进入队列。',
+    orderSplitFood: '饮品马上开始做；餐食在收银台付款后开始。两个取单码。',
+    graceTitle: '几秒后提交…',
+    graceSub: (n) => `还有 ${n} 秒可以修改或取消。目前还没有发到吧台。`,
+    graceCancel: '修改我的订单',
+    cancelOrder: '取消我的订单',
+    cancelConfirm: '取消这笔订单？已使用的点数会退还给您。',
+    cancelDone: '订单已取消。',
+    cancelTooLate: '太迟了：吧台已开始制作，无法再取消。',
+    stInPrep: '制作中',
+    stInPrepShort: '制作中',
+    stReady: '可取单',
+    stReadyShort: '已做好',
+    stPickedUp: '已取走',
+    stPaid: '已付款',
+    stUnpaid: '未付款',
+    stCancelled: '已取消',
+
+    yourNight: '您的今晚',
+    howWasService: '服务怎么样？',
+    reviewPlaceholder: '给团队留一句话（选填）',
+
+    codeNotApplied:
+      '订单已提交，但优惠码未生效（无效、已过期或不满足条件）。',
+    creditsExhausted:
+      '点数已用完——下一杯按菜单价计算，取单时付款。',
+    notifReceivedTitle: '订单已接收',
+    notifReceivedBody: (code) => `您的订单 ${code} 已送达吧台。做好后我们会立刻通知您。`,
+
+    err_pickup_pending:
+      '您有一笔订单已可取。请先到吧台取走，再下新订单。',
+    err_orders_closed: '目前暂停接单。',
+    err_empty_cart: '您的购物车是空的。',
+    err_product_unavailable: '购物车中有一份已无法供应。',
+    err_variant_required: '请为每一份选择规格。',
+    err_not_a_customer: '请先登记身份再点单。',
+    err_forbidden: '此操作不被允许。',
+    err_scan_point_orphan:
+      '此二维码已不指向有效的场次。请向工作人员索取最新的二维码。',
+    err_missing_profile: '请填写姓名。',
+    err_missing_phone: '请填写手机号。',
+    err_invalid_phone: '手机号无效。例如：+33 6 12 34 56 78。',
+    err_phone_already_used: '该号码已被另一个客户资料使用。',
+    err_missing_postal_code: '请填写邮政编码。',
+    err_invalid_birthdate: '出生日期无效。',
+    err_invalid_email: '邮箱地址无效。',
+    err_code_exhausted: '此码已用完：所有使用次数都已激活。',
+    err_invalid_pass_code: '优惠码无效、已过期或已全部使用。',
+    err_conversion_closed: '餐食券兑换已关闭（截止 22:00）。',
+    err_no_food_token: '没有可兑换的餐食券。',
+    err_no_pass: '本场次没有生效中的套餐。',
+    err_unknown_order: '未找到订单。',
+    err_network: '连接不稳定，请稍后再试。',
+    err_generic: '出了一点问题。',
+  },
 }
 
 // Le français fait office de filet : une clé oubliée dans une traduction
@@ -882,6 +1534,8 @@ const MERGED = {
   fr: T.fr,
   en: { ...T.fr, ...T.en },
   es: { ...T.fr, ...T.es },
+  ru: { ...T.fr, ...T.ru },
+  zh: { ...T.fr, ...T.zh },
 }
 
 /** Dictionnaire complet pour une langue (français par défaut). */
@@ -896,4 +1550,36 @@ export function trProduct(p, lang) {
   if (!lang || lang === 'fr') return { name: p.name, description: p.description }
   const t = p.translations?.[lang]
   return { name: t?.name || p.name, description: t?.description || p.description }
+}
+
+/**
+ * Titres de sous-catégories de la carte. Ils sont saisis librement par le
+ * staff, donc jamais exhaustifs : ce qui n'est pas listé ici s'affiche tel
+ * quel, comme avant. Ce sont les seuls titres visibles du parcours client qui
+ * restaient en français quelle que soit la langue choisie.
+ */
+const SUBCATS = {
+  'Bar à spritz': { en: 'Spritz bar', es: 'Barra de spritz', ru: 'Спритц-бар', zh: 'Spritz 专区' },
+  Cocktails: { en: 'Cocktails', es: 'Cócteles', ru: 'Коктейли', zh: '鸡尾酒' },
+  'Vins au verre': { en: 'Wines by the glass', es: 'Vinos por copa', ru: 'Вино по бокалам', zh: '单杯葡萄酒' },
+  Bières: { en: 'Beers', es: 'Cervezas', ru: 'Пиво', zh: '啤酒' },
+  Softs: { en: 'Soft drinks', es: 'Refrescos', ru: 'Безалкогольные', zh: '无酒精饮品' },
+  Vodka: { en: 'Vodka', es: 'Vodka', ru: 'Водка', zh: '伏特加' },
+  Gin: { en: 'Gin', es: 'Ginebra', ru: 'Джин', zh: '金酒' },
+  Rhum: { en: 'Rum', es: 'Ron', ru: 'Ром', zh: '朗姆酒' },
+  Whisky: { en: 'Whisky', es: 'Whisky', ru: 'Виски', zh: '威士忌' },
+  'Mezcal & Tequila': { en: 'Mezcal & Tequila', es: 'Mezcal y tequila', ru: 'Мескаль и текила', zh: '梅斯卡尔与龙舌兰' },
+  'Pisco & Cachaça': { en: 'Pisco & Cachaça', es: 'Pisco y cachaça', ru: 'Писко и кашаса', zh: '皮斯科与卡莎萨' },
+  'Vins — Rosés': { en: 'Wines — Rosé', es: 'Vinos — Rosados', ru: 'Вина — розовые', zh: '葡萄酒 — 桃红' },
+  'Vins — Blancs': { en: 'Wines — White', es: 'Vinos — Blancos', ru: 'Вина — белые', zh: '葡萄酒 — 白' },
+  'Vins — Rouges': { en: 'Wines — Red', es: 'Vinos — Tintos', ru: 'Вина — красные', zh: '葡萄酒 — 红' },
+  Champagnes: { en: 'Champagnes', es: 'Champanes', ru: 'Шампанское', zh: '香槟' },
+  Bouteilles: { en: 'Bottles', es: 'Botellas', ru: 'Бутылки', zh: '瓶装' },
+  'Bar à tapas': { en: 'Tapas bar', es: 'Barra de tapas', ru: 'Тапас-бар', zh: 'Tapas 小食' },
+  'Bar à planches': { en: 'Sharing boards', es: 'Tablas para compartir', ru: 'Доски для компании', zh: '分享拼盘' },
+}
+
+export function trSubcat(name, lang) {
+  if (!name || !lang || lang === 'fr') return name
+  return SUBCATS[name]?.[lang] || name
 }

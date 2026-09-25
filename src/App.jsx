@@ -12,14 +12,18 @@
 
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import QRCode from 'qrcode'
-import { supabase, isConfigured, frError, errorKey, BASE_PATH, scanUrl } from './lib/supabase.js'
+import { supabase, isConfigured, frError, errorKey, BASE_PATH, scanUrl, isPreviewDeployment, presentationUrl } from './lib/supabase.js'
 import { C, S, FONT, GRADIENT, RADIUS, alpha, eur, timeFR, dateFR, phoneFR, normalizePhone, isValidPhone } from './lib/theme.js'
-import { dict, useT, trProduct, LANG_LABEL } from './lib/i18n.js'
+import { dict, useT, trProduct, trSubcat, LANG_LABEL, LANGS } from './lib/i18n.js'
+import { phoneVerificationAvailable, sendOtpCode, confirmOtpCode } from './lib/otp.js'
+import { buildTicket, ticketToText } from './lib/ticket.js'
+import { sendToPrinter, printerError } from './lib/printer.js'
 import {
   canvasesToPdfBlob,
   shareOrDownload,
   downloadBlob,
   makeCanvas,
+  ensureFontsReady,
   roundRect,
   wrapText,
   loadImage,
@@ -60,6 +64,12 @@ function useRoute() {
 /** /s/{scan_point_id} */
 function parseScanRoute(route) {
   const m = route.match(/^\/s\/([0-9a-fA-F-]{36})\/?$/)
+  return m ? m[1] : null
+}
+
+/** /staff-preview/{presentation_link_id} */
+function parsePresentationRoute(route) {
+  const m = route.match(/^\/staff-preview\/([0-9a-fA-F-]{36})\/?$/)
   return m ? m[1] : null
 }
 
@@ -295,10 +305,14 @@ function upsertMeFromCache() {
   })
 }
 
+// `t` sert l'espace staff, qui reste en français ; `i18n` sert le parcours
+// client. Les deux libellés étaient autrefois portés ici, dans un ternaire
+// à trois langues — qui retombait silencieusement sur le français dès qu'on
+// en ajoutait une quatrième.
 const UNIVERSES = [
-  { k: 'drinks', t: 'Boissons', en: 'Drinks', es: 'Bebidas', e: '🥂' },
-  { k: 'food', t: 'Food', en: 'Food', es: 'Comida', e: '🍽️' },
-  { k: 'bottles', t: 'Bouteilles', en: 'Bottles', es: 'Botellas', e: '🍾' },
+  { k: 'drinks', t: 'Boissons', i18n: 'uniDrinks', e: '🥂' },
+  { k: 'food', t: 'Food', i18n: 'uniFood', e: '🍽️' },
+  { k: 'bottles', t: 'Bouteilles', i18n: 'uniBottles', e: '🍾' },
 ]
 
 const ORDER_STATUS = {
@@ -376,6 +390,11 @@ function segmentKey(label) {
 const RELANCE_MIN = 15
 const ESCALADE_MIN = 20
 
+// Sursis avant qu'une commande « Réglée » ne quitte la colonne Retirées
+// (BarTab) — retour terrain : disparaître au tap même était trop brusque,
+// sans confirmation visuelle que ça avait bien été pris en compte.
+const PAID_GRACE_MS = 25000
+
 /** Minutes écoulées depuis que la commande est prête à être retirée. */
 /**
  * Traduit un solde de crédits en langage client. Le barème ne change pas
@@ -398,10 +417,48 @@ function waitingMin(order, now = Date.now()) {
   return Math.max(0, Math.floor((now - new Date(from).getTime()) / 60000))
 }
 
+/**
+ * Résumé court du contenu d'une commande pour un SMS — retour terrain : un
+ * client avec plusieurs commandes en cours ne sait pas laquelle est prête
+ * avec juste le code de retrait. Tronqué pour rester lisible en SMS ; vide
+ * si les articles ne sont pas chargés (l'appelant l'intègre alors sans
+ * casser le message).
+ */
+function orderSummary(order, max = 3) {
+  const items = order?.order_items || []
+  if (!items.length) return ''
+  const parts = items.map((it) => `${it.quantity}× ${it.name_snapshot}`)
+  const shown = parts.slice(0, max)
+  const rest = parts.length - shown.length
+  return shown.join(', ') + (rest > 0 ? ` +${rest}` : '')
+}
+
 // Multilingue FR / EN / ES — le dictionnaire complet du parcours client vit
 // dans src/lib/i18n.js (voir useT / dict / trProduct).
 
 const tr = trProduct
+
+/**
+ * Catégories mises en avant côté client, dans cet ordre précis, avant tout
+ * le reste (qui garde son ordre habituel derrière). Comparaison insensible
+ * à la casse et aux accents plutôt qu'une égalité stricte : le libellé exact
+ * en base peut varier légèrement (« Bar à Spritz » vs « Spritz »…) sans que
+ * ça casse la mise en avant.
+ */
+const SUBCAT_PRIORITY = ['spritz', 'cocktail', 'biere', 'vin', 'soft']
+const normalizeCat = (s) =>
+  String(s || '')
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/[̀-ͯ]/g, '')
+function sortSubcatsByPriority(list) {
+  const rank = (name) => {
+    const n = normalizeCat(name)
+    const i = SUBCAT_PRIORITY.findIndex((k) => n.includes(k))
+    return i === -1 ? SUBCAT_PRIORITY.length : i
+  }
+  return [...list].sort((a, b) => rank(a) - rank(b))
+}
 
 // Libellés de statut côté client : mêmes étapes que ORDER_STATUS (qui reste en
 // français pour l'espace staff), traduites via le dictionnaire.
@@ -638,6 +695,312 @@ function Field({ label, children, hint }) {
       <label style={S.label}>{label}</label>
       {children}
       {hint && <div style={{ fontSize: 11.5, color: C.faint, marginTop: 6 }}>{hint}</div>}
+    </div>
+  )
+}
+
+/**
+ * Vérification SMS du numéro (facultative, qualité des données — pas une
+ * sécurité de connexion). `phone` est la valeur en cours de saisie dans le
+ * formulaire parent : tant qu'elle diffère du numéro enregistré, on demande
+ * d'enregistrer d'abord — vérifier un numéro non sauvegardé n'aurait pas de
+ * sens, et confirmerait un numéro que la fiche client ne porte pas encore.
+ */
+function PhoneVerifyBlock({ lang, customer, phone, showToast, onVerified, enabled = true }) {
+  const t = useT(lang)
+  const [step, setStep] = useState('idle') // idle | sending | sent | confirming
+  const [code, setCode] = useState('')
+
+  if (!phoneVerificationAvailable || !enabled || !customer?.phone) return null
+
+  const saved = customer.phone
+  const unsaved = normalizePhone(phone) !== normalizePhone(saved)
+  const verified = customer.phone_verified_at && customer.phone_verified_number === saved
+
+  if (verified && !unsaved) {
+    return (
+      <div style={{ fontSize: 12.5, color: C.ok, fontWeight: 600, marginTop: -10, marginBottom: 16 }}>
+        ✓ {t.phoneVerified}
+      </div>
+    )
+  }
+
+  if (unsaved) {
+    return (
+      <div style={{ fontSize: 11.5, color: C.faint, marginTop: -10, marginBottom: 16 }}>
+        {t.phoneVerifyUnsaved}
+      </div>
+    )
+  }
+
+  // Mêmes textes que du temps de Firebase (0039) — seules les clés d'erreur
+  // changent (nos propres codes RPC, voir 0055, plutôt que ceux de Firebase).
+  function mapOtpError(e) {
+    const k = errorKey(e)
+    if (k === 'rate_limited' || k === 'too_many_attempts') return t.phoneVerifyErrRate
+    if (k === 'code_expired') return t.phoneVerifyErrCode
+    return t.phoneVerifyErrGeneric
+  }
+
+  async function send() {
+    setStep('sending')
+    try {
+      await sendOtpCode()
+      setCode('')
+      setStep('sent')
+    } catch (e) {
+      console.error('[Noti] envoi code vérification', e)
+      showToast(mapOtpError(e), 'error')
+      setStep('idle')
+    }
+  }
+
+  async function confirm() {
+    setStep('confirming')
+    try {
+      const ok = await confirmOtpCode(code)
+      if (!ok) {
+        showToast(t.phoneVerifyErrCode, 'error')
+        setStep('sent')
+        return
+      }
+      showToast(t.phoneVerifySuccess, 'ok')
+      setCode('')
+      setStep('idle')
+      await onVerified?.()
+    } catch (e) {
+      console.error('[Noti] confirmation code vérification', e)
+      showToast(mapOtpError(e), 'error')
+      setStep('sent')
+    }
+  }
+
+  return (
+    <div style={{ marginTop: -10, marginBottom: 16 }}>
+      {step === 'idle' || step === 'sending' ? (
+        <>
+          <div style={{ fontSize: 11.5, color: C.faint, marginBottom: 8 }}>{t.phoneVerifyIntro}</div>
+          <button onClick={send} disabled={step === 'sending'} style={{ ...S.btnGhost, minHeight: 40, fontSize: 12 }}>
+            {step === 'sending' ? t.phoneVerifySending : t.phoneVerify}
+          </button>
+        </>
+      ) : (
+        <>
+          <div style={{ fontSize: 11.5, color: C.dim, marginBottom: 8 }}>{t.phoneVerifyCodeSent}</div>
+          <div style={{ display: 'flex', gap: 8 }}>
+            <input
+              style={{ ...S.input, flex: 1, textAlign: 'center', letterSpacing: 4, fontSize: 20 }}
+              inputMode="numeric"
+              maxLength={6}
+              value={code}
+              onChange={(e) => setCode(e.target.value.replace(/\D/g, '').slice(0, 6))}
+              placeholder="000000"
+            />
+            <button
+              onClick={confirm}
+              disabled={code.length !== 6 || step === 'confirming'}
+              style={{ ...S.btn, minHeight: 50, width: 120, opacity: code.length !== 6 ? 0.5 : 1 }}
+            >
+              {step === 'confirming' ? t.phoneVerifyConfirming : t.phoneVerifyConfirm}
+            </button>
+          </div>
+          <button
+            onClick={send}
+            disabled={step === 'confirming'}
+            style={{ background: 'none', border: 'none', padding: '8px 0 0', color: C.indigo, fontSize: 11.5, cursor: 'pointer' }}
+          >
+            {t.phoneVerifyResend}
+          </button>
+        </>
+      )}
+    </div>
+  )
+}
+
+/**
+ * Vérification OBLIGATOIRE, à l'entrée du parcours (uniquement quand Firebase
+ * est configuré — sinon ce composant n'est jamais monté). Elle se faisait à
+ * l'envoi de la commande ; le test terrain l'a jugée « relou » à cet endroit :
+ * une demande qui tombe d'un coup au moment de commander casse le flux. Elle
+ * suit donc désormais immédiatement la saisie des informations.
+ *
+ * Distincte de `PhoneVerifyBlock` (facultative, écran de profil) : ici il n'y
+ * a rien à enregistrer avant de vérifier (le téléphone est déjà acquis), et
+ * une erreur qui n'est PAS imputable au client — panne réseau, service
+ * Firebase indisponible, code d'erreur inconnu — laisse entrer plutôt que de
+ * bloquer toute la soirée sur un incident technique. Seules les erreurs de
+ * saisie (numéro invalide, mauvais code, trop de tentatives) gardent la porte
+ * fermée.
+ */
+function PhoneVerifyGate({ lang, customer, onVerified, onBypass, onEditPhone }) {
+  const t = useT(lang)
+  const [step, setStep] = useState('intro') // intro | sending | sent | confirming
+  const [code, setCode] = useState('')
+  const [error, setError] = useState('')
+
+  // rate_limited / code_expired : une faute attribuable au client (ou une
+  // attente légitime), on bloque et on le dit. Tout le reste — échec
+  // d'envoi SMS (sms_failed), fiche introuvable, réseau, code inconnu — est
+  // un incident technique qui n'est pas de son fait : on laisse entrer
+  // plutôt que de bloquer toute la soirée dessus.
+  function classify(e) {
+    const k = errorKey(e)
+    if (k === 'rate_limited' || k === 'too_many_attempts') return { message: t.phoneVerifyErrRate, blocking: true }
+    if (k === 'code_expired') return { message: t.phoneVerifyErrCode, blocking: true }
+    return { message: null, blocking: false }
+  }
+
+  async function send() {
+    setError('')
+    setStep('sending')
+    try {
+      await sendOtpCode()
+      setCode('')
+      setStep('sent')
+    } catch (e) {
+      console.error('[Noti] envoi code vérification (commande)', e)
+      const { message, blocking } = classify(e)
+      if (blocking) {
+        setError(message)
+        setStep('intro')
+      } else {
+        onBypass()
+      }
+    }
+  }
+
+  async function confirm() {
+    setError('')
+    setStep('confirming')
+    try {
+      const ok = await confirmOtpCode(code)
+      if (!ok) {
+        setError(t.phoneVerifyErrCode)
+        setStep('sent')
+        return
+      }
+      await onVerified()
+    } catch (e) {
+      console.error('[Noti] confirmation code vérification (commande)', e)
+      const { message, blocking } = classify(e)
+      if (blocking) {
+        setError(message)
+        setStep('sent')
+      } else {
+        onBypass()
+      }
+    }
+  }
+
+  return (
+    <div
+      style={{
+        border: `1.5px solid ${C.terracotta}`,
+        borderRadius: 16,
+        padding: 16,
+        background: 'rgba(185,106,76,.06)',
+      }}
+    >
+      <div style={{ fontSize: 14, fontWeight: 600, marginBottom: 8 }}>{t.phoneVerify}</div>
+
+      {error && (
+        <div style={{ marginBottom: 12 }}>
+          <Banner tone="danger">{error}</Banner>
+        </div>
+      )}
+
+      {step === 'intro' || step === 'sending' ? (
+        <>
+          <div style={{ fontSize: 12.5, color: C.dim, marginBottom: 12, lineHeight: 1.5 }}>
+            {t.phoneVerifyRequiredIntro}
+          </div>
+          <button
+            onClick={send}
+            disabled={step === 'sending'}
+            style={{ ...S.btn, minHeight: 52, opacity: step === 'sending' ? 0.6 : 1 }}
+          >
+            {step === 'sending' ? t.phoneVerifySending : t.phoneVerifySend}
+          </button>
+        </>
+      ) : (
+        <>
+          <div style={{ fontSize: 12.5, color: C.dim, marginBottom: 12 }}>{t.phoneVerifyCodeSent}</div>
+          <input
+            style={{ ...S.input, textAlign: 'center', letterSpacing: 4, fontSize: 20, marginBottom: 10 }}
+            inputMode="numeric"
+            maxLength={6}
+            value={code}
+            onChange={(e) => setCode(e.target.value.replace(/\D/g, '').slice(0, 6))}
+            placeholder="000000"
+            autoFocus
+          />
+          <button
+            onClick={confirm}
+            disabled={code.length !== 6 || step === 'confirming'}
+            style={{ ...S.btn, minHeight: 52, opacity: code.length !== 6 ? 0.5 : 1, marginBottom: 8 }}
+          >
+            {step === 'confirming' ? t.phoneVerifyConfirming : t.phoneVerifyConfirm}
+          </button>
+          <button
+            onClick={send}
+            disabled={step === 'confirming'}
+            style={{
+              display: 'block',
+              margin: '0 auto',
+              background: 'none',
+              border: 'none',
+              color: C.indigo,
+              fontSize: 11.5,
+              cursor: 'pointer',
+            }}
+          >
+            {t.phoneVerifyResend}
+          </button>
+        </>
+      )}
+
+      {onEditPhone && (
+        <button
+          onClick={onEditPhone}
+          disabled={step === 'sending' || step === 'confirming'}
+          style={{
+            display: 'block',
+            margin: '10px auto 0',
+            background: 'none',
+            border: 'none',
+            color: C.dim,
+            fontSize: 11.5,
+            textDecoration: 'underline',
+            cursor: 'pointer',
+          }}
+        >
+          {t.phoneVerifyChangeNumber}
+        </button>
+      )}
+    </div>
+  )
+}
+
+/**
+ * L'étape de vérification en plein écran, enchaînée juste après la saisie des
+ * informations. Elle reprend la mise en page de l'écran d'identification —
+ * même logo, même carte — pour se lire comme la suite immédiate de l'entrée,
+ * et non comme une interruption.
+ */
+function PhoneVerifyScreen({ lang, customer, onVerified, onBypass, onEditPhone }) {
+  return (
+    <div style={{ ...S.page, padding: 26, display: 'flex', flexDirection: 'column', justifyContent: 'center' }}>
+      <Keyframes />
+      <div style={{ textAlign: 'center', marginBottom: 26 }}>
+        <Logo size={1.1} />
+      </div>
+      <PhoneVerifyGate
+        lang={lang}
+        customer={customer}
+        onVerified={onVerified}
+        onBypass={onBypass}
+        onEditPhone={onEditPhone}
+      />
     </div>
   )
 }
@@ -992,6 +1355,7 @@ export default function App() {
 function AppInner() {
   const route = useRoute()
   const scanPointId = parseScanRoute(route)
+  const presentationLinkId = parsePresentationRoute(route)
   const [session, setSession] = useState(undefined)
   const [recovery, setRecovery] = useState(false)
 
@@ -1021,6 +1385,7 @@ function AppInner() {
     )
   if (recovery) return <ResetPasswordScreen onDone={() => setRecovery(false)} />
   if (scanPointId) return <ClientApp scanPointId={scanPointId} session={session} />
+  if (presentationLinkId) return <PresentationEntry linkId={presentationLinkId} session={session} />
   // `noti-staff` porte la palette épurée de l'espace équipe (voir
   // index.html). Le parcours client n'est pas enveloppé : il garde la charte.
   return (
@@ -1103,6 +1468,88 @@ function ResetPasswordScreen({ onDone }) {
   )
 }
 
+/**
+ * Point d'entrée d'un lien de présentation staff — /staff-preview/{id}.
+ * Aucune connexion requise : on ouvre une session anonyme (même mécanisme
+ * que le client qui scanne un QR) et on l'échange contre un accès staff via
+ * redeem_presentation_link() — voir 0043_liens_presentation_staff.sql.
+ */
+function PresentationEntry({ linkId, session }) {
+  const [status, setStatus] = useState('working') // working | error | ready
+  const [err, setErr] = useState('')
+  // La session anonyme tout juste ouverte, gardée ici : l'événement qui la
+  // remonte à AppInner peut arriver après ce premier rendu, et l'espace
+  // équipe monté avec une session nulle obligeait à recharger la page.
+  const [opened, setOpened] = useState(null)
+  const ranRef = useRef(false)
+
+  useEffect(() => {
+    if (ranRef.current) return
+    ranRef.current = true
+    let cancelled = false
+    ;(async () => {
+      try {
+        let live = session
+        if (!live) {
+          const { data, error } = await supabase.auth.signInAnonymously()
+          if (error) throw error
+          live = data.session
+        }
+        if (!live) throw new Error('not_authenticated')
+
+        const { data, error } = await supabase.rpc('redeem_presentation_link', { p_link: linkId })
+        if (error) throw error
+        if (typeof data !== 'string') throw new Error('unknown_link')
+        LS.set('noti:venue', data)
+        LS.del('noti:event')
+        if (!cancelled) {
+          setOpened(live)
+          setStatus('ready')
+        }
+      } catch (e) {
+        if (!cancelled) {
+          setErr(frError(e))
+          setStatus('error')
+        }
+      }
+    })()
+    return () => {
+      cancelled = true
+    }
+  }, [linkId, session])
+
+  if (status === 'working') {
+    return (
+      <div style={S.page}>
+        <Spinner />
+      </div>
+    )
+  }
+
+  if (status === 'error') {
+    return (
+      <div style={{ ...S.page, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 22 }}>
+        <div style={{ width: '100%', maxWidth: 420 }}>
+          <div style={{ textAlign: 'center', marginBottom: 26 }}>
+            <Logo size={1.2} />
+          </div>
+          <div style={S.card}>
+            <Banner tone="danger">Ce lien de présentation n’est plus valide. {err}</Banner>
+          </div>
+        </div>
+      </div>
+    )
+  }
+
+  // `session` dès qu'AppInner l'a reçue (elle suit les renouvellements de
+  // jeton), sinon celle qu'on vient d'ouvrir.
+  return (
+    <div className="noti-staff">
+      <StaffApp session={session || opened} />
+    </div>
+  )
+}
+
 function ConfigScreen() {
   return (
     <div style={{ ...S.page, padding: 24 }}>
@@ -1142,6 +1589,7 @@ function ClientApp({ scanPointId, session }) {
   // clique sur le logo et on repart d'une base saine »).
   const [step, setStep] = useState('welcome')
   const [lang, setLang] = useState(LS.get('noti:lang', 'fr'))
+  const [verifyBypassed, setVerifyBypassed] = useState(false)
   const [toast, showToast] = useToast()
 
   useEffect(() => LS.set('noti:lang', lang), [lang])
@@ -1256,6 +1704,9 @@ function ClientApp({ scanPointId, session }) {
     forgetMe()
     autoEntered.current = false
     setCustomer(null)
+    // Le laissez-passer accordé sur incident technique ne doit pas profiter à
+    // la personne suivante sur le même appareil.
+    setVerifyBypassed(false)
     setStep('welcome')
     try {
       await supabase.auth.signOut()
@@ -1280,6 +1731,20 @@ function ClientApp({ scanPointId, session }) {
     )
 
   const shared = { event, venue, scanPoint, lang, setLang, showToast }
+
+  // Un incident technique (panne Firebase, réseau) laisse entrer : on retient
+  // ce laissez-passer, sinon l'écran se remonterait en boucle derrière lui.
+  const phoneVerified =
+    customer?.phone_verified_at && customer.phone_verified_number === customer.phone
+  // `phone_verify_required` (0053) : interrupteur par soirée, réglable depuis
+  // Réglages sans redéploiement — la vérification peut être mise en pause un
+  // soir donné sans toucher aux variables Firebase.
+  const mustVerifyPhone =
+    phoneVerificationAvailable &&
+    event?.phone_verify_required !== false &&
+    Boolean(customer) &&
+    !phoneVerified &&
+    !verifyBypassed
 
   if (step === 'welcome') {
     // Appareil déjà identifié : l'effet d'aiguillage nous emmène directement
@@ -1307,6 +1772,25 @@ function ClientApp({ scanPointId, session }) {
           await loadCustomer()
           setStep('hello')
         }}
+      />
+    )
+
+  // Vérification du numéro : enchaînée à la saisie des informations, jamais au
+  // moment de commander. Placée ici plutôt que dans l'écran d'identification
+  // pour couvrir aussi l'appareil déjà reconnu, qui ne repasse pas par la
+  // saisie — sans quoi la vérification cesserait d'être obligatoire dès la
+  // deuxième soirée.
+  if (mustVerifyPhone)
+    return (
+      <PhoneVerifyScreen
+        {...shared}
+        customer={customer}
+        onVerified={loadCustomer}
+        onBypass={() => {
+          showToast(dict(lang).phoneVerifyBypassed, 'info')
+          setVerifyBypassed(true)
+        }}
+        onEditPhone={() => setStep('identify')}
       />
     )
 
@@ -1605,23 +2089,21 @@ function IdentifyScreen({ lang, onVerified }) {
           />
         </Field>
 
-        <div style={{ display: 'flex', gap: 10 }}>
-          <div style={{ flex: 1 }}>
-            <Field label={t.postalCode}>
-              <input
-                style={S.input}
-                inputMode="numeric"
-                value={postalCode}
-                onChange={(e) => setPostalCode(e.target.value)}
-                autoComplete="postal-code"
-                placeholder="75011"
-              />
-            </Field>
-          </div>
-          <div style={{ flex: 1.35 }}>
-            <BirthdateField label={t.birthdate} value={birthdate} onChange={setBirthdate} />
-          </div>
-        </div>
+        {/* Retour terrain : sur une ligne partagée, le code postal se
+            retrouvait écrasé à côté des trois cases de la date de naissance.
+            Chacun a sa propre ligne, comme dans l'espace client. */}
+        <Field label={t.postalCode}>
+          <input
+            style={S.input}
+            inputMode="numeric"
+            value={postalCode}
+            onChange={(e) => setPostalCode(e.target.value)}
+            autoComplete="postal-code"
+            placeholder="75011"
+          />
+        </Field>
+
+        <BirthdateField label={t.birthdate} value={birthdate} onChange={setBirthdate} />
 
         {showOptional ? (
           <>
@@ -1789,6 +2271,7 @@ function OrderingApp({
   const t = useT(lang)
   const [products, setProducts] = useState([])
   const [orders, setOrders] = useState([])
+  const [queue, setQueue] = useState({}) // { id de commande: personnes devant }
   const [messages, setMessages] = useState([])
   const [loading, setLoading] = useState(true)
   const [view, setView] = useState('menu')
@@ -1940,11 +2423,41 @@ function OrderingApp({
     setOrders(data || [])
   }, [event?.id, customer?.id])
 
+  // Rang dans la file : combien de personnes ont commandé avant soi et
+  // attendent encore. Il descend quand le bar sert QUELQU'UN D'AUTRE — un
+  // événement que le canal temps réel du client ne voit pas (il ne suit que
+  // ses propres commandes). D'où l'interrogation périodique plus bas, seule
+  // façon de voir la file avancer.
+  const pendingKey = orders
+    .filter((o) => o.status === 'RECEIVED' || o.status === 'IN_PREP')
+    .map((o) => o.id)
+    .join(',')
+
+  const loadQueue = useCallback(async () => {
+    const ids = pendingKey ? pendingKey.split(',') : []
+    if (!ids.length) return setQueue({})
+    const entries = await Promise.all(
+      ids.map(async (id) => {
+        const { data, error } = await supabase.rpc('orders_ahead', { p_order: id })
+        return [id, error || typeof data !== 'number' ? null : data]
+      })
+    )
+    setQueue(Object.fromEntries(entries))
+  }, [pendingKey])
+
+  // Les annonces générales (« le bar ferme dans 10 min ») ne remontent plus
+  // chez le client : jugées superflues au test terrain sur ce type de soirée,
+  // où tout ce qui n'aide pas à commander ou à retirer encombre. Le staff
+  // garde l'outil de diffusion, et les deux autres natures de message — le
+  // suivi de commande et le message adressé à quelqu'un — restent.
+  // Écarté ici, à la source : l'onglet Messages, le bandeau des non-lus et la
+  // pastille de l'onglet se servent tous de cette liste.
   const loadMessages = useCallback(async () => {
     const { data } = await supabase
       .from('messages')
       .select('*')
       .eq('event_id', event?.id)
+      .neq('kind', 'broadcast')
       .order('created_at', { ascending: false })
       .limit(20)
     setMessages(data || [])
@@ -2025,9 +2538,13 @@ function OrderingApp({
         // provoquait un rendu inutile de tout l'écran de commande.
         setRealtimeDown((prev) => (prev === down ? prev : down))
         // Une reconnexion a pu manquer des événements : on resynchronise.
+        // La carte en fait partie depuis qu'elle n'est plus relevée
+        // périodiquement — sans ça, une rupture de stock annoncée pendant la
+        // coupure resterait invisible jusqu'à la fin de la soirée.
         if (status === 'SUBSCRIBED') {
           loadOrders()
           loadMessages()
+          loadProducts()
         }
       })
 
@@ -2045,21 +2562,47 @@ function OrderingApp({
   // Repli en interrogation périodique, dans son propre effet : sa cadence
   // dépend de l'état du canal, mais il ne doit surtout pas emporter le canal
   // avec lui à chaque changement de cadence.
+  // Cadences calibrées sur ce que chaque appel coûte RÉELLEMENT au serveur,
+  // multiplié par le nombre de téléphones dans la salle.
+  //
+  // La carte pèse ~33 Ko (illustrations comprises) et ne bouge pas de la
+  // soirée, à l'exception des ruptures de stock — que le canal temps réel
+  // signale déjà. La recharger toutes les 20 secondes par téléphone, c'était
+  // ~240 Mo l'heure à 40 clients pour des octets identiques. Elle n'est donc
+  // plus rechargée que lorsque le canal est tombé, et lentement.
+  //
+  // Les messages étaient relevés toutes les 6 s parce qu'une annonce devait
+  // être vue tout de suite. Les annonces ne remontent plus chez le client, et
+  // ce qui reste — suivi de commande, message adressé à quelqu'un — arrive
+  // déjà par le canal et par la notification poussée. Le repli peut donc
+  // respirer.
   useEffect(() => {
     if (!customer?.id || !event?.id) return
-    const msgPoll = setInterval(() => loadMessages(), 6000)
-    const restPoll = setInterval(
-      () => {
-        loadOrders()
-        loadProducts()
-      },
-      realtimeDown ? 6000 : 20000
-    )
+    const msgPoll = setInterval(() => loadMessages(), realtimeDown ? 6000 : 15000)
+    const orderPoll = setInterval(() => loadOrders(), realtimeDown ? 6000 : 20000)
+    const menuPoll = realtimeDown ? setInterval(() => loadProducts(), 30000) : null
     return () => {
       clearInterval(msgPoll)
-      clearInterval(restPoll)
+      clearInterval(orderPoll)
+      if (menuPoll) clearInterval(menuPoll)
     }
   }, [customer?.id, event?.id, loadOrders, loadMessages, loadProducts, realtimeDown])
+
+  // Le rang dans la file a sa propre cadence : il bouge quand le bar sert
+  // quelqu'un d'autre, ce dont aucun abonnement du client n'est prévenu — le
+  // canal ne suit que ses propres commandes. Seule l'interrogation permet
+  // donc de voir la file avancer.
+  //
+  // 10 s : assez court pour que le rang descende sous les yeux, assez long
+  // pour rester discret. Le calcul lui-même est mesuré à 0,75 ms sur une
+  // soirée de 2 000 commandes, et cet effet ne tourne que tant qu'une
+  // commande est en attente.
+  useEffect(() => {
+    if (!pendingKey) return
+    loadQueue()
+    const id = setInterval(() => loadQueue(), 10000)
+    return () => clearInterval(id)
+  }, [pendingKey, loadQueue])
 
   // ---- Sonnerie douce quand une commande passe à « prête » ----------------
   useEffect(() => {
@@ -2094,7 +2637,10 @@ function OrderingApp({
   }, [universesAvailable, universe])
 
   const subcats = useMemo(
-    () => [...new Set(products.filter((p) => p.universe === universe).map((p) => p.subcategory))],
+    () =>
+      sortSubcatsByPriority([
+        ...new Set(products.filter((p) => p.universe === universe).map((p) => p.subcategory)),
+      ]),
     [products, universe]
   )
 
@@ -2292,15 +2838,11 @@ function OrderingApp({
       }
     }
 
-    // Notification de statut « commande reçue » (best-effort).
-    notify({
-      eventId: event?.id,
-      kind: 'status',
-      customerId: customer?.id,
-      orderId: data?.id,
-      title: t.notifReceivedTitle,
-      body: t.notifReceivedBody(data?.pickup_code),
-    })
+    // Pas de notification à l'arrivée de la commande : décision du 25/09 — la
+    // seule notif envoyée au client est celle du passage en « Prête » (voir
+    // move(), plus bas), pour ne pas multiplier les alertes sur son
+    // téléphone. Le client voit sa commande apparaître dans « Mes commandes »
+    // (loadOrders juste au-dessus), ce qui suffit à confirmer l'envoi.
     return data
   }
 
@@ -2594,6 +3136,7 @@ function OrderingApp({
         ) : view === 'orders' ? (
           <MyOrders
             orders={orders}
+            queue={queue}
             focusOrder={focusOrder}
             onFocusDone={() => setFocusOrder(null)}
             onCancel={cancelOrder}
@@ -2638,7 +3181,7 @@ function OrderingApp({
                   }}
                 >
                   <div style={{ fontSize: 20, marginBottom: 3 }}>{u.e}</div>
-                  {lang === 'en' ? u.en : lang === 'es' ? u.es : u.t}
+                  {t[u.i18n]}
                 </button>
               ))}
             </div>
@@ -2668,7 +3211,7 @@ function OrderingApp({
                     background: subcat === c ? 'rgba(106,95,214,.08)' : 'transparent',
                   }}
                 >
-                  {c}
+                  {trSubcat(c, lang)}
                 </button>
               ))}
             </ScrollHint>
@@ -2682,7 +3225,7 @@ function OrderingApp({
                 data-subcat={c}
                 style={{ marginBottom: 26, scrollMarginTop: headerH + 62 }}
               >
-                <div style={{ ...S.h2, marginBottom: 10, fontSize: 13 }}>{c}</div>
+                <div style={{ ...S.h2, marginBottom: 10, fontSize: 13 }}>{trSubcat(c, lang)}</div>
                 <div style={{ display: 'grid', gap: 10 }}>
                   {products
                     .filter((p) => p.universe === universe && p.subcategory === c)
@@ -2812,7 +3355,6 @@ function OrderingApp({
         promoCode={promoCode}
         subtotal={subtotal}
         creditsTotal={creditsTotal}
-        prepMin={event.default_prep_min ?? 1}
         onClose={() => setCartCheckout(false)}
         onSubmit={async (payload) => {
           try {
@@ -2842,7 +3384,15 @@ function OrderingApp({
           await onReloadCustomer?.()
           showToast(t.profileSaved, 'ok')
         }}
+        onReloadCustomer={onReloadCustomer}
         showToast={showToast}
+        phoneVerifyRequired={event?.phone_verify_required !== false}
+        pass={pass}
+        gifts={gifts}
+        promoCode={promoCode}
+        onRedeemCode={redeemCode}
+        onClearCode={clearCode}
+        onConvert={convertFoodToken}
       />
 
       <ReviewSheet
@@ -3711,10 +4261,18 @@ function ClientProfileSheet({
   customer,
   onClose,
   onSaved,
+  onReloadCustomer,
   showToast,
   credits = 0,
   orders = [],
   onLogout,
+  phoneVerifyRequired = true,
+  pass,
+  gifts,
+  promoCode,
+  onRedeemCode,
+  onClearCode,
+  onConvert,
 }) {
   const t = useT(lang)
   const [phone, setPhone] = useState('')
@@ -3811,6 +4369,26 @@ function ClientProfileSheet({
         )}
       </div>
 
+      {/* Retour terrain : le code n'était saisissable que depuis la carte —
+          un client déjà dans son espace, par ex. pour vérifier son numéro,
+          devait en ressortir pour l'activer. Même carte, même logique
+          (onRedeemCode etc. viennent d'OrderingApp), juste un second endroit
+          où la trouver. */}
+      {onRedeemCode && (
+        <div style={{ marginBottom: 16 }}>
+          <PromoCodeCard
+            lang={lang}
+            pass={pass}
+            gifts={gifts}
+            promoCode={promoCode}
+            onRedeemCode={onRedeemCode}
+            onClearCode={onClearCode}
+            onConvert={onConvert}
+            showToast={showToast}
+          />
+        </div>
+      )}
+
       <div style={{ ...S.card, marginBottom: 16 }}>
         <div style={{ ...S.label, marginBottom: 10 }}>{t.myOrdersHere}</div>
         {orders.length === 0 ? (
@@ -3873,6 +4451,15 @@ function ClientProfileSheet({
           placeholder="06 12 34 56 78"
         />
       </Field>
+
+      <PhoneVerifyBlock
+        lang={lang}
+        customer={customer}
+        phone={phone}
+        enabled={phoneVerifyRequired}
+        showToast={showToast}
+        onVerified={onReloadCustomer}
+      />
 
       {/* Retour terrain : sur une ligne partagée, le code postal se
           retrouvait écrasé à côté des trois cases de la date de naissance.
@@ -4020,11 +4607,25 @@ function CartSheet({ open, cart, lang, subtotal, onClose, onQty, onCheckout }) {
 }
 
 // ----------------------------------------------------------------- Validation
-function CheckoutSheet({ open, lang, event, cart, pass, promoCode, subtotal, prepMin, creditsTotal = 0, onClose, onSubmit }) {
+function CheckoutSheet({
+  open,
+  lang,
+  event,
+  cart,
+  pass,
+  promoCode,
+  subtotal,
+  creditsTotal = 0,
+  onClose,
+  onSubmit,
+}) {
   const t = useT(lang)
   const [note, setNote] = useState('')
   const [preview, setPreview] = useState(null)
   const [busy, setBusy] = useState(false)
+  // La vérification du numéro ne vit plus ici : elle se fait à l'entrée du
+  // parcours, avec le reste des informations. Retour de test — une demande
+  // qui tombe d'un coup au moment de commander casse le flux et agace.
 
   // Délai de grâce (note du 23/08, §2bis.1). Le point qui fait tout l'intérêt
   // du mécanisme : pendant ces 5 secondes, RIEN n'est envoyé au serveur, donc
@@ -4175,10 +4776,15 @@ function CheckoutSheet({ open, lang, event, cart, pass, promoCode, subtotal, pre
         <PayAtBar lang={lang} />
       </div>
 
+      {/* Plus d'estimation de temps de préparation ici — retour terrain : un
+          chiffre annoncé (même ajustable en direct depuis l'onglet Bar) finit
+          toujours par être pris pour une promesse, et un Wi-Fi engorgé peut le
+          rendre faux d'une minute à l'autre. Le client est prévenu par
+          message (push/SMS) dès que sa commande est réellement prête — voir
+          move() dans BarTab — ce qui n'a pas besoin d'un délai annoncé pour
+          fonctionner. */}
       <div style={{ marginBottom: 16 }}>
-        <Banner tone="info">
-          <strong>{t.readyIn(prepMin)}</strong> {t.pickup5}
-        </Banner>
+        <Banner tone="info">{t.pickup5}</Banner>
       </div>
 
       {pending ? (
@@ -4374,6 +4980,7 @@ function MessagesView({
 
 function MyOrders({
   orders,
+  queue,
   event,
   venue,
   customer,
@@ -4387,13 +4994,7 @@ function MyOrders({
   onCancel,
 }) {
   const t = useT(lang)
-  const [now, setNow] = useState(Date.now())
   const cardRefs = useRef({})
-
-  useEffect(() => {
-    const id = setInterval(() => setNow(Date.now()), 1000)
-    return () => clearInterval(id)
-  }, [])
 
   // Arrivée depuis un message de suivi : on amène directement le bon ticket
   // sous les yeux plutôt que de laisser chercher dans la liste.
@@ -4444,11 +5045,11 @@ function MyOrders({
         >
         <OrderCard
           order={o}
+          ahead={queue?.[o.id]}
           event={event}
           venue={venue}
           customer={customer}
           lang={lang}
-          now={now}
           onReview={() => onReview(o)}
           onCancel={onCancel}
         />
@@ -4462,36 +5063,19 @@ function MyOrders({
   )
 }
 
-function OrderCard({ order, event, venue, customer, lang, now, onReview, onCancel }) {
+function OrderCard({ order, ahead, event, venue, customer, lang, onReview, onCancel }) {
   const t = useT(lang)
   const st = ORDER_STATUS[order.status] || ORDER_STATUS.RECEIVED
   const items = order.order_items || []
-  const etaMs = order.estimated_ready_at ? new Date(order.estimated_ready_at).getTime() - now : 0
-  const etaSec = Math.max(0, Math.round(etaMs / 1000))
-  const mm = String(Math.floor(etaSec / 60)).padStart(2, '0')
-  const ss = String(etaSec % 60).padStart(2, '0')
 
-  // Retard : le compte à rebours est tombé à zéro et rien n'est prêt. Le
-  // compteur figé à 00:00 laissait le client sans nouvelle — on assume le
-  // retard avec une phrase légère, plutôt que par un silence.
   const pending = order.status === 'RECEIVED' || order.status === 'IN_PREP'
   const awaitingPayment = order.status === 'AWAITING_PAYMENT'
   // Annulable tant que le bar n'a pas lancé la préparation (§2bis.2).
   const cancellable = order.status === 'RECEIVED' || awaitingPayment
-  const lateMin = order.estimated_ready_at && pending ? Math.floor(-etaMs / 60000) : -1
-  const isLate = lateMin >= 1
-  const delayNote = useMemo(() => {
-    if (!isLate) return null
-    const notes = t.delayNotes || []
-    if (!notes.length) return null
-    if (lateMin >= 10) return t.delayNoteLate || notes[0]
-    // Stable par commande, mais renouvelée toutes les deux minutes : la phrase
-    // ne clignote pas à chaque tic d'horloge et ne se répète pas non plus si
-    // l'attente s'étire.
-    let h = 0
-    for (const ch of String(order.id)) h = (h * 31 + ch.charCodeAt(0)) >>> 0
-    return notes[(h + Math.floor(lateMin / 2)) % notes.length]
-  }, [isLate, lateMin, order.id, t])
+  // Le rang n'est affiché qu'une fois connu : `undefined` = pas encore
+  // remonté, et afficher « vous êtes le prochain » par défaut serait une
+  // promesse aussi fausse que le compte à rebours qu'on vient de retirer.
+  const showAhead = pending && typeof ahead === 'number'
 
   const steps = ['RECEIVED', 'IN_PREP', 'READY', 'PICKED_UP', 'PAID']
   const idx = Math.max(0, steps.indexOf(order.status === 'UNPAID' ? 'PICKED_UP' : order.status))
@@ -4556,34 +5140,16 @@ function OrderCard({ order, event, venue, customer, lang, now, onReview, onCance
           <div style={{ fontFamily: FONT.label, fontWeight: 600, letterSpacing: 1, color: st.color }}>
             {statusLabel(order.status, lang).toUpperCase()}
           </div>
-          {pending && etaSec > 0 && (
-            <div style={{ ...S.money, marginLeft: 'auto', fontSize: 20, fontWeight: 600 }}>
-              {mm}:{ss}
-            </div>
-          )}
-          {isLate && (
-            <div
-              style={{
-                marginLeft: 'auto',
-                fontFamily: FONT.label,
-                fontSize: 10.5,
-                fontWeight: 600,
-                letterSpacing: 0.6,
-                textTransform: 'uppercase',
-                color: C.goldDark,
-                background: `${alpha(C.gold, 15)}`,
-                border: `1px solid ${C.gold}`,
-                borderRadius: 999,
-                padding: '3px 9px',
-                whiteSpace: 'nowrap',
-              }}
-            >
-              {t.delayBadge}
+          {showAhead && ahead > 0 && (
+            <div style={{ ...S.money, marginLeft: 'auto', fontSize: 22, fontWeight: 600 }}>
+              {ahead}
             </div>
           )}
         </div>
 
-        {delayNote && (
+        {/* Rang dans la file, à la place du temps estimé : il situe sans rien
+            promettre, et descend sous les yeux du client. */}
+        {showAhead && (
           <div
             style={{
               display: 'flex',
@@ -4592,15 +5158,15 @@ function OrderCard({ order, event, venue, customer, lang, now, onReview, onCance
               padding: '11px 13px',
               marginBottom: 14,
               borderRadius: 14,
-              background: `${alpha(C.gold, 9)}`,
-              border: `1px solid ${alpha(C.gold, 40)}`,
+              background: alpha(C.terracotta, 8),
+              border: `1px solid ${alpha(C.terracotta, 30)}`,
               fontSize: 13,
               lineHeight: 1.5,
               color: C.text,
             }}
           >
-            <span aria-hidden="true">⏳</span>
-            <span>{delayNote}</span>
+            <span aria-hidden="true">{ahead > 0 ? '👥' : '🎯'}</span>
+            <span>{ahead > 0 ? t.queueAhead(ahead) : t.queueNext}</span>
           </div>
         )}
 
@@ -4823,6 +5389,7 @@ async function renderRecapCanvas({ venue, event, order, items, customer }) {
   const W = 1240
   const H = 1754
   const { canvas, ctx } = makeCanvas(W, H, 1)
+  await ensureFontsReady()
 
   ctx.fillStyle = '#FFFFFF'
   ctx.fillRect(0, 0, W, H)
@@ -4909,20 +5476,29 @@ async function renderRecapCanvas({ venue, event, order, items, customer }) {
     y += Math.max(h, 30) + 16
   }
 
-  // Totaux + TVA
+  // Totaux + TVA — les trois libellés (Sous-total, TVA, TOTAL) restent
+  // alignés à droite sur le MÊME x, quelle que soit leur police : c'était
+  // le bug (le grand total utilisait un ancrage 20 px plus à gauche que
+  // les deux lignes au-dessus, donc son bord droit décrochait visuellement
+  // du reste de la colonne). Rester en aligné-à-droite plutôt que passer en
+  // aligné-à-gauche est volontaire : ça garde le libellé — même en gros
+  // caractères gras pour TOTAL — naturellement à distance de la valeur à
+  // droite, qui elle aussi grossit pour ce total final.
+  const labelX = W - 300
+  const valueX = W - 90
   y = Math.max(y + 24, H - 420)
   ctx.textAlign = 'right'
   ctx.fillStyle = '#5A6480'
   ctx.font = '400 20px Jost, sans-serif'
-  ctx.fillText('Sous-total', W - 300, y)
+  ctx.fillText('Sous-total', labelX, y)
   ctx.fillStyle = '#1C2A4A'
-  ctx.fillText(eur(order.subtotal ?? order.total), W - 90, y)
+  ctx.fillText(eur(order.subtotal ?? order.total), valueX, y)
   y += 34
 
   if (Number(order.discount) > 0) {
     ctx.fillStyle = '#2E7D5B'
-    ctx.fillText(order.promo_code || 'Remise', W - 300, y)
-    ctx.fillText(`−${eur(order.discount)}`, W - 90, y)
+    ctx.fillText(order.promo_code || 'Remise', labelX, y)
+    ctx.fillText(`−${eur(order.discount)}`, valueX, y)
     y += 34
   }
 
@@ -4935,18 +5511,19 @@ async function renderRecapCanvas({ venue, event, order, items, customer }) {
   ctx.font = '400 16px Jost, sans-serif'
   for (const r of Object.keys(vat).sort()) {
     const ttc = vat[r]
-    ctx.fillText(`dont TVA ${r} %`, W - 300, y)
-    ctx.fillText(eur(ttc - ttc / (1 + Number(r) / 100)), W - 90, y)
+    ctx.fillText(`dont TVA ${r} %`, labelX, y)
+    ctx.fillText(eur(ttc - ttc / (1 + Number(r) / 100)), valueX, y)
     y += 26
   }
 
   y += 16
   ctx.fillStyle = '#1C2A4A'
   ctx.font = '500 30px Oswald, sans-serif'
-  ctx.fillText('TOTAL', W - 320, y)
+  ctx.fillText('TOTAL', labelX, y)
   ctx.fillStyle = '#B96A4C'
   ctx.font = '600 40px Jost, sans-serif'
-  ctx.fillText(eur(order.total), W - 90, y + 2)
+  ctx.fillText(eur(order.total), valueX, y + 2)
+  ctx.textAlign = 'left'
 
   // Mention de règlement
   ctx.textAlign = 'center'
@@ -5218,6 +5795,7 @@ function StaffLogin() {
 // ============================================================================
 
 const STAFF_TABS = [
+  { k: 'dashboard', t: 'Dashboard', e: '🏠' },
   { k: 'bar', t: 'Bar', e: '🍸' },
   { k: 'caisse', t: 'Caisse', e: '🧾' },
   { k: 'orga', t: 'Orga', e: '📡' },
@@ -5251,15 +5829,517 @@ function tabsForRole(role) {
   return STAFF_TABS.filter((t) => allowed.includes(t.k))
 }
 
+/**
+ * Mode démo — retour terrain : « une aide si le serveur oublie un truc ». Un
+ * rappel des fonctions principales de l'espace équipe, en diapositives, sans
+ * rien modifier ni exiger d'être branché à une vraie soirée. Volontairement
+ * indépendant de tout état (pas de fetch, pas d'écriture) : c'est un mémo,
+ * pas un tutoriel interactif — au personnel de le fermer dès qu'il a trouvé
+ * sa réponse.
+ */
+const DEMO_SLIDES = [
+  {
+    e: '👋',
+    t: 'Aide rapide',
+    body: [
+      'Un rappel des fonctions principales de l’espace équipe.',
+      'Naviguez avec les flèches, quittez quand vous voulez avec la croix en haut.',
+      'Ça ne modifie ni n’enregistre rien — c’est juste un mémo.',
+    ],
+  },
+  {
+    e: '🏠',
+    t: 'Dashboard',
+    body: [
+      'Vue d’ensemble en direct de la soirée : arrivées, ventes, alertes.',
+      'Le premier écran à regarder pour prendre la température.',
+    ],
+  },
+  {
+    e: '🍸',
+    t: 'Bar',
+    body: [
+      'Le cœur du service : Reçue → En préparation → Prête → Retirée.',
+      'Mode Cadrans (rapide, dense) ou Colonnes (détaillé, colonnes réordonnables).',
+      '« Imprimer » envoie le ticket ET passe la commande en préparation.',
+      'Le bouton 📣 relance le client par SMS s’il tarde à venir chercher.',
+    ],
+  },
+  {
+    e: '🧾',
+    t: 'Caisse',
+    body: [
+      'Suivi de l’encaissement du « food » (payé sur place).',
+      'Aucun paiement n’est traité ici : c’est juste le pointage de qui a réglé.',
+    ],
+  },
+  {
+    e: '📡',
+    t: 'Orga',
+    body: [
+      'Pilotage temps réel : affluence, retraits en retard, reporting.',
+      'Envoyer un message (diffusion ou individuel) à un ou tous les clients.',
+    ],
+  },
+  {
+    e: '📋',
+    t: 'Carte',
+    body: [
+      'Gestion du menu : produits, prix, variantes.',
+      'Marquer un article épuisé — il reste visible, grisé, sans le supprimer.',
+    ],
+  },
+  {
+    e: '👥',
+    t: 'Clients',
+    body: [
+      'Fiches clients, historique cross-événement, tags (VIP, habitué…).',
+      'Recherche par nom, téléphone ou code de retrait.',
+    ],
+  },
+  {
+    e: '🕓',
+    t: 'Historique',
+    body: ['Toutes les commandes de la soirée, quel que soit leur sort — servies ou annulées.'],
+  },
+  {
+    e: '⬛',
+    t: 'QR',
+    body: ['Les codes QR à afficher ou imprimer pour que les clients scannent et commandent.'],
+  },
+  {
+    e: '⚙️',
+    t: 'Réglages',
+    body: ['Imprimante, équipe, vérification du numéro, paramètres de la soirée (fermeture, etc.).'],
+  },
+  {
+    e: '✅',
+    t: 'C’est tout !',
+    body: ['Quittez à tout moment avec la croix.', 'Bon service 🙌'],
+  },
+]
+
+function DemoModeOverlay({ onClose }) {
+  const [i, setI] = useState(0)
+  const last = i === DEMO_SLIDES.length - 1
+  const slide = DEMO_SLIDES[i]
+
+  useEffect(() => {
+    function onKey(e) {
+      if (e.key === 'Escape') onClose()
+      if (e.key === 'ArrowRight') setI((n) => Math.min(DEMO_SLIDES.length - 1, n + 1))
+      if (e.key === 'ArrowLeft') setI((n) => Math.max(0, n - 1))
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [onClose])
+
+  return (
+    <div
+      style={{
+        position: 'fixed',
+        inset: 0,
+        zIndex: 20000,
+        background: C.cream,
+        display: 'flex',
+        flexDirection: 'column',
+      }}
+      className="no-print"
+    >
+      <div style={{ display: 'flex', alignItems: 'center', padding: '16px 18px 0' }}>
+        <div style={{ ...S.label, color: C.faint }}>
+          Mode démo · {i + 1}/{DEMO_SLIDES.length}
+        </div>
+        <button
+          onClick={onClose}
+          title="Quitter le mode démo"
+          style={{
+            marginLeft: 'auto',
+            width: 40,
+            height: 40,
+            borderRadius: 20,
+            border: `1.5px solid ${C.lineHi}`,
+            background: C.paper,
+            color: C.dim,
+            fontSize: 18,
+            cursor: 'pointer',
+          }}
+        >
+          ✕
+        </button>
+      </div>
+
+      <div
+        style={{
+          flex: 1,
+          display: 'flex',
+          flexDirection: 'column',
+          alignItems: 'center',
+          justifyContent: 'center',
+          padding: '20px 28px',
+          textAlign: 'center',
+        }}
+      >
+        <div style={{ fontSize: 56, marginBottom: 14 }}>{slide.e}</div>
+        <div style={{ ...S.h1, fontSize: 26, marginBottom: 18 }}>{slide.t}</div>
+        <div style={{ display: 'grid', gap: 10, maxWidth: 440 }}>
+          {slide.body.map((line, k) => (
+            <div key={k} style={{ fontSize: 15.5, lineHeight: 1.5, color: C.dim }}>
+              {line}
+            </div>
+          ))}
+        </div>
+      </div>
+
+      <div style={{ display: 'flex', gap: 8, padding: '0 18px 4px' }}>
+        {DEMO_SLIDES.map((_, k) => (
+          <div
+            key={k}
+            style={{
+              flex: 1,
+              height: 4,
+              borderRadius: 2,
+              background: k === i ? C.terracotta : C.line,
+            }}
+          />
+        ))}
+      </div>
+
+      <div
+        style={{
+          display: 'flex',
+          gap: 10,
+          padding: '14px 18px calc(env(safe-area-inset-bottom) + 18px)',
+        }}
+      >
+        <button
+          onClick={() => setI((n) => Math.max(0, n - 1))}
+          disabled={i === 0}
+          style={{ ...S.btnGhost, flex: 1, minHeight: 52, opacity: i === 0 ? 0.4 : 1 }}
+        >
+          ‹ Précédent
+        </button>
+        <button
+          onClick={() => (last ? onClose() : setI((n) => Math.min(DEMO_SLIDES.length - 1, n + 1)))}
+          style={{ ...S.btn, flex: 1, minHeight: 52 }}
+        >
+          {last ? 'Terminer' : 'Suivant ›'}
+        </button>
+      </div>
+    </div>
+  )
+}
+
+/**
+ * Réservation + envoi + journal d'un ticket « arrivée », partagés entre
+ * l'impression automatique (AutoPrintDaemon) et le bouton « Imprimer »
+ * manuel (BarTab) : les deux se disputent la MÊME réservation
+ * (claim_ticket_print / printed_at), donc un ticket déjà sorti par l'un ne
+ * ressort jamais via l'autre — que la soirée soit en mode auto ou manuel.
+ *
+ * `ambiguous` (délai dépassé côté imprimante) ne relâche jamais la
+ * réservation : la relâcher redéclenchait aussitôt une nouvelle tentative
+ * via le temps réel, qui pouvait retimeouter et relâcher à son tour — une
+ * boucle d'impression sans fin, vécue en soirée (voir printer.js).
+ *
+ * @returns {Promise<'ok'|'failed'|'ambiguous'|'skipped'>}
+ */
+async function printArrivalTicket({ order, event, venue, trigger, showToast }) {
+  const { data: won, error: claimErr } = await supabase.rpc('claim_ticket_print', { p_order: order.id })
+  if (claimErr || !won) return 'skipped' // déjà imprimé, ou une autre tablette s'en charge
+
+  const res = await sendToPrinter(buildTicket({ order, event, venue }), { url: venue.printer_url })
+  await supabase.rpc('log_ticket_print', {
+    p_order: order.id,
+    p_trigger: trigger,
+    p_result: res.ok ? 'ok' : res.ambiguous ? 'ambiguous' : 'fail',
+    p_reason: res.ok ? null : res.reason,
+  })
+  if (!res.ok) {
+    if (!res.ambiguous) await supabase.rpc('release_ticket_print', { p_order: order.id })
+    showToast?.(
+      res.ambiguous
+        ? `Imprimante : ${res.reason} Vérifiez si le ticket ${order.pickup_code} est sorti avant de réimprimer.`
+        : `Imprimante : ${res.reason}`,
+      'error'
+    )
+    return res.ambiguous ? 'ambiguous' : 'failed'
+  }
+  return 'ok'
+}
+
+// Au-delà de ce nombre de tickets en attente à la fois, le démon s'arrête et
+// demande confirmation plutôt que de tout sortir d'un coup — c'est la
+// « sortie massive » vécue en soirée (une rafale de commandes = une rafale
+// de papier que personne ne peut suivre). En dessous du seuil, rien ne
+// change : impression automatique normale.
+const PRINT_BATCH_THRESHOLD = 3
+
+/**
+ * Impression silencieuse dès qu'une commande arrive — montée une fois pour
+ * toute la session staff, jamais à l'intérieur d'un onglet, pour qu'elle
+ * continue de tourner quel que soit l'écran ouvert sur la tablette (Bar,
+ * Caisse, Réglages…). C'est le chemin voulu par défaut (mode « automatique »,
+ * réglage dans Réglages → Imprimante) : le client envoie sa commande, le
+ * ticket sort tout seul. En mode « manuel », ce démon ne fait rien — c'est
+ * le bouton « Imprimer » de chaque commande (BarTab) qui prend le relais.
+ *
+ * Limite connue, assumée : ceci tourne dans l'onglet du navigateur — la
+ * tablette doit rester allumée avec l'app ouverte (elle n'a pas besoin
+ * d'être au premier plan, ni sur le bon onglet du SaaS, mais elle doit être
+ * en vie). Imprimer même tablette éteinte demanderait que l'imprimante
+ * aille chercher elle-même ses tickets sur un serveur (Epson « Server
+ * Direct Print », voir printer.js) — un service cloud à activer côté Epson,
+ * pas quelque chose qu'on peut ajouter seulement côté code.
+ *
+ * Rend une petite boîte flottante dans deux cas seulement : une rafale à
+ * confirmer, ou une impression en cours (pour suivre la sortie papier).
+ * Le reste du temps, invisible — les échecs isolés remontent par showToast.
+ */
+function AutoPrintDaemon({ event, venue, showToast }) {
+  // Verrou couvrant TOUT le cycle — de la décision jusqu'à la toute fin —
+  // pas seulement l'impression elle-même. Une première version ne le posait
+  // qu'à l'intérieur de la boucle d'impression : pendant qu'une rafale
+  // attendait une confirmation du staff, ce verrou était retombé à `false`,
+  // et la moindre commande supplémentaire (temps réel, ou le sondage de
+  // repli) relançait `run()` en parallèle — qui pouvait remplacer la boîte
+  // de confirmation en plein choix du staff, ou lancer un second passage
+  // concurrent. La réservation en base (claim_ticket_print) empêchait déjà
+  // un doublon d'impression, mais ce n'est pas une raison pour laisser
+  // deux cycles se marcher dessus côté écran. Posé dès l'entrée dans run(),
+  // relâché uniquement quand il n'y a plus rien en attente de décision.
+  const busy = useRef(false)
+  const failedOnce = useRef(false)
+  // Verrou séparé, propre à printBatch : un double-clic sur « Tout imprimer »
+  // (deux clics avant que React ait eu le temps de démonter le bouton) peut
+  // appeler cette fonction deux fois avec la même liste en fermeture. La
+  // réservation en base empêcherait déjà un doublon de ticket, mais autant
+  // ne pas laisser deux boucles tourner en parallèle pour rien.
+  const printingNow = useRef(false)
+  const [ui, setUi] = useState(null) // { mode: 'confirm', queue } | { mode: 'printing', code, done, total }
+  // Profondeur de la file, tenue à jour en continu (pas seulement pendant un
+  // envoi actif) — retour du terrain : l'impression étant devenue lente (le
+  // même Wi-Fi chargé que le reste), la boîte « impression en cours »
+  // n'apparaissait que par éclairs entre deux tickets, sans rien montrer le
+  // reste du temps. Ce compteur reste affiché tant qu'il reste des tickets
+  // non imprimés, même entre deux tentatives ou après un échec.
+  const [pendingCount, setPendingCount] = useState(0)
+
+  const printBatch = useCallback(
+    async (orders) => {
+      if (printingNow.current) return
+      printingNow.current = true
+      setPendingCount(orders.length)
+      try {
+        for (let i = 0; i < orders.length; i++) {
+          const order = orders[i]
+          setUi({ mode: 'printing', code: order.pickup_code, done: i, total: orders.length })
+          const outcome = await printArrivalTicket({ order, event, venue, trigger: 'arrival_auto', showToast })
+          setPendingCount(orders.length - i - 1)
+          if (outcome === 'failed') {
+            failedOnce.current = true
+            break // échec net (hors ligne, refusé) : inutile d'insister sur les suivantes
+          }
+          // 'ambiguous' (simple délai dépassé, Wi-Fi engorgé) N'INTERROMPT PAS
+          // le lot : contrairement à un échec net, rien ne dit que ce ticket-là
+          // n'est pas sorti quand même, juste lentement (voir printer.js). Le
+          // bloquer aurait laissé tous les tickets suivants attendre le
+          // prochain passage du démon (jusqu'à 45 s) derrière une seule
+          // réponse tardive — exactement le symptôme « ça bloque
+          // l'impression » constaté un soir de Wi-Fi très chargé.
+          if (outcome === 'ok') failedOnce.current = false
+        }
+      } catch (e) {
+        if (!failedOnce.current) {
+          failedOnce.current = true
+          showToast(`Imprimante : ${printerError(e)}`, 'error')
+        }
+      } finally {
+        printingNow.current = false
+        setUi(null)
+      }
+    },
+    [event, venue, showToast]
+  )
+
+  const run = useCallback(async () => {
+    if (!venue?.printer_auto || !venue?.printer_url || busy.current || !event?.id) return
+    busy.current = true
+    try {
+      const { data } = await supabase
+        .from('orders')
+        .select('*, order_items ( *, products ( universe ) ), customers ( first_name, last_name, phone, tags )')
+        .eq('event_id', event.id)
+        .is('printed_at', null)
+        .not('status', 'in', '(CANCELLED,AWAITING_PAYMENT)')
+        .order('created_at', { ascending: true })
+      const queue = data || []
+      setPendingCount(queue.length)
+      if (!queue.length) {
+        busy.current = false
+        return
+      }
+      if (queue.length <= PRINT_BATCH_THRESHOLD) {
+        await printBatch(queue)
+        busy.current = false
+      } else {
+        // On laisse `busy` posé : la confirmation est encore en attente,
+        // aucun autre passage ne doit démarrer avant que le staff choisisse.
+        setUi({ mode: 'confirm', queue })
+      }
+    } catch (e) {
+      busy.current = false
+      if (!failedOnce.current) {
+        failedOnce.current = true
+        showToast(`Imprimante : ${printerError(e)}`, 'error')
+      }
+    }
+  }, [event, venue, printBatch])
+
+  async function confirmNext() {
+    if (ui?.mode !== 'confirm') return
+    await printBatch(ui.queue.slice(0, PRINT_BATCH_THRESHOLD))
+    busy.current = false
+    run() // ré-évalue : imprime le reste tout seul s'il tient sous le seuil, redemande sinon
+  }
+  async function confirmAll() {
+    if (ui?.mode !== 'confirm') return
+    await printBatch(ui.queue)
+    busy.current = false
+  }
+
+  // Repasser en mode Manuel (ou retirer l'adresse imprimante) pendant qu'une
+  // rafale attendait une confirmation laisserait sinon cette boîte affichée
+  // à l'écran pour rien — rien ne la referme, puisque run() ne serait plus
+  // jamais rappelé pour la résoudre.
+  useEffect(() => {
+    if (!venue?.printer_auto || !venue?.printer_url) {
+      busy.current = false
+      setUi(null)
+      setPendingCount(0)
+    }
+  }, [venue?.printer_auto, venue?.printer_url])
+
+  useEffect(() => {
+    if (!venue?.printer_auto || !venue?.printer_url || !event?.id) return
+    run()
+    // Abonnement temps réel, propre à ce démon : indépendant de celui de
+    // BarTab, qui sert l'affichage et peut être démonté/remonté au gré de la
+    // navigation. Celui-ci ne l'est jamais tant que la session staff dure.
+    const ch = supabase
+      .channel(`autoprint-${event.id}`)
+      .on(
+        'postgres_changes',
+        { event: '*', schema: 'public', table: 'orders', filter: `event_id=eq.${event.id}` },
+        () => run()
+      )
+      .subscribe((status) => {
+        if (status === 'SUBSCRIBED') run()
+      })
+    // Repli si le canal reste muet (Wi-Fi capricieux) : sans lui, une coupure
+    // silencieuse du WebSocket arrêterait l'impression sans que personne ne
+    // le remarque avant la fin de la soirée. 45 s plutôt que 20 : ce n'est
+    // qu'un filet (le temps réel fait le travail en temps normal), et avec
+    // plusieurs tablettes ouvertes en même temps, chacune avec son propre
+    // sondage, les 20 s d'origine ajoutaient une charge en continu sur une
+    // base déjà tendue un soir de rush (voir aussi BarTab, CaisseTab, OrgaTab).
+    const poll = setInterval(run, 45000)
+    return () => {
+      supabase.removeChannel(ch)
+      clearInterval(poll)
+    }
+  }, [venue?.printer_auto, venue?.printer_url, event?.id, run])
+
+  const box = {
+    position: 'fixed',
+    left: 16,
+    right: 16,
+    maxWidth: 420,
+    margin: '0 auto',
+    bottom: 'calc(env(safe-area-inset-bottom) + 150px)',
+    zIndex: 8000,
+    background: C.paper,
+    border: `1.5px solid ${C.terracotta}`,
+    color: C.text,
+    borderRadius: 14,
+    padding: '14px 16px',
+    fontSize: 13.5,
+    fontWeight: 500,
+    boxShadow: '0 12px 36px rgba(28,42,74,.16)',
+  }
+
+  if (ui?.mode === 'printing') {
+    return (
+      <div style={box} className="no-print">
+        🖨 Impression en cours… {ui.code} ({ui.done + 1}/{ui.total})
+      </div>
+    )
+  }
+
+  if (ui?.mode === 'confirm') {
+    // Rafale au-delà du seuil, on laisse la main au staff.
+    return (
+      <div style={box} className="no-print">
+        <div style={{ marginBottom: 10 }}>
+          🖨 {ui.queue.length} tickets en attente d'impression — trop pour sortir d'un coup.
+        </div>
+        <div style={{ display: 'flex', gap: 8 }}>
+          <button onClick={confirmNext} style={{ ...S.btnGhost, flex: 1, minHeight: 44 }}>
+            Imprimer les {Math.min(PRINT_BATCH_THRESHOLD, ui.queue.length)} suivants
+          </button>
+          <button onClick={confirmAll} style={{ ...S.btn, flex: 1, minHeight: 44 }}>
+            Tout imprimer
+          </button>
+        </div>
+      </div>
+    )
+  }
+
+  // Rien d'actif en ce moment (ni envoi, ni confirmation à donner) mais des
+  // tickets restent non imprimés — un indicateur discret, mais permanent
+  // tant que la file n'est pas vide, plutôt que de ne plus rien montrer
+  // entre deux passages du démon.
+  if (pendingCount > 0) {
+    return (
+      <div style={{ ...box, border: `1.5px solid ${C.lineHi}`, fontWeight: 500 }} className="no-print">
+        🖨 {pendingCount} ticket{pendingCount > 1 ? 's' : ''} en attente d'impression…
+      </div>
+    )
+  }
+
+  return null
+}
+
 function StaffApp({ session }) {
   const [venues, setVenues] = useState(null)
   const [venueId, setVenueId] = useState(LS.get('noti:venue', null))
   const [events, setEvents] = useState([])
   const [eventId, setEventId] = useState(LS.get('noti:event', null))
-  const [tab, setTab] = useState('bar')
+  const [tab, setTab] = useState('dashboard')
   const [switcher, setSwitcher] = useState(false)
   const [roles, setRoles] = useState({})
   const [toast, showToast] = useToast()
+  // Plein écran (tablette/ordinateur au bar, écran dédié qui reste allumé
+  // toute la soirée) : masque la barre d'adresse, gagne le peu de place
+  // qu'elle prend. Absent d'iOS Safari (l'API n'y existe pas hors vidéo) —
+  // le bouton ne s'affiche donc que si le navigateur la supporte.
+  const [fullscreen, setFullscreen] = useState(false)
+  useEffect(() => {
+    const onChange = () => setFullscreen(!!document.fullscreenElement)
+    document.addEventListener('fullscreenchange', onChange)
+    return () => document.removeEventListener('fullscreenchange', onChange)
+  }, [])
+  function toggleFullscreen() {
+    if (document.fullscreenElement) {
+      document.exitFullscreen?.()
+    } else {
+      document.documentElement.requestFullscreen?.().catch(() => {})
+    }
+  }
+
+  // Mode démo : une aide de secours si un serveur oublie une fonction en
+  // plein service — jamais automatique, jamais lié à une vraie soirée.
+  const [demoMode, setDemoMode] = useState(false)
 
   const loadVenues = useCallback(async () => {
     // Une invitation adressée à cet e-mail devient une adhésion dès la première
@@ -5373,6 +6453,7 @@ function StaffApp({ session }) {
   return (
     <div style={{ ...S.page, paddingBottom: 96 }}>
       <Keyframes />
+      <AutoPrintDaemon event={event} venue={venue} showToast={showToast} />
 
       <div
         style={{
@@ -5409,6 +6490,50 @@ function StaffApp({ session }) {
             {event && !event.is_active ? ' · soirée clôturée' : ''} · changer
           </div>
         </button>
+        {typeof document !== 'undefined' && document.fullscreenEnabled && (
+          <button
+            onClick={toggleFullscreen}
+            title={fullscreen ? 'Quitter le plein écran' : 'Passer en plein écran'}
+            className="no-print"
+            style={{
+              width: 38,
+              height: 38,
+              flexShrink: 0,
+              borderRadius: 12,
+              border: `1.5px solid ${C.lineHi}`,
+              background: C.paper,
+              color: C.dim,
+              cursor: 'pointer',
+              fontSize: 16,
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+            }}
+          >
+            {fullscreen ? '⤡' : '⛶'}
+          </button>
+        )}
+        <button
+          onClick={() => setDemoMode(true)}
+          title="Mode démo — rappel des fonctions de l'espace équipe"
+          className="no-print"
+          style={{
+            width: 38,
+            height: 38,
+            flexShrink: 0,
+            borderRadius: 12,
+            border: `1.5px solid ${C.lineHi}`,
+            background: C.paper,
+            color: C.dim,
+            cursor: 'pointer',
+            fontSize: 16,
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+          }}
+        >
+          🎓
+        </button>
         <Logo size={0.6} />
       </div>
 
@@ -5417,7 +6542,8 @@ function StaffApp({ session }) {
           <NoEvent venue={venue} onCreated={loadEvents} showToast={showToast} />
         ) : (
           <>
-            {activeTab === 'bar' && <BarTab event={event} venue={venue} session={session} onEventChange={loadEvents} showToast={showToast} />}
+            {activeTab === 'dashboard' && <DashboardTab event={event} onNavigate={setTab} />}
+            {activeTab === 'bar' && <BarTab event={event} venue={venue} session={session} showToast={showToast} />}
             {activeTab === 'caisse' && <CaisseTab event={event} venue={venue} showToast={showToast} />}
             {activeTab === 'orga' && <OrgaTab event={event} venue={venue} showToast={showToast} onEventChange={loadEvents} />}
             {activeTab === 'carte' && <CarteTab venue={venue} showToast={showToast} />}
@@ -5547,6 +6673,8 @@ function StaffApp({ session }) {
       </Sheet>
 
       <Toast toast={toast} />
+
+      {demoMode && <DemoModeOverlay onClose={() => setDemoMode(false)} />}
     </div>
   )
 }
@@ -5991,7 +7119,7 @@ function OrderNotesSheet({ order, onClose, onSaved, showToast }) {
  *    c'est ce qui rend la ressaisie en caisse rapide (§3), et une ressaisie
  *    laborieuse est bâclée puis abandonnée.
  */
-function BarCadrans({ orders, meId, now, onDone, onClaim, onDetail }) {
+function BarCadrans({ orders, onDone, onDetail, onNudge, nudging }) {
   // Premier arrivé, premier servi — l'ordre est celui de la création, et le
   // rang est affiché pour qu'il ne soit jamais ambigu.
   const list = useMemo(
@@ -6012,11 +7140,11 @@ function BarCadrans({ orders, meId, now, onDone, onClaim, onDetail }) {
   // ce sont eux qu'on lit, et le total sert la ressaisie en caisse (§3).
   const dense = list.length > 12
   const veryDense = list.length > 24
-  const col = veryDense ? 176 : dense ? 206 : 240
-  const pad = veryDense ? 9 : dense ? 10 : 12
-  const codeSize = veryDense ? 17 : dense ? 19 : 21
-  const itemSize = veryDense ? 11.5 : dense ? 12.5 : 13
-  const btnH = veryDense ? 44 : dense ? 48 : 52
+  const col = veryDense ? 200 : dense ? 230 : 260
+  const pad = veryDense ? 11 : dense ? 12 : 14
+  const codeSize = veryDense ? 26 : dense ? 29 : 32
+  const itemSize = veryDense ? 13.5 : dense ? 14.5 : 15.5
+  const btnH = veryDense ? 48 : dense ? 52 : 56
 
   return (
     <>
@@ -6037,9 +7165,6 @@ function BarCadrans({ orders, meId, now, onDone, onClaim, onDetail }) {
       >
         {list.map((o, i) => {
           const st = ORDER_STATUS[o.status] || ORDER_STATUS.RECEIVED
-          const mine = o.claimed_by && o.claimed_by === meId
-          const taken = o.claimed_by && !mine
-          const waiting = Math.max(0, Math.floor((now - new Date(o.created_at).getTime()) / 60000))
           const awaiting = o.status === 'AWAITING_PAYMENT'
 
           return (
@@ -6047,29 +7172,27 @@ function BarCadrans({ orders, meId, now, onDone, onClaim, onDetail }) {
               key={o.id}
               style={{
                 borderRadius: 14,
-                background: taken ? 'rgba(28,42,74,.04)' : C.paper,
-                border: `2px solid ${alpha(mine ? C.ok : taken ? C.lineHi : st.color, 27)}`,
+                background: C.paper,
+                border: `2px solid ${alpha(st.color, 27)}`,
                 borderLeftWidth: 5,
-                borderLeftColor: mine ? C.ok : taken ? C.lineHi : st.color,
+                borderLeftColor: st.color,
                 padding: pad,
-                opacity: taken ? 0.72 : 1,
                 display: 'flex',
                 flexDirection: 'column',
                 gap: 8,
               }}
             >
-              {/* Rang + code + attente : ce qu'on lit en vision périphérique */}
+              {/* Rang + code : ce qu'on lit en vision périphérique. Le
+                  minutage par commande a été retiré à la demande du staff —
+                  seul le total en cours (ci-dessus) compte pour se repérer. */}
               <div style={{ display: 'flex', alignItems: 'baseline', gap: 8 }}>
-                <span style={{ fontSize: 11, color: C.faint, fontFamily: FONT.label }}>#{i + 1}</span>
+                <span style={{ fontSize: 12, color: C.faint, fontFamily: FONT.label }}>#{i + 1}</span>
                 <span style={{ fontFamily: FONT.label, fontWeight: 600, fontSize: codeSize, letterSpacing: 2 }}>
                   {o.pickup_code}
                 </span>
-                <span style={{ marginLeft: 'auto', fontSize: 11.5, color: waiting >= RELANCE_MIN ? C.terracotta : C.faint }}>
-                  {waiting} min
-                </span>
               </div>
 
-              <div style={{ fontSize: 10.5, fontFamily: FONT.label, letterSpacing: 0.6, color: st.color }}>
+              <div style={{ fontSize: 12, fontFamily: FONT.label, letterSpacing: 0.6, color: st.color, fontWeight: 600 }}>
                 {st.short.toUpperCase()}
                 {o.flag ? ` · ${flagOf(o.flag)?.emoji ?? ''}` : ''}
               </div>
@@ -6094,7 +7217,7 @@ function BarCadrans({ orders, meId, now, onDone, onClaim, onDetail }) {
               </div>
 
               {o.note && (
-                <div style={{ fontSize: 11.5, color: C.dim, fontStyle: 'italic', lineHeight: 1.4 }}>
+                <div style={{ fontSize: 13, color: C.dim, fontStyle: 'italic', lineHeight: 1.4 }}>
                   « {o.note} »
                 </div>
               )}
@@ -6108,10 +7231,10 @@ function BarCadrans({ orders, meId, now, onDone, onClaim, onDetail }) {
                   borderTop: `1px solid ${C.line}`,
                 }}
               >
-                <span style={{ fontSize: 10.5, color: C.faint, fontFamily: FONT.label }}>
+                <span style={{ fontSize: 13, fontWeight: 600, color: C.dim, fontFamily: FONT.label }}>
                   {o.customers?.first_name || ''}
                 </span>
-                <span style={{ ...S.money, fontWeight: 700, fontSize: dense ? 15.5 : 17, color: C.terracotta }}>
+                <span style={{ ...S.money, fontWeight: 700, fontSize: dense ? 17 : 19, color: C.terracotta }}>
                   {eur(o.total)}
                 </span>
               </div>
@@ -6119,7 +7242,7 @@ function BarCadrans({ orders, meId, now, onDone, onClaim, onDetail }) {
               {awaiting ? (
                 <div
                   style={{
-                    fontSize: 11.5,
+                    fontSize: 13,
                     color: C.goldDark,
                     background: `${alpha(C.gold, 12)}`,
                     border: `1px solid ${alpha(C.gold, 40)}`,
@@ -6136,46 +7259,54 @@ function BarCadrans({ orders, meId, now, onDone, onClaim, onDetail }) {
                     onClick={() => onDone(o)}
                     style={{
                       flex: 1,
+                      minWidth: 0,
                       minHeight: btnH,
-                      borderRadius: 12,
+                      borderRadius: 14,
                       border: 'none',
                       cursor: 'pointer',
+                      overflow: 'hidden',
+                      whiteSpace: 'nowrap',
+                      textOverflow: 'ellipsis',
                       fontFamily: FONT.label,
                       fontWeight: 600,
                       letterSpacing: 0.8,
-                      fontSize: 13,
+                      fontSize: 14,
                       textTransform: 'uppercase',
-                      background: st.color,
+                      background: C.text,
                       color: '#fff',
                     }}
                   >
                     {o.status === 'READY' ? 'Retirée' : 'Fait'}
                   </button>
-                  <button
-                    onClick={() => onClaim(o)}
-                    title={mine ? 'Vous préparez cette commande' : taken ? 'Prise par un collègue' : 'Je prends cette commande'}
-                    style={{
-                      width: btnH,
-                      minHeight: btnH,
-                      borderRadius: 12,
-                      cursor: 'pointer',
-                      fontSize: 18,
-                      border: `1.5px solid ${mine ? C.ok : C.lineHi}`,
-                      background: mine ? `${alpha(C.ok, 8)}` : C.paper,
-                      color: mine ? C.ok : C.dim,
-                    }}
-                  >
-                    {mine ? '🙋' : taken ? '🔒' : '✋'}
-                  </button>
+                  {o.status === 'READY' && (
+                    <button
+                      onClick={() => onNudge(o)}
+                      disabled={nudging === o.id}
+                      title="Relancer par SMS/notif — sans attendre l'alerte automatique"
+                      style={{
+                        width: 46,
+                        minHeight: btnH,
+                        borderRadius: 12,
+                        cursor: 'pointer',
+                        fontSize: 16,
+                        border: `1.5px solid ${C.lineHi}`,
+                        background: C.paper,
+                        color: C.dim,
+                        opacity: nudging === o.id ? 0.5 : 1,
+                      }}
+                    >
+                      {nudging === o.id ? '…' : '📣'}
+                    </button>
+                  )}
                   <button
                     onClick={() => onDetail(o)}
                     title="Détail, commentaire, ticket"
                     style={{
-                      width: 42,
+                      width: 46,
                       minHeight: btnH,
                       borderRadius: 12,
                       cursor: 'pointer',
-                      fontSize: 15,
+                      fontSize: 16,
                       border: `1.5px solid ${C.lineHi}`,
                       background: C.paper,
                       color: C.dim,
@@ -6252,10 +7383,21 @@ function GiftBanner({ orderId }) {
   )
 }
 
-function BarTab({ event, venue, session, onEventChange, showToast }) {
+// Métadonnées fixes des colonnes du mode « colonnes » (BarTab) — seul
+// l'ORDRE dans lequel elles s'affichent est modifiable (par poste, voir
+// colOrder ci-dessous) ; ce qu'elles contiennent reste déterminé par le
+// statut de la commande, jamais par la colonne elle-même.
+const BAR_COLUMNS = {
+  received: { title: 'Reçues', color: C.indigo, action: 'En prépa', next: 'IN_PREP', prev: null },
+  prep: { title: 'En préparation', color: C.warn, action: 'Prête', next: 'READY', prev: 'RECEIVED' },
+  ready: { title: 'Prêtes', color: C.terracotta, action: 'Retirée', next: 'PICKED_UP', prev: 'IN_PREP' },
+  pickedup: { title: 'Retirées', color: C.ok, action: 'Réglée', next: 'PAID', prev: 'READY' },
+}
+const BAR_COL_KEYS = Object.keys(BAR_COLUMNS)
+
+function BarTab({ event, venue, session, showToast }) {
   const [orders, setOrders] = useState([])
   const [loading, setLoading] = useState(true)
-  const [prep, setPrep] = useState(event.default_prep_min ?? 1)
   const [detail, setDetail] = useState(null)
   const [notesFor, setNotesFor] = useState(null)
   // Retour terrain 5.3 : « depuis une commande, rebondir directement sur la
@@ -6285,22 +7427,53 @@ function BarTab({ event, venue, session, onEventChange, showToast }) {
     alarm.current?.setKind(ringtone)
   }, [ringtone])
 
-  useEffect(() => setPrep(event.default_prep_min ?? 1), [event.default_prep_min])
-
   const load = useCallback(async () => {
     // Les annulées SONT chargées, contrairement à avant. Sans elles, une
     // commande annulée par le client se contentait de disparaître de la
     // liste : impossible de distinguer « annulée » de « jamais vue », donc
     // impossible de prévenir le barman qui la préparait. Elles sont écartées
     // de l'affichage juste en dessous.
+    // Fenêtre glissante plutôt que toute la soirée. L'écran du bar ne montre
+    // que le travail en cours et les retraits récents — l'historique complet a
+    // son propre onglet. Sans cette borne, chaque tablette rechargeait toutes
+    // les commandes de la nuit toutes les 20 secondes : mesuré à 891 Ko sur
+    // une soirée de 2 000 commandes, et ça ne fait que grossir jusqu'à la
+    // fermeture.
+    //
+    // Les commandes en cours sont gardées quel qu'en soit l'âge : une
+    // commande jamais retirée doit rester sous les yeux du bar, même six
+    // heures plus tard. Seules les commandes closes sortent de la fenêtre.
+    const depuis = new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString()
     const { data } = await supabase
       .from('orders')
-      .select('*, order_items ( * ), customers ( first_name, last_name, phone, tags )')
+      .select(
+        // L'univers du produit sert au ticket imprimé : il décide de l'en-tête
+        // FOOD / BOISSONS, que le poste lit d'un coup d'œil.
+        '*, order_items ( *, products ( universe ) ), customers ( first_name, last_name, phone, tags )'
+      )
       .eq('event_id', event.id)
-      .order('created_at', { ascending: true })
+      // Les réglées ne sont affichées dans aucune colonne du bar : les charger
+      // était du poids mort, et c'est le gros du volume en fin de soirée.
+      .neq('status', 'PAID')
+      .or(`status.in.(AWAITING_PAYMENT,RECEIVED,IN_PREP,READY),created_at.gte.${depuis}`)
+      // Plus récente en premier — retour terrain : en colonnes, une nouvelle
+      // commande arrivant tout en bas d'une colonne déjà longue passait
+      // inaperçue sans scroller. Le mode cadrans garde son propre tri
+      // (premier arrivé, premier servi) : il a son rang affiché précisément
+      // pour indiquer l'ordre de service, ce que ce changement ne touche pas.
+      .order('created_at', { ascending: false })
     setOrders(data || [])
     setLoading(false)
   }, [event.id])
+
+  // Miroir synchrone de `orders`, lu depuis le callback temps réel ci-dessous
+  // sans dépendre d'une fermeture (closure) qui serait périmée : l'effet qui
+  // ouvre l'abonnement ne se redéclenche pas à chaque commande, seulement à
+  // chaque changement d'événement.
+  const ordersRef = useRef([])
+  useEffect(() => {
+    ordersRef.current = orders
+  }, [orders])
 
   useEffect(() => {
     load()
@@ -6309,16 +7482,35 @@ function BarTab({ event, venue, session, onEventChange, showToast }) {
       .on(
         'postgres_changes',
         { event: '*', schema: 'public', table: 'orders', filter: `event_id=eq.${event.id}` },
-        () => load()
+        (payload) => {
+          // Une simple mise à jour de statut (par une autre tablette, ou
+          // l'écho de notre propre geste) sur une commande déjà connue ici
+          // n'a besoin que d'un patch local — inutile de repayer un
+          // rechargement complet avec ses jointures (order_items, customers)
+          // à chaque commande qui avance dans la soirée. Constaté en
+          // production : c'était l'une des causes du ralentissement général
+          // de l'onglet Bar un soir chargé, un rechargement complet partant
+          // à CHAQUE mouvement de CHAQUE commande, sur CHAQUE tablette
+          // ouverte. Une nouvelle commande (INSERT) ou une suppression garde
+          // le rechargement complet : le payload brut n'a pas les jointures.
+          if (payload.eventType === 'UPDATE' && ordersRef.current.some((o) => o.id === payload.new.id)) {
+            setOrders((prev) => prev.map((o) => (o.id === payload.new.id ? { ...o, ...payload.new } : o)))
+          } else {
+            load()
+          }
+        }
       )
       // Une coupure de WebSocket fait manquer les commandes arrivées pendant
       // le trou. Sans resynchronisation à la reconnexion, elles n'apparaissent
-      // qu'au prochain sondage — jusqu'à 20 s d'attente pour un client, et une
-      // commande qu'on croit perdue. « Zéro perte » se joue ici.
+      // qu'au prochain sondage — jusqu'à 45 s d'attente pour un client, et une
+      // commande qu'on croit perdue. « Zéro perte » se joue ici. 45 s plutôt
+      // que 20 : simple filet derrière le temps réel, allégé pour ne pas
+      // cumuler les sondages de plusieurs tablettes en même temps un soir où
+      // la base est déjà sollicitée.
       .subscribe((status) => {
         if (status === 'SUBSCRIBED') load()
       })
-    const poll = setInterval(load, 20000)
+    const poll = setInterval(load, 45000)
     return () => {
       supabase.removeChannel(ch)
       clearInterval(poll)
@@ -6337,21 +7529,32 @@ function BarTab({ event, venue, session, onEventChange, showToast }) {
   }
   const shown = orders.filter(matches)
 
-  const received = orders.filter((o) => o.status === 'RECEIVED')
-  const inPrep = shown.filter((o) => o.status === 'IN_PREP')
-  const ready = orders.filter((o) => o.status === 'READY')
-  const pickedUp = shown.filter((o) => o.status === 'PICKED_UP')
-  const receivedShown = shown.filter((o) => o.status === 'RECEIVED')
-  const readyShown = shown.filter((o) => o.status === 'READY')
-
   // Retraits en retard : deux paliers, alignés sur l'affichage admin.
   //  · RELANCE_MIN  → la commande passe en alerte ici et côté organisation.
   //  · ESCALADE_MIN → l'organisateur prend le relais (contact du client).
+  // 5 s plutôt que 15 : sert aussi le sursis « Réglée » ci-dessous, qui a
+  // besoin d'une granularité à la seconde près, pas à la minute.
   const [now, setNow] = useState(Date.now())
   useEffect(() => {
-    const id = setInterval(() => setNow(Date.now()), 15000)
+    const id = setInterval(() => setNow(Date.now()), 5000)
     return () => clearInterval(id)
   }, [])
+
+  const received = orders.filter((o) => o.status === 'RECEIVED')
+  const inPrep = shown.filter((o) => o.status === 'IN_PREP')
+  const ready = orders.filter((o) => o.status === 'READY')
+  // Retour terrain : une commande « Réglée » disparaissait instantanément de
+  // la colonne Retirées — trop brusque, aucune confirmation visuelle que le
+  // tap avait bien été pris en compte. Elle reste maintenant visible encore
+  // PAID_GRACE_MS après paid_at (posé par move(), voir plus bas) avant de
+  // sortir de la colonne — juste le temps de voir « ✓ Réglée » s'afficher.
+  const pickedUp = shown.filter(
+    (o) =>
+      o.status === 'PICKED_UP' ||
+      (o.status === 'PAID' && o.paid_at && now - new Date(o.paid_at).getTime() < PAID_GRACE_MS)
+  )
+  const receivedShown = shown.filter((o) => o.status === 'RECEIVED')
+  const readyShown = shown.filter((o) => o.status === 'READY')
   const overdue = ready
     .map((o) => ({ o, min: waitingMin(o, now) }))
     .filter((x) => x.min >= RELANCE_MIN)
@@ -6398,26 +7601,27 @@ function BarTab({ event, venue, session, onEventChange, showToast }) {
     }
   }, [orders, showToast])
 
-  /**
-   * Prise en charge (§1.5) : « l'outil ne doit pas dépendre uniquement de la
-   * discipline humaine ». L'arbitrage est côté serveur — deux barmans qui
-   * tapent en même temps, un seul l'obtient.
-   */
-  async function toggleClaim(order) {
-    unlockAudio()
-    const mine = order.claimed_by && order.claimed_by === session?.user?.id
-    const { error } = await supabase.rpc(mine ? 'release_order' : 'claim_order', { p_order: order.id })
-    if (error) {
-      const taken = String(error.message || '').includes('already_claimed')
-      showToast(taken ? 'Un collègue vient de prendre cette commande.' : frError(error), taken ? 'info' : 'error')
-    }
-    load()
-  }
-
   async function move(order, status, opts = {}) {
     unlockAudio()
+
+    // Mise à jour optimiste : le bouton doit réagir immédiatement au tap, pas
+    // après un aller-retour réseau — c'est précisément ce qui rendait l'onglet
+    // Bar lent un soir de Wi-Fi engorgé (« j'appuie sur imprimer, ça prend du
+    // temps »). Les horodatages suivent la même règle que le trigger
+    // touch_order_status côté base (0001), pour que l'affichage local (délai
+    // d'attente, relance) ne saute pas dès que le serveur répond. Si l'écriture
+    // échoue, on revient à l'état réel plutôt que de laisser l'écran mentir.
+    const patch = { status }
+    if (status === 'READY' && !order.ready_at) patch.ready_at = new Date().toISOString()
+    if (status === 'PICKED_UP' && !order.picked_up_at) patch.picked_up_at = new Date().toISOString()
+    if (status === 'PAID' && !order.paid_at) patch.paid_at = new Date().toISOString()
+    setOrders((prev) => prev.map((o) => (o.id === order.id ? { ...o, ...patch } : o)))
+
     const { error } = await supabase.from('orders').update({ status }).eq('id', order.id)
-    if (error) return showToast(frError(error), 'error')
+    if (error) {
+      load()
+      return showToast(frError(error), 'error')
+    }
 
     if (status === 'READY') {
       notify({
@@ -6426,7 +7630,7 @@ function BarTab({ event, venue, session, onEventChange, showToast }) {
         customerId: order.customer_id,
         orderId: order.id,
         title: 'Votre commande est prête',
-        body: `Commande ${order.pickup_code} : c’est prêt ! Présentez votre code au bar et réglez sur place.`,
+        body: `Commande ${order.pickup_code}${orderSummary(order) ? ` (${orderSummary(order)})` : ''} : c’est prêt ! Présentez votre code au bar et réglez sur place.`,
         requireInteraction: true,
       })
     }
@@ -6460,25 +7664,81 @@ function BarTab({ event, venue, session, onEventChange, showToast }) {
     }
 
     if (opts.back) showToast(`${order.pickup_code} revenue à « ${statusLabel(status, 'fr')} ».`, 'ok')
-    load()
+    // Plus de load() ici : l'optimisme ci-dessus a déjà tout affiché, et le
+    // temps réel confirme silencieusement en arrière-plan (ou corrige, dans
+    // le rare cas où une autre tablette aurait déjà bougé la commande).
   }
 
-  // Relance de retrait : message urgent adressé au client, horodaté côté base
-  // (voir nudge_pickup dans 0022).
+  // Bouton « Imprimer » de la colonne Reçues : un seul geste qui fait les
+  // deux choses à la fois — le ticket part (même réservation que
+  // AutoPrintDaemon, donc pas de doublon si l'automatique l'a déjà imprimé)
+  // et la commande passe en préparation. Non bloquant : la commande avance
+  // tout de suite, le ticket suit en tâche de fond (voir plus haut pourquoi).
+  function printAndPrep(order) {
+    if (venue?.printer_url) printArrivalTicket({ order, event, venue, trigger: 'manual_print', showToast })
+    move(order, 'IN_PREP')
+  }
+
+  // Relance de retrait : message urgent adressé au client. Passe désormais par
+  // notify() (push.js) plutôt que par le seul nudge_pickup (0022), qui
+  // n'écrivait que le message interne à l'app — jamais de vraie notif push ni
+  // de SMS. notify() écrit ce même message ET pousse sur les deux canaux
+  // configurés (best-effort, ne bloque jamais : voir push.js). Le calcul de
+  // l'attente est fait ici plutôt que côté base pour rester sur ce seul appel.
   const [nudging, setNudging] = useState(null)
   async function nudge(order) {
     setNudging(order.id)
-    const { error } = await supabase.rpc('nudge_pickup', { p_order: order.id, p_body: null })
+    const waitStart = order.ready_at || order.created_at
+    const waiting = Math.max(0, Math.round((Date.now() - new Date(waitStart).getTime()) / 60000))
+    const res = await notify({
+      eventId: event.id,
+      kind: 'status',
+      customerId: order.customer_id,
+      orderId: order.id,
+      title: 'Votre commande vous attend',
+      body: `Votre commande ${order.pickup_code}${orderSummary(order) ? ` (${orderSummary(order)})` : ''} vous attend au bar depuis ${waiting} min. Merci de venir la récupérer.`,
+      urgent: true,
+      requireInteraction: true,
+      channels: ['push', 'sms'],
+    })
     setNudging(null)
-    if (error) return showToast(frError(error), 'error')
-    showToast(`Relance envoyée pour ${order.pickup_code}.`, 'ok')
+    if (!res) return showToast('Relance : envoi impossible pour le moment.', 'error')
+    showToast(
+      res.degraded
+        ? `Relance envoyée pour ${order.pickup_code} — message interne seulement (SMS/push pas encore configurés).`
+        : `Relance envoyée pour ${order.pickup_code} (${res.sms} SMS, ${res.push} notif push).`,
+      'ok'
+    )
   }
 
-  async function savePrep(v) {
-    const val = Math.max(1, Math.min(60, v))
-    setPrep(val)
-    await supabase.from('events').update({ default_prep_min: val }).eq('id', event.id)
-    onEventChange?.()
+  // Ordre des colonnes (mode « colonnes »), mémorisé par poste — comme le
+  // mode d'affichage ou la sonnerie, c'est une préférence de tablette, pas
+  // une donnée de soirée. Retour terrain : certains postes veulent « Reçues »
+  // à droite plutôt qu'à gauche.
+  //
+  // D'abord tenté au glisser (appui long + déplacement, Pointer Events) —
+  // retour terrain : peu fiable et peu lisible au toucher sur tablette, en
+  // plus de gêner la lecture pendant le geste. Remplacé par un bouton
+  // « Réorganiser » qui fait apparaître des flèches ◀ ▶ sur chaque colonne :
+  // un tap, un résultat immédiat et visible, rien à deviner.
+  const [colOrder, setColOrder] = useState(() => {
+    const saved = LS.get('noti:barColOrder', null)
+    if (!Array.isArray(saved)) return BAR_COL_KEYS
+    const kept = saved.filter((k) => BAR_COL_KEYS.includes(k))
+    return [...kept, ...BAR_COL_KEYS.filter((k) => !kept.includes(k))]
+  })
+  useEffect(() => LS.set('noti:barColOrder', colOrder), [colOrder])
+  const [reorderCols, setReorderCols] = useState(false)
+
+  function moveCol(key, dir) {
+    setColOrder((prev) => {
+      const i = prev.indexOf(key)
+      const j = i + dir
+      if (i < 0 || j < 0 || j >= prev.length) return prev
+      const next = [...prev]
+      ;[next[i], next[j]] = [next[j], next[i]]
+      return next
+    })
   }
 
   async function printTicket(order) {
@@ -6486,6 +7746,29 @@ function BarTab({ event, venue, session, onEventChange, showToast }) {
     const blob = canvasesToPdfBlob([canvas], { quality: 0.95, pageSize: { w: 226, h: 480 } })
     await shareOrDownload(blob, `ticket-${order.pickup_code}.pdf`, 'Ticket')
     await supabase.from('orders').update({ printed_at: new Date().toISOString() }).eq('id', order.id)
+  }
+
+  // Réimpression volontaire sur l'imprimante réseau, hors de la réservation
+  // automatique (claim_ticket_print, dans AutoPrintDaemon) : pour un ticket
+  // perdu, déchiré ou mal lu. Seule autre façon qu'un ticket sorte, en
+  // dehors de l'arrivée automatique. Toujours marquée DUPLICATA sur le
+  // papier (ticket.js) pour qu'on ne prépare jamais deux fois la même
+  // commande, et tracée dans print_log comme telle.
+  const [reprinting, setReprinting] = useState(null)
+  async function reprintDuplicate(order) {
+    if (!venue?.printer_url) return
+    setReprinting(order.id)
+    const res = await sendToPrinter(buildTicket({ order, event, venue, duplicate: true }), {
+      url: venue.printer_url,
+    })
+    await supabase.rpc('log_ticket_print', {
+      p_order: order.id,
+      p_trigger: 'reprint_duplicata',
+      p_result: res.ok ? 'ok' : res.ambiguous ? 'ambiguous' : 'fail',
+      p_reason: res.ok ? null : res.reason,
+    })
+    setReprinting(null)
+    showToast(res.ok ? `Duplicata de ${order.pickup_code} envoyé.` : `Imprimante : ${res.reason}`, res.ok ? 'ok' : 'error')
   }
 
   if (loading) return <Spinner />
@@ -6577,98 +7860,11 @@ function BarTab({ event, venue, session, onEventChange, showToast }) {
         </div>
       )}
 
-      {/* Temps de préparation annoncé */}
-      <div style={{ ...S.card, padding: 14, marginBottom: 14 }}>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
-          <div style={{ flex: 1 }}>
-            <div style={S.label}>Temps annoncé</div>
-            <div style={{ fontSize: 12, color: C.dim }}>Appliqué aux nouvelles commandes</div>
-          </div>
-          <button onClick={() => savePrep(prep - 1)} style={stepBtn}>
-            −
-          </button>
-          <div style={{ ...S.money, fontSize: 22, fontWeight: 600, minWidth: 56, textAlign: 'center' }}>
-            {prep} min
-          </div>
-          <button onClick={() => savePrep(prep + 1)} style={stepBtn}>
-            +
-          </button>
-        </div>
-      </div>
-
-      {/* Sonnerie d'alerte — un club et un bar à cocktails n'ont pas les mêmes
-          attentes. On écoute avant de choisir. */}
-      <div style={{ ...S.card, padding: 14, marginBottom: 14 }} className="no-print">
-        <div style={{ ...S.label, marginBottom: 8 }}>🔔 Sonnerie des nouvelles commandes</div>
-        <div style={{ display: 'grid', gap: 6 }}>
-          {RINGTONES.map((r) => {
-            const on = ringtone === r.k
-            return (
-              <button
-                key={r.k}
-                onClick={() => {
-                  unlockAudio()
-                  setRingtone(r.k)
-                  previewRingtone(r.k)
-                }}
-                style={{
-                  ...S.chip,
-                  width: '100%',
-                  minHeight: 46,
-                  display: 'flex',
-                  alignItems: 'center',
-                  gap: 10,
-                  textAlign: 'left',
-                  whiteSpace: 'normal',
-                  borderColor: on ? C.terracotta : C.lineHi,
-                  background: on ? 'rgba(185,106,76,.08)' : 'transparent',
-                  color: on ? C.terracotta : C.dim,
-                }}
-              >
-                <span style={{ fontSize: 15 }}>{on ? '●' : '○'}</span>
-                <span style={{ flex: 1 }}>
-                  <span style={{ fontWeight: 600, fontSize: 13 }}>{r.label}</span>
-                  <span style={{ display: 'block', fontSize: 11, color: C.faint }}>{r.hint}</span>
-                </span>
-                <span style={{ fontSize: 13 }}>▶</span>
-              </button>
-            )
-          })}
-        </div>
-        <div style={{ fontSize: 11, color: C.faint, marginTop: 8, lineHeight: 1.5 }}>
-          Un tap sélectionne et fait écouter. Le réglage reste sur cette tablette.
-        </div>
-      </div>
-
-      <div style={{ display: 'flex', gap: 8, marginBottom: 14 }} className="no-print">
-        <button onClick={() => setSoldOutOpen(true)} style={{ ...S.btnGhost, minHeight: 44, fontSize: 12 }}>
-          Marquer un article épuisé
-        </button>
-        {pushSupported() && (
-          <button
-            onClick={async () => {
-              const ok = await subscribePush({ venueId: venue.id, eventId: event.id, role: 'staff' })
-              setStaffPush(ok)
-              showToast(ok ? 'Alertes activées sur cet appareil.' : 'Notifications refusées.', ok ? 'ok' : 'error')
-            }}
-            style={{
-              ...S.btnGhost,
-              minHeight: 44,
-              fontSize: 12,
-              borderColor: staffPush ? C.ok : C.terracotta,
-              color: staffPush ? C.ok : C.terracotta,
-            }}
-          >
-            {staffPush ? '✓ Alertes' : 'Alertes'}
-          </button>
-        )}
-      </div>
-
       {/* Bascule de mode. Position fixe et libellés constants : en situation
           de stress, l'opérateur agit par mémoire spatiale (§4). */}
       <div style={{ display: 'flex', gap: 6, marginBottom: 12 }} className="no-print">
         {[
-          ['cadrans', 'Cadrans'],
+          ['cadrans', 'Vue Rush'],
           ['colonnes', 'Suivi détaillé'],
         ].map(([k, label]) => (
           <button
@@ -6738,28 +7934,58 @@ function BarTab({ event, venue, session, onEventChange, showToast }) {
       {mode === 'cadrans' && (
         <BarCadrans
           orders={shown}
-          meId={session?.user?.id}
-          now={now}
           onDone={(o) => {
             acknowledge([o.id])
             move(o, o.status === 'READY' ? 'PICKED_UP' : 'READY')
           }}
-          onClaim={toggleClaim}
           onDetail={setDetail}
+          onNudge={nudge}
+          nudging={nudging}
         />
       )}
 
-      <div style={{ display: mode === 'colonnes' ? 'flex' : 'none', gap: 12, overflowX: 'auto', paddingBottom: 8 }}>
-        {[
-          // `prev` : un tap de trop sur « Prête » notifiait le client, qui
-          // venait attendre devant le bar — exactement ce que l'outil est censé
-          // éviter. Mieux vaut pouvoir revenir en arrière et ne pas s'en servir.
-          { title: 'Reçues', list: receivedShown, color: C.indigo, action: 'En préparation', next: 'IN_PREP', prev: null },
-          { title: 'En préparation', list: inPrep, color: C.warn, action: 'Prête', next: 'READY', prev: 'RECEIVED' },
-          { title: 'Prêtes', list: readyShown, color: C.terracotta, action: 'Retirée', next: 'PICKED_UP', prev: 'IN_PREP' },
-          { title: 'Retirées', list: pickedUp, color: C.ok, action: 'Réglée', next: 'PAID', prev: 'READY' },
-        ].map((col) => (
-          <div key={col.title} style={{ minWidth: 268, flex: '1 0 268px' }}>
+      {mode === 'colonnes' && (
+        <div style={{ display: 'flex', justifyContent: 'flex-end', marginBottom: 10 }}>
+          <button
+            onClick={() => setReorderCols((v) => !v)}
+            style={{
+              ...S.chip,
+              minHeight: 38,
+              padding: '6px 14px',
+              fontSize: 12.5,
+              ...(reorderCols
+                ? { background: C.text, color: '#fff', borderColor: C.text }
+                : null),
+            }}
+          >
+            {reorderCols ? '✓ Terminé' : '↔ Réorganiser les colonnes'}
+          </button>
+        </div>
+      )}
+
+      <div style={{ display: mode === 'colonnes' ? 'flex' : 'none', gap: 14, overflowX: 'auto', paddingBottom: 8 }}>
+        {colOrder
+          .map((key) => ({
+            key,
+            ...BAR_COLUMNS[key],
+            list: { received: receivedShown, prep: inPrep, ready: readyShown, pickedup: pickedUp }[key],
+          }))
+          .map((col, i, arr) => (
+          <div
+            key={col.key}
+            style={{
+              minWidth: 260,
+              flex: '1 0 260px',
+              // Fond + bordure propres à chaque colonne : sans ça, la limite
+              // entre deux colonnes ne tenait qu'à un `gap` de quelques
+              // pixels — invisible sous l'éclairage d'une soirée (constaté
+              // sur les tablettes du bar, confondu avec un chevauchement).
+              background: C.creamSoft,
+              border: `1.5px solid ${C.line}`,
+              borderRadius: 18,
+              padding: 12,
+            }}
+          >
             <div
               style={{
                 display: 'flex',
@@ -6770,16 +7996,45 @@ function BarTab({ event, venue, session, onEventChange, showToast }) {
                 borderBottom: `2px solid ${alpha(col.color, 27)}`,
               }}
             >
-              <div style={{ width: 8, height: 8, borderRadius: 4, background: col.color }} />
-              <div style={{ fontFamily: FONT.label, fontWeight: 600, letterSpacing: 1 }}>
+              <div style={{ width: 8, height: 8, borderRadius: 4, background: col.color, flexShrink: 0 }} />
+              <div style={{ fontFamily: FONT.label, fontWeight: 600, letterSpacing: 1, fontSize: 13 }}>
                 {col.title.toUpperCase()}
               </div>
               <div style={{ marginLeft: 'auto', color: C.faint, fontWeight: 600 }}>{col.list.length}</div>
+              {reorderCols && (
+                <div style={{ display: 'flex', gap: 4, marginLeft: 8 }}>
+                  <button
+                    onClick={() => moveCol(col.key, -1)}
+                    disabled={i === 0}
+                    style={{ ...stepBtn, width: 32, height: 32, fontSize: 14, opacity: i === 0 ? 0.3 : 1 }}
+                  >
+                    ◀
+                  </button>
+                  <button
+                    onClick={() => moveCol(col.key, 1)}
+                    disabled={i === arr.length - 1}
+                    style={{ ...stepBtn, width: 32, height: 32, fontSize: 14, opacity: i === arr.length - 1 ? 0.3 : 1 }}
+                  >
+                    ▶
+                  </button>
+                </div>
+              )}
             </div>
 
             <div style={{ display: 'grid', gap: 10 }}>
               {col.list.length === 0 && (
-                <div style={{ color: C.faint, fontSize: 12, textAlign: 'center', padding: '16px 0' }}>—</div>
+                <div
+                  style={{
+                    color: C.faint,
+                    fontSize: 12.5,
+                    textAlign: 'center',
+                    padding: '28px 0',
+                    border: `1.5px dashed ${C.line}`,
+                    borderRadius: 12,
+                  }}
+                >
+                  Aucune commande
+                </div>
               )}
               {col.list.map((o) => (
                 <div
@@ -6789,6 +8044,7 @@ function BarTab({ event, venue, session, onEventChange, showToast }) {
                     border: `1.5px solid ${!ack.has(o.id) && o.status === 'RECEIVED' ? C.terracotta : C.line}`,
                     borderRadius: 14,
                     padding: 13,
+                    maxWidth: '100%',
                   }}
                 >
                   <div style={{ display: 'flex', justifyContent: 'space-between', gap: 8 }}>
@@ -6796,18 +8052,18 @@ function BarTab({ event, venue, session, onEventChange, showToast }) {
                       <div
                         style={{
                           fontFamily: FONT.label,
-                          fontSize: 20,
-                          fontWeight: 600,
-                          letterSpacing: 2,
+                          fontSize: 26,
+                          fontWeight: 700,
+                          letterSpacing: 1.5,
                           color: C.navy,
                         }}
                       >
                         {o.pickup_code}
                       </div>
-                      <div style={{ fontSize: 12.5, marginTop: 2, fontWeight: 500 }}>
+                      <div style={{ fontSize: 13.5, marginTop: 2, fontWeight: 600 }}>
                         {o.customers?.first_name} {o.customers?.last_name}
                       </div>
-                      <div style={{ fontSize: 11, color: C.faint, marginTop: 1 }}>
+                      <div style={{ fontSize: 11.5, color: C.faint, marginTop: 1 }}>
                         {timeFR(o.created_at)}
                         {(o.customers?.tags || []).includes('vip') && (
                           <span style={{ color: C.indigo, fontWeight: 600 }}> · VIP</span>
@@ -6825,9 +8081,9 @@ function BarTab({ event, venue, session, onEventChange, showToast }) {
                             display: 'inline-flex',
                             alignItems: 'center',
                             gap: 4,
-                            padding: '3px 9px',
+                            padding: '4px 10px',
                             borderRadius: 999,
-                            fontSize: 11,
+                            fontSize: 12.5,
                             fontWeight: 700,
                             background: `${alpha(C.gold, 13)}`,
                             color: C.goldDark,
@@ -6838,13 +8094,13 @@ function BarTab({ event, venue, session, onEventChange, showToast }) {
                         </div>
                       )}
                     </div>
-                    <div style={{ ...S.money, fontWeight: 600, color: C.terracotta }}>{eur(o.total)}</div>
+                    <div style={{ ...S.money, fontWeight: 700, fontSize: 17, color: C.terracotta }}>{eur(o.total)}</div>
                   </div>
 
-                  <div style={{ marginTop: 9, display: 'grid', gap: 3 }}>
+                  <div style={{ marginTop: 9, display: 'grid', gap: 4 }}>
                     {(o.order_items || []).slice(0, 5).map((it) => (
-                      <div key={it.id} style={{ fontSize: 12.5, color: C.dim }}>
-                        <strong style={{ color: C.text, fontWeight: 600 }}>{it.quantity}×</strong>{' '}
+                      <div key={it.id} style={{ fontSize: 13, lineHeight: 1.3, color: C.dim }}>
+                        <strong style={{ color: C.text, fontWeight: 700 }}>{it.quantity}×</strong>{' '}
                         {it.name_snapshot}
                         {it.variant_label ? ` (${it.variant_label})` : ''}
                         {(it.detail?.options || []).length > 0 && (
@@ -6858,7 +8114,7 @@ function BarTab({ event, venue, session, onEventChange, showToast }) {
                     {(o.order_items || []).length > 5 && (
                       <button
                         onClick={() => setDetail(o)}
-                        style={{ background: 'none', border: 'none', color: C.indigo, fontSize: 12, padding: 0, textAlign: 'left', cursor: 'pointer' }}
+                        style={{ background: 'none', border: 'none', color: C.indigo, fontSize: 13.5, padding: 0, textAlign: 'left', cursor: 'pointer' }}
                       >
                         + {(o.order_items || []).length - 5} autres…
                       </button>
@@ -6868,58 +8124,133 @@ function BarTab({ event, venue, session, onEventChange, showToast }) {
                   {o.note && (
                     <div
                       style={{
-                        marginTop: 9,
-                        padding: 8,
+                        marginTop: 10,
+                        padding: 10,
                         borderRadius: 10,
                         background: 'rgba(201,130,31,.10)',
                         color: C.warn,
-                        fontSize: 11.5,
+                        fontSize: 13.5,
                       }}
                     >
                       {o.note}
                     </div>
                   )}
 
-                  <div style={{ display: 'flex', gap: 6, marginTop: 11 }}>
-                    <button
-                      onClick={() => {
-                        acknowledge([o.id])
-                        move(o, col.next)
-                      }}
-                      style={{
-                        flex: 1,
-                        minHeight: 44,
-                        borderRadius: 12,
-                        border: 'none',
-                        cursor: 'pointer',
-                        fontFamily: FONT.label,
-                        fontWeight: 600,
-                        letterSpacing: 0.8,
-                        fontSize: 13,
-                        textTransform: 'uppercase',
-                        background: col.color,
-                        color: '#fff',
-                      }}
-                    >
-                      {col.action}
-                    </button>
-                    {col.prev && (
-                      <button
-                        onClick={() => move(o, col.prev, { back: true })}
-                        title={`Revenir à « ${statusLabel(col.prev, 'fr')} »`}
+                  {/* `flexWrap: 'wrap'` — filet de sécurité : avec jusqu'à 6
+                      boutons sur une commande « Prête » (relance incluse),
+                      la rangée ne tenait plus dans une colonne resserrée et
+                      débordait visiblement de la carte (constaté en soirée).
+                      Un retour à la ligne reste largement moins gênant qu'un
+                      débordement. */}
+                  <div style={{ display: 'flex', flexWrap: 'wrap', gap: 5, marginTop: 11 }}>
+                    {/* Sursis « Réglée » (voir PAID_GRACE_MS) : la commande est
+                        déjà payée, retaper sur l'action n'aurait aucun effet —
+                        un badge simple confirme que c'est bien pris en compte,
+                        plutôt que de laisser un bouton qui ne sert plus à rien. */}
+                    {o.status === 'PAID' ? (
+                      <div
                         style={{
-                          width: 44,
-                          minHeight: 44,
+                          flex: '1 1 auto',
+                          minHeight: 42,
                           borderRadius: 12,
-                          border: `1.5px solid ${C.lineHi}`,
-                          background: C.paper,
-                          color: C.dim,
-                          cursor: 'pointer',
-                          fontSize: 17,
-                          lineHeight: 1,
+                          display: 'flex',
+                          alignItems: 'center',
+                          justifyContent: 'center',
+                          fontFamily: FONT.label,
+                          fontWeight: 600,
+                          letterSpacing: 0.6,
+                          fontSize: 13,
+                          textTransform: 'uppercase',
+                          background: alpha(C.ok, 14),
+                          color: C.ok,
                         }}
                       >
-                        ↩
+                        ✓ Réglée
+                      </div>
+                    ) : (
+                      <>
+                        <button
+                          onClick={() => {
+                            acknowledge([o.id])
+                            // Colonne Reçues : un seul bouton qui imprime ET passe en
+                            // prépa (voir printAndPrep) — c'est le geste qu'on fait
+                            // presque toujours. Passer en prépa SANS ticket (client
+                            // déjà au bar) reste possible via le bouton secondaire
+                            // ci-dessous, à la place du ↩ qui n'existe pas ici.
+                            if (col.next === 'IN_PREP') printAndPrep(o)
+                            else move(o, col.next)
+                          }}
+                          style={{
+                            flex: '1 1 auto',
+                            minWidth: 90,
+                            minHeight: 42,
+                            borderRadius: 12,
+                            border: 'none',
+                            cursor: 'pointer',
+                            overflow: 'hidden',
+                            whiteSpace: 'nowrap',
+                            textOverflow: 'ellipsis',
+                            fontFamily: FONT.label,
+                            fontWeight: 600,
+                            letterSpacing: 0.6,
+                            fontSize: 13,
+                            textTransform: 'uppercase',
+                            background: col.color,
+                            color: '#fff',
+                          }}
+                        >
+                          {col.next === 'IN_PREP' ? 'Imprimer' : col.action}
+                        </button>
+                        {col.prev ? (
+                          <button
+                            onClick={() => move(o, col.prev, { back: true })}
+                            title={`Revenir à « ${statusLabel(col.prev, 'fr')} »`}
+                            style={{
+                              width: 42,
+                              minHeight: 42,
+                              borderRadius: 12,
+                              border: `1.5px solid ${C.lineHi}`,
+                              background: C.paper,
+                              color: C.dim,
+                              cursor: 'pointer',
+                              fontSize: 16,
+                              lineHeight: 1,
+                            }}
+                          >
+                            ↩
+                          </button>
+                        ) : col.next === 'IN_PREP' ? (
+                          <button
+                            onClick={() => {
+                              acknowledge([o.id])
+                              move(o, 'IN_PREP')
+                            }}
+                            title="En préparation sans imprimer de ticket — le client est déjà au bar"
+                            style={{
+                              width: 42,
+                              minHeight: 42,
+                              borderRadius: 12,
+                              border: `1.5px solid ${C.lineHi}`,
+                              background: C.paper,
+                              color: C.dim,
+                              cursor: 'pointer',
+                              fontSize: 15,
+                              lineHeight: 1,
+                            }}
+                          >
+                            📋
+                          </button>
+                        ) : null}
+                      </>
+                    )}
+                    {o.status === 'READY' && (
+                      <button
+                        onClick={() => nudge(o)}
+                        disabled={nudging === o.id}
+                        title="Relancer par SMS/notif — sans attendre l'alerte automatique"
+                        style={{ ...stepBtn, width: 42, height: 42, fontSize: 15, opacity: nudging === o.id ? 0.5 : 1 }}
+                      >
+                        {nudging === o.id ? '…' : '📣'}
                       </button>
                     )}
                     <button
@@ -6927,18 +8258,18 @@ function BarTab({ event, venue, session, onEventChange, showToast }) {
                       title="Commenter / signaler cette commande"
                       style={{
                         ...stepBtn,
-                        width: 44,
-                        height: 44,
+                        width: 42,
+                        height: 42,
                         fontSize: 15,
                         borderColor: o.flag ? flagOf(o.flag)?.color : undefined,
                       }}
                     >
                       {o.flag ? flagOf(o.flag)?.emoji : '💬'}
                     </button>
-                    <button onClick={() => printTicket(o)} title="Imprimer le ticket (optionnel)" style={{ ...stepBtn, width: 44, height: 44, fontSize: 15 }}>
+                    <button onClick={() => printTicket(o)} title="Imprimer le ticket (optionnel)" style={{ ...stepBtn, width: 42, height: 42, fontSize: 15 }}>
                       🖨
                     </button>
-                    <button onClick={() => setDetail(o)} style={{ ...stepBtn, width: 44, height: 44, fontSize: 15 }}>
+                    <button onClick={() => setDetail(o)} style={{ ...stepBtn, width: 42, height: 42, fontSize: 15 }}>
                       ⋯
                     </button>
                   </div>
@@ -6947,6 +8278,79 @@ function BarTab({ event, venue, session, onEventChange, showToast }) {
             </div>
           </div>
         ))}
+      </div>
+
+      {/* Réglages du poste — sous les commandes : ce n'est pas ce qu'on vient
+          faire ici en plein service, contrairement au traitement des
+          commandes qui doit rester la première chose visible à l'écran. */}
+      <div style={{ marginTop: 24, paddingTop: 18, borderTop: `1px solid ${C.line}` }} className="no-print">
+        <div style={{ ...S.label, marginBottom: 10 }}>Réglages du poste</div>
+
+        <div style={{ ...S.card, padding: 14, marginBottom: 10 }}>
+          <div style={{ fontWeight: 600, fontSize: 13.5, marginBottom: 8 }}>🔔 Sonnerie des nouvelles commandes</div>
+          <div style={{ display: 'grid', gap: 6 }}>
+            {RINGTONES.map((r) => {
+              const on = ringtone === r.k
+              return (
+                <button
+                  key={r.k}
+                  onClick={() => {
+                    unlockAudio()
+                    setRingtone(r.k)
+                    previewRingtone(r.k)
+                  }}
+                  style={{
+                    ...S.chip,
+                    width: '100%',
+                    minHeight: 46,
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: 10,
+                    textAlign: 'left',
+                    whiteSpace: 'normal',
+                    borderColor: on ? C.terracotta : C.lineHi,
+                    background: on ? 'rgba(185,106,76,.08)' : 'transparent',
+                    color: on ? C.terracotta : C.dim,
+                  }}
+                >
+                  <span style={{ fontSize: 15 }}>{on ? '●' : '○'}</span>
+                  <span style={{ flex: 1 }}>
+                    <span style={{ fontWeight: 600, fontSize: 13 }}>{r.label}</span>
+                    <span style={{ display: 'block', fontSize: 11, color: C.faint }}>{r.hint}</span>
+                  </span>
+                  <span style={{ fontSize: 13 }}>▶</span>
+                </button>
+              )
+            })}
+          </div>
+          <div style={{ fontSize: 11, color: C.faint, marginTop: 8, lineHeight: 1.5 }}>
+            Un tap sélectionne et fait écouter. Le réglage reste sur cette tablette.
+          </div>
+        </div>
+
+        <div style={{ display: 'flex', gap: 8 }}>
+          <button onClick={() => setSoldOutOpen(true)} style={{ ...S.btnGhost, minHeight: 44, fontSize: 12 }}>
+            Marquer un article épuisé
+          </button>
+          {pushSupported() && (
+            <button
+              onClick={async () => {
+                const ok = await subscribePush({ venueId: venue.id, eventId: event.id, role: 'staff' })
+                setStaffPush(ok)
+                showToast(ok ? 'Alertes activées sur cet appareil.' : 'Notifications refusées.', ok ? 'ok' : 'error')
+              }}
+              style={{
+                ...S.btnGhost,
+                minHeight: 44,
+                fontSize: 12,
+                borderColor: staffPush ? C.ok : C.terracotta,
+                color: staffPush ? C.ok : C.terracotta,
+              }}
+            >
+              {staffPush ? '✓ Alertes' : 'Alertes'}
+            </button>
+          )}
+        </div>
       </div>
 
       <SoldOutSheet open={soldOutOpen} venue={venue} onClose={() => setSoldOutOpen(false)} />
@@ -7052,6 +8456,16 @@ function BarTab({ event, venue, session, onEventChange, showToast }) {
               <button onClick={() => printTicket(detail)} style={S.btnGhost}>
                 Imprimer le ticket
               </button>
+              {venue?.printer_url && (
+                <button
+                  disabled={reprinting === detail.id}
+                  onClick={() => reprintDuplicate(detail)}
+                  style={{ ...S.btnGhost, opacity: reprinting === detail.id ? 0.6 : 1 }}
+                  title="Renvoie le ticket sur l'imprimante du bar, marqué DUPLICATA pour ne pas préparer deux fois"
+                >
+                  {reprinting === detail.id ? '…' : '🖨 Réimprimer (marqué duplicata)'}
+                </button>
+              )}
               <button
                 onClick={async () => {
                   if (!confirm(`Annuler la commande ${detail.pickup_code} ? Le client en sera prévenu.`)) return
@@ -7220,11 +8634,13 @@ function CaisseTab({ event, venue, showToast }) {
       })
     // La caisse n'avait AUCUN repli : une coupure de WebSocket la figeait
     // jusqu'au prochain changement d'onglet. En fin de soirée, c'est l'écran
-    // sur lequel on compte l'argent — il ne peut pas être muet.
+    // sur lequel on compte l'argent — il ne peut pas être muet. 45 s plutôt
+    // que 20 : simple filet, allégé pour la même raison que Bar/Orga/
+    // l'imprimante (plusieurs tablettes = plusieurs sondages cumulés).
     const poll = setInterval(() => {
       load()
       loadEntries()
-    }, 20000)
+    }, 45000)
     return () => {
       supabase.removeChannel(ch)
       clearInterval(poll)
@@ -7297,15 +8713,90 @@ function CaisseTab({ event, venue, showToast }) {
   const cashed = cashedOrders + entriesTotal
   const unpaid = orders.filter((o) => o.status === 'UNPAID')
   const scanDelta = entries ? Math.max(0, Number(entries.scan_count || 0) - Number(entries.entries_count || 0)) : null
+  // Retirée = servie, donc l'argent est dû tout de suite — c'est la commande
+  // la plus urgente à encaisser, avant qu'elle ne se noie dans la liste.
+  const readyToCash = orders
+    .filter((o) => o.status === 'PICKED_UP')
+    .sort((a, b) => new Date(a.created_at) - new Date(b.created_at))
+
+  function quickPay(orderId) {
+    setSelected([orderId])
+    setPayOpen(true)
+  }
 
   return (
     <div style={{ paddingBottom: selected.length ? 120 : 0 }}>
       <div style={{ marginBottom: 14 }}>
         <Banner tone="info">
           L’encaissement se fait au bar, sur votre système habituel. Ici, on ne fait que le{' '}
-          <strong>suivi</strong> : cochez ce qui a été réglé.
+          <strong>suivi</strong> : cochez ce qui a été réglé — à n’importe quelle étape, même une
+          commande encore en préparation.
         </Banner>
       </div>
+
+      {/* Retirées mais pas encore encaissées : le service est fait, l'argent
+          ne l'est pas encore. C'est la case la plus urgente de cet écran, elle
+          passe donc avant même le total du jour. */}
+      {readyToCash.length > 0 && (
+        <div style={{ ...S.card, padding: 14, marginBottom: 14, border: `2px solid ${C.text}` }}>
+          <div style={{ ...S.label, marginBottom: 4 }}>
+            🧾 {readyToCash.length} commande{readyToCash.length > 1 ? 's' : ''} servie
+            {readyToCash.length > 1 ? 's' : ''}, pas encore encaissée{readyToCash.length > 1 ? 's' : ''}
+          </div>
+          <div style={{ fontSize: 11.5, color: C.dim, marginBottom: 12, lineHeight: 1.5 }}>
+            Le client est déjà servi — le règlement peut se faire à tout moment.
+          </div>
+          <div style={{ display: 'grid', gap: 8 }}>
+            {readyToCash.map((o) => (
+              <div
+                key={o.id}
+                style={{
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: 10,
+                  padding: 10,
+                  borderRadius: 12,
+                  background: C.paper,
+                  border: `1px solid ${C.line}`,
+                }}
+              >
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <div style={{ fontFamily: FONT.label, fontWeight: 600, letterSpacing: 1.4 }}>
+                    {o.pickup_code}
+                    <span style={{ color: C.dim, fontWeight: 400, letterSpacing: 0, marginLeft: 8, fontSize: 12 }}>
+                      {o.customers?.first_name} {o.customers?.last_name}
+                    </span>
+                  </div>
+                  <div style={{ fontSize: 11.5, color: C.faint, marginTop: 2 }}>
+                    {(o.order_items || []).map((it) => `${it.quantity}× ${it.name_snapshot}`).join(' · ')}
+                  </div>
+                </div>
+                <div style={{ ...S.money, fontWeight: 700, color: C.terracotta }}>{eur(o.total)}</div>
+                <button
+                  onClick={() => quickPay(o.id)}
+                  style={{
+                    minHeight: 46,
+                    padding: '0 14px',
+                    borderRadius: 12,
+                    border: 'none',
+                    cursor: 'pointer',
+                    background: C.text,
+                    color: '#fff',
+                    fontFamily: FONT.label,
+                    fontWeight: 600,
+                    fontSize: 12,
+                    letterSpacing: 0.6,
+                    textTransform: 'uppercase',
+                    whiteSpace: 'nowrap',
+                  }}
+                >
+                  Marquer réglé
+                </button>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
 
       {/* Food en attente de règlement : le chrono de préparation ne démarre
           qu'ici (note du 23/08, §2). Placé tout en haut parce que c'est la
@@ -7543,13 +9034,28 @@ function CaisseTab({ event, venue, showToast }) {
                       {paid ? '✓' : sel ? '✓' : ''}
                     </div>
                     <div style={{ flex: 1, minWidth: 0 }}>
-                      <div style={{ fontFamily: FONT.label, fontWeight: 600, letterSpacing: 1.4 }}>
-                        {o.pickup_code}
-                        <span style={{ color: st.color, fontSize: 10.5, marginLeft: 8, letterSpacing: 0.5 }}>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                        <span style={{ fontFamily: FONT.label, fontWeight: 600, letterSpacing: 1.4 }}>
+                          {o.pickup_code}
+                        </span>
+                        <span
+                          style={{
+                            fontFamily: FONT.label,
+                            fontSize: 10,
+                            fontWeight: 700,
+                            letterSpacing: 0.4,
+                            color: st.color,
+                            background: `${alpha(st.color, 12)}`,
+                            border: `1px solid ${alpha(st.color, 35)}`,
+                            borderRadius: 999,
+                            padding: '2px 8px',
+                            whiteSpace: 'nowrap',
+                          }}
+                        >
                           {st.short.toUpperCase()}
                         </span>
                       </div>
-                      <div style={{ fontSize: 11.5, color: C.faint, marginTop: 2 }}>
+                      <div style={{ fontSize: 11.5, color: C.faint, marginTop: 4 }}>
                         {(o.order_items || []).map((it) => `${it.quantity}× ${it.name_snapshot}`).join(' · ').slice(0, 80)}
                       </div>
                     </div>
@@ -7997,6 +9503,158 @@ function AffluenceCurveChart({ bars, capacity }) {
   )
 }
 
+/**
+ * Vue d'ensemble : ce qui se passe maintenant, en un coup d'œil, sans avoir
+ * à ouvrir un onglet. Repris de la mise en page Wegemo (raccourcis en
+ * pastille, carte chiffre-clé, sections « en direct ») — mais avec les
+ * vraies données de l'événement en cours, pas une tendance sur 7 jours :
+ * une soirée Noti dure quelques heures, un historique calendaire n'a pas de
+ * sens ici.
+ */
+function DashboardTab({ event, onNavigate }) {
+  const [live, setLive] = useState(null)
+  const [pulse, setPulse] = useState(null)
+  const [affluence, setAffluence] = useState([])
+
+  const load = useCallback(async () => {
+    const [l, p, af] = await Promise.all([
+      supabase.from('v_event_live').select('*').eq('event_id', event.id).maybeSingle(),
+      supabase.from('v_event_pulse').select('*').eq('event_id', event.id).maybeSingle(),
+      supabase.from('v_event_affluence').select('*').eq('event_id', event.id).order('slot', { ascending: true }),
+    ])
+    setLive(l.data || null)
+    setPulse(p.data || null)
+    setAffluence(af.data || [])
+  }, [event.id])
+
+  useEffect(() => {
+    load()
+  }, [load])
+
+  useEffect(() => {
+    const ch = supabase
+      .channel(`dashboard-${event.id}`)
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'orders', filter: `event_id=eq.${event.id}` }, load)
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'attendances', filter: `event_id=eq.${event.id}` }, load)
+      .subscribe()
+    return () => supabase.removeChannel(ch)
+  }, [event.id, load])
+
+  const enCours = (live?.in_preparation || 0) + (live?.awaiting_pickup || 0)
+  const revenue = Number(live?.revenue_paid || 0) + Number(live?.revenue_pending || 0)
+  const slots = affluence.slice(-8)
+  const maxArrivals = Math.max(1, ...slots.map((s) => s.arrivals || 0))
+
+  const shortcut = (emoji, badgeBg, title, sub, k) => (
+    <button
+      onClick={() => onNavigate(k)}
+      style={{
+        ...S.card,
+        display: 'flex',
+        alignItems: 'center',
+        gap: 12,
+        padding: 14,
+        cursor: 'pointer',
+        textAlign: 'left',
+        border: `1px solid ${C.line}`,
+      }}
+    >
+      <div
+        style={{
+          width: 42,
+          height: 42,
+          borderRadius: 13,
+          background: badgeBg,
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+          fontSize: 19,
+          flexShrink: 0,
+        }}
+      >
+        {emoji}
+      </div>
+      <div>
+        <div style={{ fontWeight: 700, fontSize: 14.5 }}>{title}</div>
+        <div style={{ fontSize: 12, color: C.dim, marginTop: 1 }}>{sub}</div>
+      </div>
+    </button>
+  )
+
+  return (
+    <div style={{ display: 'grid', gap: 12 }}>
+      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
+        {shortcut('🍸', '#DFF3E3', 'Bar', `${enCours} en cours`, 'bar')}
+        {shortcut('📋', '#DDEBFB', 'Carte', 'Aperçu carte', 'carte')}
+      </div>
+
+      <div style={S.card}>
+        <div style={S.label}>CA de la soirée</div>
+        <div style={{ ...S.money, fontWeight: 700, fontSize: 32, marginTop: 4, letterSpacing: -0.5 }}>{eur(revenue)}</div>
+        {Number(live?.revenue_pending || 0) > 0 && (
+          <div style={{ fontSize: 12.5, color: C.dim, marginTop: 4 }}>
+            dont {eur(live.revenue_pending)} à encaisser
+          </div>
+        )}
+      </div>
+
+      <div style={S.card}>
+        <div style={{ fontWeight: 700, fontSize: 16 }}>Commandes en direct</div>
+        {enCours === 0 ? (
+          <Empty emoji="😌" title="Calme plat" />
+        ) : (
+          <div style={{ marginTop: 14, display: 'grid', gap: 8 }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 13.5 }}>
+              <span style={{ color: C.dim }}>En préparation</span>
+              <strong>{live.in_preparation}</strong>
+            </div>
+            <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 13.5 }}>
+              <span style={{ color: C.dim }}>Prêtes à retirer</span>
+              <strong>{live.awaiting_pickup}</strong>
+            </div>
+          </div>
+        )}
+      </div>
+
+      <div style={S.card}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 7, fontWeight: 700, fontSize: 16 }}>
+          <span style={{ width: 8, height: 8, borderRadius: 4, background: C.ok, flexShrink: 0 }} />
+          Scans en direct
+        </div>
+        {!pulse || Number(pulse.headcount || 0) === 0 ? (
+          <Empty emoji="👀" title="En attente du premier scan" />
+        ) : (
+          <>
+            <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 13.5, marginTop: 14 }}>
+              <span style={{ color: C.dim }}>Présents</span>
+              <strong>{pulse.headcount}</strong>
+            </div>
+            <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 13.5, marginTop: 6 }}>
+              <span style={{ color: C.dim }}>Arrivées (15 min)</span>
+              <strong>+{pulse.arrivals_15min || 0}</strong>
+            </div>
+            {slots.length > 1 && (
+              <div style={{ display: 'flex', alignItems: 'flex-end', gap: 5, height: 44, marginTop: 16 }}>
+                {slots.map((s, i) => (
+                  <div
+                    key={i}
+                    style={{
+                      flex: 1,
+                      height: `${Math.max(8, ((s.arrivals || 0) / maxArrivals) * 100)}%`,
+                      borderRadius: 3,
+                      background: i === slots.length - 1 ? C.text : C.lineHi,
+                    }}
+                  />
+                ))}
+              </div>
+            )}
+          </>
+        )}
+      </div>
+    </div>
+  )
+}
+
 function OrgaTab({ event, venue, showToast, onEventChange }) {
   const [live, setLive] = useState(null)
   const [board, setBoard] = useState([])
@@ -8079,7 +9737,10 @@ function OrgaTab({ event, venue, showToast, onEventChange }) {
       .subscribe((status) => {
         if (status === 'SUBSCRIBED') load()
       })
-    const poll = setInterval(load, 25000)
+    // 45 s plutôt que 25 : même allègement que Bar/Caisse/l'imprimante, pour
+    // la même raison — un simple filet derrière le temps réel, pas une
+    // source principale de mise à jour.
+    const poll = setInterval(load, 45000)
     return () => {
       supabase.removeChannel(ch)
       clearInterval(poll)
@@ -9397,6 +11058,64 @@ const EMPTY_PROMO = {
   gift_items: [],
   is_entry_code: false,
   entry_price: 25,
+  is_rotating: false,
+  rotating_secret: null,
+}
+
+/** Secret aléatoire (192 bits, hex) — clé HMAC du code rotatif, voir 0056. */
+function genRotatingSecret() {
+  const bytes = crypto.getRandomValues(new Uint8Array(24))
+  return Array.from(bytes, (b) => b.toString(16).padStart(2, '0')).join('')
+}
+
+/**
+ * Affiche le code rotatif EN COURS pour le staff (écran au bar, à l'entrée…) —
+ * se rafraîchit tout seul. Interroge current_rotating_code() plutôt que de
+ * recalculer côté client : le secret n'est jamais envoyé au navigateur.
+ */
+function LiveRotatingCode({ promoId }) {
+  const [state, setState] = useState(null) // null (chargement) | 'error' | {code, seconds_left}
+
+  useEffect(() => {
+    if (!promoId) return
+    let dead = false
+    async function tick() {
+      const { data, error } = await supabase.rpc('current_rotating_code', { p_promo: promoId })
+      if (dead) return
+      setState(error || !data?.[0] ? 'error' : data[0])
+    }
+    tick()
+    const id = setInterval(tick, 4000)
+    return () => {
+      dead = true
+      clearInterval(id)
+    }
+  }, [promoId])
+
+  if (state === 'error') return null
+
+  return (
+    <div
+      style={{
+        textAlign: 'center',
+        padding: '20px 14px',
+        borderRadius: 16,
+        background: C.navy,
+        color: '#fff',
+        marginBottom: 14,
+      }}
+    >
+      <div style={{ fontSize: 11, letterSpacing: 1.2, opacity: 0.7, marginBottom: 6 }}>
+        CODE EN DIRECT
+      </div>
+      <div style={{ fontFamily: FONT.label, fontSize: 42, fontWeight: 700, letterSpacing: 6 }}>
+        {state ? state.code : '······'}
+      </div>
+      <div style={{ fontSize: 12, opacity: 0.7, marginTop: 6 }}>
+        {state ? `change dans ${state.seconds_left}s` : 'chargement…'}
+      </div>
+    </div>
+  )
 }
 
 /** Catégories offrables par un code cadeau, dans les mots de la carte. */
@@ -9607,6 +11326,55 @@ function ForfaitFields({ f, set }) {
           />
         </Field>
       )}
+
+      {/* Retour terrain : un code affiché sur un écran (bar, entrée) circule
+          par capture d'écran toute la soirée si sa valeur ne change jamais.
+          En rotatif, le barème de crédits ne change pas — seule la VALEUR
+          SAISIE par le client change toutes les 60 s (voir 0056). */}
+      <button
+        onClick={() => {
+          if (f.is_rotating) {
+            set('is_rotating', false)
+          } else {
+            set('is_rotating', true)
+            if (!f.rotating_secret) set('rotating_secret', genRotatingSecret())
+          }
+        }}
+        style={{
+          display: 'flex',
+          justifyContent: 'space-between',
+          alignItems: 'center',
+          width: '100%',
+          minHeight: 56,
+          padding: '0 14px',
+          borderRadius: 14,
+          cursor: 'pointer',
+          border: `1.5px solid ${f.is_rotating ? C.indigo : C.lineHi}`,
+          background: f.is_rotating ? `${alpha(C.indigo, 9)}` : C.paper,
+          color: C.text,
+          marginBottom: f.is_rotating ? 10 : 14,
+          textAlign: 'left',
+        }}
+      >
+        <span>
+          <span style={{ fontSize: 14, fontWeight: 500 }}>🔄 Code rotatif (change toutes les minutes)</span>
+          <span style={{ display: 'block', fontSize: 11.5, color: C.faint, marginTop: 2 }}>
+            Utile sur un écran affiché au bar/à l’entrée — inutilisable en capture d’écran après coup
+          </span>
+        </span>
+        <span style={{ fontFamily: FONT.label, fontWeight: 600, color: f.is_rotating ? C.indigo : C.faint }}>
+          {f.is_rotating ? 'OUI' : 'NON'}
+        </span>
+      </button>
+
+      {f.is_rotating &&
+        (f.id ? (
+          <LiveRotatingCode promoId={f.id} />
+        ) : (
+          <div style={{ fontSize: 12, color: C.faint, marginBottom: 14, lineHeight: 1.5 }}>
+            Enregistrez, puis rouvrez ce code (depuis la liste) pour voir le code en direct apparaître ici.
+          </div>
+        ))}
     </>
   )
 }
@@ -9882,6 +11650,8 @@ function PromoCodeSheet({ promo, event, venue, onClose, onSaved, showToast }) {
       gift_items: f.kind === 'gift' ? gifts : [],
       is_entry_code: f.kind === 'credits' && !!f.is_entry_code,
       entry_price: f.kind === 'credits' && f.is_entry_code ? Number(f.entry_price) || 0 : null,
+      is_rotating: f.kind === 'credits' && !!f.is_rotating,
+      rotating_secret: f.kind === 'credits' && f.is_rotating ? f.rotating_secret : null,
     }
     const { error } = f.id
       ? await supabase.from('promo_codes').update(payload).eq('id', f.id)
@@ -9907,7 +11677,14 @@ function PromoCodeSheet({ promo, event, venue, onClose, onSaved, showToast }) {
 
   return (
     <Sheet open={!!promo} onClose={onClose} title={f.id ? 'Modifier le code' : 'Nouveau code promo'}>
-      <Field label="Code" hint="Ce que le client saisit dans son espace de commande">
+      <Field
+        label="Code"
+        hint={
+          f.kind === 'credits' && f.is_rotating
+            ? 'Identifiant interne uniquement — en rotatif, le client saisit le code affiché en direct, pas celui-ci'
+            : 'Ce que le client saisit dans son espace de commande'
+        }
+      >
         <input
           style={{ ...S.input, textTransform: 'uppercase', letterSpacing: 1.5, fontFamily: FONT.label }}
           value={f.code}
@@ -11218,8 +12995,20 @@ function QrTab({ event, venue, showToast }) {
 
   if (loading) return <Spinner />
 
+  const onPreview = isPreviewDeployment()
+
   return (
     <div>
+      {onPreview && (
+        <div style={{ marginBottom: 14 }}>
+          <Banner tone="danger">
+            ⚠️ Vous êtes sur un <strong>lien d'aperçu</strong> (URL de déploiement, pas le site
+            définitif) — les QR générés ici vont casser dès que cet aperçu expirera. Ouvrez
+            l'app depuis l'adresse de production habituelle avant d'exporter ou d'imprimer.
+          </Banner>
+        </div>
+      )}
+
       <div style={{ marginBottom: 14 }}>
         <Banner tone="info">
           Phase 1 : un QR à l’<strong>entrée</strong>, un QR au <strong>bar</strong>. Aucun QR sur
@@ -11228,7 +13017,12 @@ function QrTab({ event, venue, showToast }) {
       </div>
 
       <div style={{ display: 'flex', gap: 8, marginBottom: 14 }}>
-        <button disabled={busy || !points.length} onClick={exportAll} style={{ ...S.btn, minHeight: 48 }}>
+        <button
+          disabled={busy || !points.length || onPreview}
+          onClick={exportAll}
+          title={onPreview ? "Indisponible sur un lien d'aperçu — ouvrez le site de production" : undefined}
+          style={{ ...S.btn, minHeight: 48, opacity: onPreview ? 0.5 : 1 }}
+        >
           {busy ? '…' : 'Exporter les affiches (PDF)'}
         </button>
       </div>
@@ -11270,7 +13064,15 @@ function QrTab({ event, venue, showToast }) {
               ) : (
                 <div style={{ height: 216 }} />
               )}
-              <div style={{ fontSize: 11, color: C.faint, marginTop: 10, wordBreak: 'break-all' }}>
+              <div
+                style={{
+                  fontSize: 11,
+                  color: onPreview ? C.danger : C.faint,
+                  fontWeight: onPreview ? 600 : 400,
+                  marginTop: 10,
+                  wordBreak: 'break-all',
+                }}
+              >
                 {scanUrl(preview.id)}
               </div>
             </div>
@@ -11288,11 +13090,25 @@ function QrTab({ event, venue, showToast }) {
 
             <div style={{ display: 'grid', gap: 8 }}>
               <button
+                disabled={onPreview}
+                title={onPreview ? "Indisponible sur un lien d'aperçu — ouvrez le site de production" : undefined}
+                onClick={async () => {
+                  const canvas = await renderQrPoster(venue, event, preview, 1240, 1754)
+                  const blob = canvasesToPdfBlob([canvas], { quality: 0.95 })
+                  await shareOrDownload(blob, `noti-qr-${preview.kind}.pdf`, 'QR Noti Calling')
+                }}
+                style={{ ...S.btn, opacity: onPreview ? 0.5 : 1 }}
+              >
+                Télécharger l’affiche (PDF)
+              </button>
+              <button
+                disabled={onPreview}
+                title={onPreview ? "Indisponible sur un lien d'aperçu — ouvrez le site de production" : undefined}
                 onClick={async () => {
                   const canvas = await renderQrPoster(venue, event, preview, 1080, 1350)
                   await canvasToPng(canvas, `noti-qr-${preview.kind}.png`, 'QR Noti Calling')
                 }}
-                style={S.btn}
+                style={{ ...S.btnGhost, opacity: onPreview ? 0.5 : 1 }}
               >
                 Télécharger l’affiche (PNG)
               </button>
@@ -11540,6 +13356,525 @@ function TeamCard({ venue, session, showToast }) {
   )
 }
 
+const PRESENTATION_ROLE_LABEL = { manager: 'Manager', staff: 'Équipe (accès bar)' }
+
+/**
+ * Liens d'invitation directe vers l'espace staff, sans connexion — pour
+ * faire une démo avec les vraies données du lieu (voir 0043). Réservé au
+ * propriétaire : le rôle qu'un lien accorde est plafonné à manager/staff
+ * côté SQL, jamais owner.
+ */
+function PresentationLinksCard({ venue, showToast }) {
+  const [links, setLinks] = useState([])
+  const [loading, setLoading] = useState(true)
+  const [label, setLabel] = useState('')
+  const [role, setRole] = useState('manager')
+  const [busy, setBusy] = useState(false)
+  const onPreview = isPreviewDeployment()
+
+  const load = useCallback(async () => {
+    const { data } = await supabase
+      .from('presentation_links')
+      .select('*')
+      .eq('venue_id', venue.id)
+      .is('revoked_at', null)
+      .order('created_at', { ascending: false })
+    setLinks(data || [])
+    setLoading(false)
+  }, [venue.id])
+
+  useEffect(() => {
+    load()
+  }, [load])
+
+  async function create() {
+    setBusy(true)
+    const { error } = await supabase.rpc('create_presentation_link', {
+      p_venue: venue.id,
+      p_role: role,
+      p_label: label.trim() || null,
+    })
+    setBusy(false)
+    if (error) {
+      showToast(frError(error), 'error')
+      return false
+    }
+    setLabel('')
+    load()
+    return true
+  }
+
+  async function revoke(id) {
+    if (!confirm('Révoquer ce lien ? Toute personne qui l’a déjà ouvert perdra l’accès immédiatement.')) return
+    const { error } = await supabase.rpc('revoke_presentation_link', { p_link: id })
+    if (error) return showToast(frError(error), 'error')
+    showToast('Lien révoqué.', 'ok')
+    load()
+  }
+
+  return (
+    <div style={{ ...S.card, marginBottom: 14 }}>
+      <div style={{ ...S.h2, marginBottom: 6 }}>Liens de présentation</div>
+      <div style={{ fontSize: 12, color: C.dim, marginBottom: 14, lineHeight: 1.55 }}>
+        Pour montrer l’outil sans faire créer de compte : la personne ouvre le lien et arrive
+        directement dans l’espace équipe, sur les <strong>vraies données</strong> de ce lieu. Valable
+        indéfiniment jusqu’à ce que vous le révoquiez.
+      </div>
+
+      {onPreview && (
+        <div style={{ marginBottom: 14 }}>
+          <Banner tone="danger">
+            ⚠️ Vous êtes sur un lien d’aperçu Vercel — un lien généré ici casserait comme les QR.
+            Ouvrez l’app depuis l’adresse de production avant d’en créer un.
+          </Banner>
+        </div>
+      )}
+
+      {loading ? (
+        <Spinner label="Chargement…" />
+      ) : (
+        <>
+          {links.length > 0 && (
+            <div style={{ display: 'grid', gap: 8, marginBottom: 14 }}>
+              {links.map((l) => (
+                <div
+                  key={l.id}
+                  style={{
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: 10,
+                    padding: 11,
+                    borderRadius: 12,
+                    background: C.paper,
+                    border: `1px solid ${C.line}`,
+                  }}
+                >
+                  <div style={{ minWidth: 0, flex: 1 }}>
+                    <div style={{ fontSize: 13.5, fontWeight: 500, overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                      {l.label || 'Lien sans nom'}
+                    </div>
+                    <div style={{ fontSize: 11, color: C.faint, marginTop: 2 }}>
+                      {PRESENTATION_ROLE_LABEL[l.role] || l.role}
+                    </div>
+                  </div>
+                  <button
+                    onClick={() => {
+                      navigator.clipboard?.writeText(presentationUrl(l.id))
+                      showToast('Lien copié.', 'ok')
+                    }}
+                    style={{ ...stepBtn, width: 38, height: 38, fontSize: 13 }}
+                    title="Copier le lien"
+                  >
+                    🔗
+                  </button>
+                  <button
+                    onClick={() => revoke(l.id)}
+                    title="Révoquer"
+                    style={{ ...stepBtn, width: 38, height: 38, fontSize: 14, color: C.danger }}
+                  >
+                    ✕
+                  </button>
+                </div>
+              ))}
+            </div>
+          )}
+
+          <Field label="Nom du lien (optionnel)">
+            <input
+              style={S.input}
+              value={label}
+              onChange={(e) => setLabel(e.target.value)}
+              placeholder="Ex. Démo pour Untel"
+            />
+          </Field>
+          <div style={{ display: 'flex', gap: 8, marginBottom: 12 }}>
+            {[
+              ['staff', 'Équipe', 'Bar, caisse, clients'],
+              ['manager', 'Manager', 'Accès complet'],
+            ].map(([k, lbl, hint]) => (
+              <button
+                key={k}
+                onClick={() => setRole(k)}
+                style={{
+                  ...S.chip,
+                  flex: 1,
+                  minHeight: 52,
+                  flexDirection: 'column',
+                  gap: 2,
+                  borderColor: role === k ? C.terracotta : C.lineHi,
+                  color: role === k ? C.terracotta : C.dim,
+                }}
+              >
+                <span style={{ fontWeight: 600 }}>{lbl}</span>
+                <span style={{ fontSize: 9.5, opacity: 0.8 }}>{hint}</span>
+              </button>
+            ))}
+          </div>
+          <button
+            disabled={busy || onPreview}
+            title={onPreview ? "Indisponible sur un lien d'aperçu — ouvrez le site de production" : undefined}
+            onClick={async () => {
+              const ok = await create()
+              if (ok) showToast('Lien créé — copiez-le depuis la liste ci-dessus.', 'ok')
+            }}
+            style={{ ...S.btnGhost, opacity: busy || onPreview ? 0.5 : 1 }}
+          >
+            {busy ? '…' : 'Générer un lien de présentation'}
+          </button>
+        </>
+      )}
+    </div>
+  )
+}
+
+/**
+ * Réglage de l'imprimante du bar. Le bouton d'essai sort un vrai ticket, avec
+ * un vrai nom et de vrais articles : c'est le seul moyen de vérifier la
+ * largeur du rouleau et les accents avant la soirée, pas pendant.
+ */
+function PrinterCard({ venue, onReload, showToast }) {
+  const [url, setUrl] = useState(venue.printer_url || '')
+  const [auto, setAuto] = useState(Boolean(venue.printer_auto))
+  const [busy, setBusy] = useState(false)
+  const [preview, setPreview] = useState(false)
+
+  const demo = useMemo(
+    () => ({
+      pickup_code: 'A7X3',
+      created_at: new Date().toISOString(),
+      status: 'RECEIVED',
+      subtotal: 26, discount: 0, total: 26,
+      note: 'Essai d’imprimante',
+      customers: { first_name: 'Essai', last_name: 'Imprimante', phone: '+33 6 00 00 00 00', tags: [] },
+      order_items: [
+        { quantity: 2, name_snapshot: 'Spritz', unit_price: 12, variant_label: null, detail: { options: [{ name: 'Aperol' }] } },
+        { quantity: 1, name_snapshot: 'Coca-Cola', unit_price: 2, variant_label: '33 cl', detail: { options: [] } },
+      ],
+    }),
+    []
+  )
+
+  async function save() {
+    setBusy(true)
+    const { error } = await supabase
+      .from('venues')
+      .update({ printer_url: url.trim() || null, printer_auto: auto })
+      .eq('id', venue.id)
+    setBusy(false)
+    if (error) return showToast(frError(error), 'error')
+    showToast('Imprimante enregistrée.', 'ok')
+    onReload?.()
+  }
+
+  async function testPrint() {
+    setBusy(true)
+    const res = await sendToPrinter(buildTicket({ order: demo, event: null, venue }), {
+      url: url.trim(),
+    })
+    setBusy(false)
+    showToast(res.ok ? 'Ticket d’essai envoyé.' : res.reason, res.ok ? 'ok' : 'error')
+  }
+
+  return (
+    <div style={{ ...S.card, marginBottom: 14 }}>
+      <div style={{ ...S.h2, marginBottom: 6 }}>Impression des tickets</div>
+      <div style={{ fontSize: 12, color: C.dim, marginBottom: 14, lineHeight: 1.55 }}>
+        <strong>Automatique</strong> : un ticket sort dès qu'une commande arrive, sans qu'un barman
+        clique quoi que ce soit, quel que soit l'onglet ouvert sur la tablette. Au-delà de{' '}
+        {PRINT_BATCH_THRESHOLD} tickets d'un coup, l'impression s'arrête et demande confirmation —
+        pour ne pas noyer le bar sous le papier si plusieurs commandes arrivent en rafale.{' '}
+        <strong>Manuel</strong> : rien ne sort tout seul, c'est le bouton « Imprimer » de chaque
+        commande, au bar, qui déclenche le ticket. Dans les deux cas : jamais deux fois la même
+        commande, et plusieurs tablettes peuvent rester allumées, une seule imprime.
+      </div>
+      <div style={{ fontSize: 12, color: C.dim, marginBottom: 14, lineHeight: 1.55 }}>
+        La tablette doit rester allumée avec l'app ouverte ; imprimer tablette éteinte demanderait que
+        l'imprimante elle-même aille chercher ses tickets sur un serveur (Epson Server Direct Print),
+        un service à activer côté Epson, pas seulement ici. Un ticket perdu ou mal lu se réimprime
+        depuis la fiche de la commande (bouton « ⋯ » au bar) — marqué <strong>DUPLICATA</strong> en
+        gros, pour ne jamais préparer deux fois la même commande par erreur.
+      </div>
+
+      <div style={{ marginBottom: 14 }}>
+        <Banner tone="info">
+          Un navigateur ne peut joindre ni une adresse <code>http://</code> depuis un site sécurisé,
+          ni un port d’imprimante brut. L’adresse ci-dessous doit donc répondre en{' '}
+          <strong>https</strong> — en pratique, une imprimante qui va chercher ses tickets
+          (Epson Server Direct Print, Star CloudPRNT) ou un relais installé sur place.
+        </Banner>
+      </div>
+
+      <Field
+        label="Adresse d’impression"
+        hint="Sur un Epson TM-m30III, le service ePOS-Print répond sur /cgi-bin/epos/service.cgi?devid=local_printer — par exemple https://192.168.1.50/cgi-bin/epos/service.cgi?devid=local_printer"
+      >
+        <input
+          style={S.input}
+          value={url}
+          onChange={(e) => setUrl(e.target.value)}
+          placeholder="https://…/cgi-bin/epos/service.cgi?devid=local_printer"
+          autoComplete="off"
+        />
+      </Field>
+
+      <div style={{ display: 'flex', gap: 8, marginBottom: 12 }}>
+        <button
+          onClick={() => setAuto(true)}
+          style={{
+            ...S.chip,
+            flex: 1,
+            minHeight: 48,
+            borderColor: auto ? C.terracotta : C.lineHi,
+            color: auto ? C.terracotta : C.dim,
+          }}
+        >
+          Automatique
+        </button>
+        <button
+          onClick={() => setAuto(false)}
+          style={{
+            ...S.chip,
+            flex: 1,
+            minHeight: 48,
+            borderColor: !auto ? C.terracotta : C.lineHi,
+            color: !auto ? C.terracotta : C.dim,
+          }}
+        >
+          Manuel
+        </button>
+      </div>
+
+      <div style={{ display: 'grid', gap: 8 }}>
+        <button disabled={busy} onClick={save} style={{ ...S.btn, opacity: busy ? 0.6 : 1 }}>
+          {busy ? '…' : 'Enregistrer'}
+        </button>
+        <button disabled={busy || !url.trim()} onClick={testPrint} style={{ ...S.btnGhost, opacity: busy || !url.trim() ? 0.5 : 1 }}>
+          Imprimer un ticket d’essai
+        </button>
+        <button onClick={() => setPreview(!preview)} style={S.btnGhost}>
+          {preview ? 'Masquer l’aperçu' : 'Voir à quoi ressemble le ticket'}
+        </button>
+      </div>
+
+      {preview && (
+        <pre
+          style={{
+            marginTop: 12,
+            padding: 12,
+            borderRadius: 12,
+            background: C.paper,
+            border: `1px solid ${C.line}`,
+            fontFamily: 'ui-monospace, Menlo, Consolas, monospace',
+            fontSize: 11,
+            lineHeight: 1.45,
+            overflowX: 'auto',
+            whiteSpace: 'pre',
+          }}
+        >
+          {ticketToText(buildTicket({ order: demo, event: null, venue }))}
+        </pre>
+      )}
+    </div>
+  )
+}
+
+const PRINT_TRIGGER_LABEL = {
+  arrival_auto: 'Automatique (arrivée de la commande)',
+  manual_print: 'Bouton « Imprimer » (mode manuel)',
+  reprint_duplicata: 'Réimpression manuelle (duplicata)',
+  en_prepa: 'Clic « En prépa » (ancien mode)',
+}
+const PRINT_RESULT_LABEL = { ok: 'Imprimé', fail: 'Échec', ambiguous: 'Délai dépassé — à vérifier' }
+
+/**
+ * La question posée un soir de ticket fantôme : « d'où vient CE ticket-là ? »
+ * print_log (0054) trace chaque tentative depuis qu'il n'existe plus qu'un
+ * seul déclencheur (« En prépa ») ; ce panneau la rend consultable sans SQL.
+ */
+function PrintLogPanel({ event, showToast }) {
+  const [rows, setRows] = useState(null)
+  const [loading, setLoading] = useState(false)
+
+  async function load() {
+    if (!event?.id) return
+    setLoading(true)
+    const { data, error } = await supabase
+      .from('print_log')
+      .select('*')
+      .eq('event_id', event.id)
+      .order('created_at', { ascending: false })
+      .limit(30)
+    setLoading(false)
+    if (error) return showToast?.(frError(error), 'error')
+    setRows(data || [])
+  }
+
+  useEffect(() => {
+    load()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [event?.id])
+
+  return (
+    <div style={{ ...S.card, marginBottom: 14 }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 6 }}>
+        <div style={{ ...S.h2, flex: 1 }}>Journal d'impression</div>
+        <button onClick={load} disabled={loading} style={{ ...S.btnGhost, opacity: loading ? 0.6 : 1 }}>
+          {loading ? '…' : 'Actualiser'}
+        </button>
+      </div>
+      <div style={{ fontSize: 12, color: C.dim, marginBottom: 12, lineHeight: 1.5 }}>
+        Chaque ticket envoyé, avec sa cause — pour retrouver l'origine d'un ticket inattendu sans
+        avoir à deviner.
+      </div>
+      {!rows?.length ? (
+        <div style={{ fontSize: 12.5, color: C.faint }}>
+          {rows === null ? 'Chargement…' : "Aucun ticket envoyé pour cette soirée pour l'instant."}
+        </div>
+      ) : (
+        <div style={{ display: 'grid', gap: 0 }}>
+          {rows.map((r) => (
+            <div
+              key={r.id}
+              style={{
+                display: 'flex',
+                gap: 10,
+                alignItems: 'baseline',
+                fontSize: 12.5,
+                padding: '7px 0',
+                borderBottom: `1px solid ${C.line}`,
+              }}
+            >
+              <span style={{ color: C.faint, minWidth: 40 }}>
+                {new Date(r.created_at).toLocaleTimeString('fr-FR', { hour: '2-digit', minute: '2-digit' })}
+              </span>
+              <span style={{ fontWeight: 600, minWidth: 46 }}>{r.pickup_code || '—'}</span>
+              <span style={{ flex: 1, color: C.dim }}>{PRINT_TRIGGER_LABEL[r.trigger] || r.trigger}</span>
+              <span
+                style={{
+                  fontWeight: 600,
+                  color: r.result === 'ok' ? C.ok : r.result === 'ambiguous' ? C.warn : C.danger,
+                }}
+              >
+                {PRINT_RESULT_LABEL[r.result] || r.result}
+              </span>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  )
+}
+
+/**
+ * Réinitialisation des commandes de la soirée — retour terrain : des
+ * commandes de test se mélangent aux vraies pendant les réglages avant
+ * ouverture, et jusqu'ici la seule façon de les nettoyer était de me
+ * demander du SQL à coller dans Supabase à chaque fois. Réservé au
+ * propriétaire du lieu (ROLE_TABS), et scopé STRICTEMENT à CET événement —
+ * jamais les autres soirées du lieu, jamais un autre lieu.
+ *
+ * Pas de distinction « vraie » / « fausse » commande possible ici (rien ne
+ * les différencie en base) : c'est tout ou rien pour cette soirée, d'où la
+ * confirmation par saisie plutôt qu'un simple bouton — irréversible, comme
+ * la suppression en base qu'on donnait par SQL plus tôt ce soir.
+ */
+function DangerZoneCard({ event, onReload, showToast }) {
+  const [open, setOpen] = useState(false)
+  const [confirmText, setConfirmText] = useState('')
+  const [busy, setBusy] = useState(false)
+  const [count, setCount] = useState(null)
+
+  useEffect(() => {
+    if (!open) return
+    let dead = false
+    supabase
+      .from('orders')
+      .select('id', { count: 'exact', head: true })
+      .eq('event_id', event.id)
+      .then(({ count: c }) => {
+        if (!dead) setCount(c ?? 0)
+      })
+    return () => {
+      dead = true
+    }
+  }, [open, event.id])
+
+  async function reset() {
+    if (confirmText.trim().toUpperCase() !== 'RESET') return
+    setBusy(true)
+    const { error } = await supabase.from('orders').delete().eq('event_id', event.id)
+    setBusy(false)
+    if (error) return showToast(frError(error), 'error')
+    showToast('Commandes de cette soirée supprimées — chiffre d’affaires remis à zéro.', 'ok')
+    setOpen(false)
+    setConfirmText('')
+    onReload?.()
+  }
+
+  return (
+    <div style={{ ...S.card, marginBottom: 14, border: `1.5px solid ${C.danger}` }}>
+      <div style={{ ...S.h2, marginBottom: 6, color: C.danger }}>⚠️ Zone dangereuse</div>
+      <div style={{ fontSize: 12, color: C.dim, marginBottom: 14, lineHeight: 1.55 }}>
+        Supprime <strong>toutes</strong> les commandes de « {event.name} » — et donc le chiffre
+        d’affaires, qui se recalcule toujours en direct depuis elles. Utile pour repartir de zéro
+        après des commandes de test. Irréversible. N’affecte que cette soirée : ni les autres
+        soirées du lieu, ni les fiches clients.
+      </div>
+
+      {!open ? (
+        <button
+          onClick={() => setOpen(true)}
+          style={{ ...S.btnGhost, borderColor: C.danger, color: C.danger }}
+        >
+          Réinitialiser les commandes de cette soirée
+        </button>
+      ) : (
+        <>
+          <div style={{ marginBottom: 12 }}>
+            <Banner tone="danger">
+              {count === null
+                ? 'Chargement…'
+                : `${count} commande${count > 1 ? 's' : ''} seront supprimées définitivement.`}
+            </Banner>
+          </div>
+          <Field label='Tapez "RESET" pour confirmer'>
+            <input
+              style={S.input}
+              value={confirmText}
+              onChange={(e) => setConfirmText(e.target.value)}
+              placeholder="RESET"
+              autoComplete="off"
+            />
+          </Field>
+          <div style={{ display: 'flex', gap: 8, marginTop: 12 }}>
+            <button
+              onClick={() => {
+                setOpen(false)
+                setConfirmText('')
+              }}
+              style={{ ...S.btnGhost, flex: 1 }}
+            >
+              Annuler
+            </button>
+            <button
+              disabled={confirmText.trim().toUpperCase() !== 'RESET' || busy || count === null}
+              onClick={reset}
+              style={{
+                ...S.btn,
+                flex: 1,
+                background: C.danger,
+                opacity: confirmText.trim().toUpperCase() !== 'RESET' || busy ? 0.5 : 1,
+              }}
+            >
+              {busy ? '…' : 'Supprimer définitivement'}
+            </button>
+          </div>
+        </>
+      )}
+    </div>
+  )
+}
+
 function ReglagesTab({ venue, event, session, role, onReload, showToast }) {
   const [v, setV] = useState(venue)
   const [e, setE] = useState(event)
@@ -11575,6 +13910,7 @@ function ReglagesTab({ venue, event, session, role, onReload, showToast }) {
           presence_order_window_min: Math.max(1, Number(e.presence_order_window_min) || 60),
           presence_scan_window_min: Math.max(1, Number(e.presence_scan_window_min) || 30),
           accept_orders: !!e.accept_orders,
+          phone_verify_required: !!e.phone_verify_required,
           service_message: e.service_message || null,
           welcome_message: e.welcome_message || null,
           languages: e.languages?.length ? e.languages : ['fr'],
@@ -11632,20 +13968,48 @@ function ReglagesTab({ venue, event, session, role, onReload, showToast }) {
         </div>
       </div>
 
+      {phoneVerificationAvailable && (
+        <div style={{ ...S.card, marginBottom: 14 }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+            <div style={{ fontSize: 24 }}>{e.phone_verify_required ? '🔒' : '⏸️'}</div>
+            <div style={{ flex: 1 }}>
+              <div style={{ fontWeight: 500 }}>
+                {e.phone_verify_required
+                  ? 'Vérification du numéro active'
+                  : 'Vérification du numéro en pause'}
+              </div>
+              <div style={{ fontSize: 12, color: C.dim, marginTop: 2 }}>
+                {e.phone_verify_required
+                  ? 'Numéro vérifié par SMS avant de commander.'
+                  : 'Personne ne reçoit de SMS ce soir — remise en route en un clic.'}
+              </div>
+            </div>
+            <button
+              onClick={() => setE({ ...e, phone_verify_required: !e.phone_verify_required })}
+              style={{
+                minHeight: 44,
+                padding: '0 16px',
+                borderRadius: 12,
+                border: 'none',
+                cursor: 'pointer',
+                fontFamily: FONT.label,
+                fontWeight: 600,
+                letterSpacing: 0.8,
+                fontSize: 12,
+                background: e.phone_verify_required ? C.danger : C.ok,
+                color: '#fff',
+              }}
+            >
+              {e.phone_verify_required ? 'METTRE EN PAUSE' : 'RÉACTIVER'}
+            </button>
+          </div>
+        </div>
+      )}
+
       <div style={{ ...S.card, marginBottom: 14 }}>
         <div style={{ ...S.h2, marginBottom: 14 }}>Soirée</div>
         <Field label="Nom">
           <input style={S.input} value={e.name || ''} onChange={(ev) => setE({ ...e, name: ev.target.value })} />
-        </Field>
-        <Field label={`Temps de préparation par défaut : ${e.default_prep_min} min`}>
-          <input
-            type="range"
-            min={1}
-            max={30}
-            value={e.default_prep_min || 1}
-            onChange={(ev) => setE({ ...e, default_prep_min: Number(ev.target.value) })}
-            style={{ width: '100%', accentColor: C.terracotta }}
-          />
         </Field>
         <Field label="Heure de fermeture" hint="Déclenche la relance renforcée une heure avant.">
           <input
@@ -11724,8 +14088,8 @@ function ReglagesTab({ venue, event, session, role, onReload, showToast }) {
           label="Langues"
           hint="L'app est entièrement traduite. Les noms de vos produits suivent les traductions saisies dans la carte."
         >
-          <div style={{ display: 'flex', gap: 8 }}>
-            {['fr', 'en', 'es'].map((l) => {
+          <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+            {LANGS.map((l) => {
               const on = (e.languages || ['fr']).includes(l)
               return (
                 <button
@@ -11740,7 +14104,7 @@ function ReglagesTab({ venue, event, session, role, onReload, showToast }) {
                   }
                   style={{
                     ...S.chip,
-                    flex: 1,
+                    flex: '1 0 60px',
                     minHeight: 44,
                     borderColor: on ? C.terracotta : C.lineHi,
                     color: on ? C.terracotta : C.dim,
@@ -11754,7 +14118,14 @@ function ReglagesTab({ venue, event, session, role, onReload, showToast }) {
         </Field>
       </div>
 
+      <PrinterCard venue={venue} onReload={onReload} showToast={showToast} />
+      <PrintLogPanel event={event} showToast={showToast} />
+
       {role === 'owner' && <TeamCard venue={venue} session={session} showToast={showToast} />}
+      {(role === 'owner' || role === 'manager') && (
+        <PresentationLinksCard venue={venue} showToast={showToast} />
+      )}
+      {role === 'owner' && <DangerZoneCard event={event} onReload={onReload} showToast={showToast} />}
 
       <div style={{ ...S.card, marginBottom: 14 }}>
         <div style={{ ...S.h2, marginBottom: 14 }}>Lieu & mentions légales</div>
@@ -11874,6 +14245,7 @@ function NewEventSheet({ open, venue, onClose, onCreated, showToast }) {
 
 async function renderQrPoster(venue, event, point, W = 1080, H = 1350) {
   const { canvas, ctx } = makeCanvas(W, H, 1)
+  await ensureFontsReady()
   const qr = await loadImage(
     await QRCode.toDataURL(scanUrl(point.id), {
       width: 900,
@@ -11953,6 +14325,7 @@ async function renderTicketCanvas({ venue, event, order }) {
   const W = 576 // 80 mm à 180 dpi
   const H = 1200
   const { canvas, ctx } = makeCanvas(W, H, 1)
+  await ensureFontsReady()
   ctx.fillStyle = '#FFFFFF'
   ctx.fillRect(0, 0, W, H)
 
@@ -12031,6 +14404,7 @@ async function renderReportCanvas({ venue, event, report }) {
   const W = 1240
   const H = 1754
   const { canvas, ctx } = makeCanvas(W, H, 1)
+  await ensureFontsReady()
   ctx.fillStyle = '#FFFFFF'
   ctx.fillRect(0, 0, W, H)
 
