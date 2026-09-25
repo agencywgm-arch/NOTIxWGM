@@ -7155,6 +7155,15 @@ function BarTab({ event, venue, session, showToast }) {
     setLoading(false)
   }, [event.id])
 
+  // Miroir synchrone de `orders`, lu depuis le callback temps réel ci-dessous
+  // sans dépendre d'une fermeture (closure) qui serait périmée : l'effet qui
+  // ouvre l'abonnement ne se redéclenche pas à chaque commande, seulement à
+  // chaque changement d'événement.
+  const ordersRef = useRef([])
+  useEffect(() => {
+    ordersRef.current = orders
+  }, [orders])
+
   useEffect(() => {
     load()
     const ch = supabase
@@ -7162,7 +7171,23 @@ function BarTab({ event, venue, session, showToast }) {
       .on(
         'postgres_changes',
         { event: '*', schema: 'public', table: 'orders', filter: `event_id=eq.${event.id}` },
-        () => load()
+        (payload) => {
+          // Une simple mise à jour de statut (par une autre tablette, ou
+          // l'écho de notre propre geste) sur une commande déjà connue ici
+          // n'a besoin que d'un patch local — inutile de repayer un
+          // rechargement complet avec ses jointures (order_items, customers)
+          // à chaque commande qui avance dans la soirée. Constaté en
+          // production : c'était l'une des causes du ralentissement général
+          // de l'onglet Bar un soir chargé, un rechargement complet partant
+          // à CHAQUE mouvement de CHAQUE commande, sur CHAQUE tablette
+          // ouverte. Une nouvelle commande (INSERT) ou une suppression garde
+          // le rechargement complet : le payload brut n'a pas les jointures.
+          if (payload.eventType === 'UPDATE' && ordersRef.current.some((o) => o.id === payload.new.id)) {
+            setOrders((prev) => prev.map((o) => (o.id === payload.new.id ? { ...o, ...payload.new } : o)))
+          } else {
+            load()
+          }
+        }
       )
       // Une coupure de WebSocket fait manquer les commandes arrivées pendant
       // le trou. Sans resynchronisation à la reconnexion, elles n'apparaissent
@@ -7256,8 +7281,25 @@ function BarTab({ event, venue, session, showToast }) {
 
   async function move(order, status, opts = {}) {
     unlockAudio()
+
+    // Mise à jour optimiste : le bouton doit réagir immédiatement au tap, pas
+    // après un aller-retour réseau — c'est précisément ce qui rendait l'onglet
+    // Bar lent un soir de Wi-Fi engorgé (« j'appuie sur imprimer, ça prend du
+    // temps »). Les horodatages suivent la même règle que le trigger
+    // touch_order_status côté base (0001), pour que l'affichage local (délai
+    // d'attente, relance) ne saute pas dès que le serveur répond. Si l'écriture
+    // échoue, on revient à l'état réel plutôt que de laisser l'écran mentir.
+    const patch = { status }
+    if (status === 'READY' && !order.ready_at) patch.ready_at = new Date().toISOString()
+    if (status === 'PICKED_UP' && !order.picked_up_at) patch.picked_up_at = new Date().toISOString()
+    if (status === 'PAID' && !order.paid_at) patch.paid_at = new Date().toISOString()
+    setOrders((prev) => prev.map((o) => (o.id === order.id ? { ...o, ...patch } : o)))
+
     const { error } = await supabase.from('orders').update({ status }).eq('id', order.id)
-    if (error) return showToast(frError(error), 'error')
+    if (error) {
+      load()
+      return showToast(frError(error), 'error')
+    }
 
     if (status === 'READY') {
       notify({
@@ -7300,7 +7342,9 @@ function BarTab({ event, venue, session, showToast }) {
     }
 
     if (opts.back) showToast(`${order.pickup_code} revenue à « ${statusLabel(status, 'fr')} ».`, 'ok')
-    load()
+    // Plus de load() ici : l'optimisme ci-dessus a déjà tout affiché, et le
+    // temps réel confirme silencieusement en arrière-plan (ou corrige, dans
+    // le rare cas où une autre tablette aurait déjà bougé la commande).
   }
 
   // Bouton « Imprimer » de la colonne Reçues : un seul geste qui fait les
