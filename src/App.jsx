@@ -10982,6 +10982,64 @@ const EMPTY_PROMO = {
   gift_items: [],
   is_entry_code: false,
   entry_price: 25,
+  is_rotating: false,
+  rotating_secret: null,
+}
+
+/** Secret aléatoire (192 bits, hex) — clé HMAC du code rotatif, voir 0056. */
+function genRotatingSecret() {
+  const bytes = crypto.getRandomValues(new Uint8Array(24))
+  return Array.from(bytes, (b) => b.toString(16).padStart(2, '0')).join('')
+}
+
+/**
+ * Affiche le code rotatif EN COURS pour le staff (écran au bar, à l'entrée…) —
+ * se rafraîchit tout seul. Interroge current_rotating_code() plutôt que de
+ * recalculer côté client : le secret n'est jamais envoyé au navigateur.
+ */
+function LiveRotatingCode({ promoId }) {
+  const [state, setState] = useState(null) // null (chargement) | 'error' | {code, seconds_left}
+
+  useEffect(() => {
+    if (!promoId) return
+    let dead = false
+    async function tick() {
+      const { data, error } = await supabase.rpc('current_rotating_code', { p_promo: promoId })
+      if (dead) return
+      setState(error || !data?.[0] ? 'error' : data[0])
+    }
+    tick()
+    const id = setInterval(tick, 4000)
+    return () => {
+      dead = true
+      clearInterval(id)
+    }
+  }, [promoId])
+
+  if (state === 'error') return null
+
+  return (
+    <div
+      style={{
+        textAlign: 'center',
+        padding: '20px 14px',
+        borderRadius: 16,
+        background: C.navy,
+        color: '#fff',
+        marginBottom: 14,
+      }}
+    >
+      <div style={{ fontSize: 11, letterSpacing: 1.2, opacity: 0.7, marginBottom: 6 }}>
+        CODE EN DIRECT
+      </div>
+      <div style={{ fontFamily: FONT.label, fontSize: 42, fontWeight: 700, letterSpacing: 6 }}>
+        {state ? state.code : '······'}
+      </div>
+      <div style={{ fontSize: 12, opacity: 0.7, marginTop: 6 }}>
+        {state ? `change dans ${state.seconds_left}s` : 'chargement…'}
+      </div>
+    </div>
+  )
 }
 
 /** Catégories offrables par un code cadeau, dans les mots de la carte. */
@@ -11192,6 +11250,55 @@ function ForfaitFields({ f, set }) {
           />
         </Field>
       )}
+
+      {/* Retour terrain : un code affiché sur un écran (bar, entrée) circule
+          par capture d'écran toute la soirée si sa valeur ne change jamais.
+          En rotatif, le barème de crédits ne change pas — seule la VALEUR
+          SAISIE par le client change toutes les 60 s (voir 0056). */}
+      <button
+        onClick={() => {
+          if (f.is_rotating) {
+            set('is_rotating', false)
+          } else {
+            set('is_rotating', true)
+            if (!f.rotating_secret) set('rotating_secret', genRotatingSecret())
+          }
+        }}
+        style={{
+          display: 'flex',
+          justifyContent: 'space-between',
+          alignItems: 'center',
+          width: '100%',
+          minHeight: 56,
+          padding: '0 14px',
+          borderRadius: 14,
+          cursor: 'pointer',
+          border: `1.5px solid ${f.is_rotating ? C.indigo : C.lineHi}`,
+          background: f.is_rotating ? `${alpha(C.indigo, 9)}` : C.paper,
+          color: C.text,
+          marginBottom: f.is_rotating ? 10 : 14,
+          textAlign: 'left',
+        }}
+      >
+        <span>
+          <span style={{ fontSize: 14, fontWeight: 500 }}>🔄 Code rotatif (change toutes les minutes)</span>
+          <span style={{ display: 'block', fontSize: 11.5, color: C.faint, marginTop: 2 }}>
+            Utile sur un écran affiché au bar/à l’entrée — inutilisable en capture d’écran après coup
+          </span>
+        </span>
+        <span style={{ fontFamily: FONT.label, fontWeight: 600, color: f.is_rotating ? C.indigo : C.faint }}>
+          {f.is_rotating ? 'OUI' : 'NON'}
+        </span>
+      </button>
+
+      {f.is_rotating &&
+        (f.id ? (
+          <LiveRotatingCode promoId={f.id} />
+        ) : (
+          <div style={{ fontSize: 12, color: C.faint, marginBottom: 14, lineHeight: 1.5 }}>
+            Enregistrez, puis rouvrez ce code (depuis la liste) pour voir le code en direct apparaître ici.
+          </div>
+        ))}
     </>
   )
 }
@@ -11467,6 +11574,8 @@ function PromoCodeSheet({ promo, event, venue, onClose, onSaved, showToast }) {
       gift_items: f.kind === 'gift' ? gifts : [],
       is_entry_code: f.kind === 'credits' && !!f.is_entry_code,
       entry_price: f.kind === 'credits' && f.is_entry_code ? Number(f.entry_price) || 0 : null,
+      is_rotating: f.kind === 'credits' && !!f.is_rotating,
+      rotating_secret: f.kind === 'credits' && f.is_rotating ? f.rotating_secret : null,
     }
     const { error } = f.id
       ? await supabase.from('promo_codes').update(payload).eq('id', f.id)
@@ -11492,7 +11601,14 @@ function PromoCodeSheet({ promo, event, venue, onClose, onSaved, showToast }) {
 
   return (
     <Sheet open={!!promo} onClose={onClose} title={f.id ? 'Modifier le code' : 'Nouveau code promo'}>
-      <Field label="Code" hint="Ce que le client saisit dans son espace de commande">
+      <Field
+        label="Code"
+        hint={
+          f.kind === 'credits' && f.is_rotating
+            ? 'Identifiant interne uniquement — en rotatif, le client saisit le code affiché en direct, pas celui-ci'
+            : 'Ce que le client saisit dans son espace de commande'
+        }
+      >
         <input
           style={{ ...S.input, textTransform: 'uppercase', letterSpacing: 1.5, fontFamily: FONT.label }}
           value={f.code}
