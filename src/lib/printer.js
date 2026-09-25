@@ -133,13 +133,13 @@ function eposEnvelope(xmlBody) {
  * @param {ReturnType<typeof import('./ticket.js').buildTicket>} lines
  * @returns {Promise<{ok: boolean, reason?: string, ambiguous?: boolean}>}
  */
-// 15 s plutôt que 6 : constaté en soirée, sur le Wi-Fi partagé du lieu (plein
-// de tablettes/téléphones dessus), l'imprimante encaissait bel et bien le
-// ticket et l'imprimait — juste après que l'appli ait abandonné et affiché
-// « l'imprimante ne répond pas ». Le mécanisme « ambigu, ne pas relâcher la
-// réservation » au-dessus protégeait déjà contre un vrai doublon, mais un
-// délai plus large réduit combien de fois ce faux négatif se déclenche.
-export async function sendToPrinter(lines, { url, timeoutMs = 15000 } = {}) {
+// 25 s plutôt que 15 : même symptôme revécu un soir encore plus chargé — le
+// Wi-Fi partagé du lieu peut rester engorgé plusieurs dizaines de secondes
+// d'affilée, et l'imprimante encaissait bel et bien le ticket après que
+// l'appli ait déjà abandonné. Le mécanisme « ambigu, ne pas relâcher la
+// réservation » au-dessus protège déjà contre un vrai doublon ; un délai
+// encore plus large réduit combien de fois ce faux négatif se déclenche.
+export async function sendToPrinter(lines, { url, timeoutMs = 25000 } = {}) {
   if (!url) return { ok: false, ambiguous: false, reason: 'Aucune imprimante configurée.' }
 
   const ctrl = new AbortController()

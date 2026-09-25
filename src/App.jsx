@@ -5760,7 +5760,7 @@ function tabsForRole(role) {
  * via le temps réel, qui pouvait retimeouter et relâcher à son tour — une
  * boucle d'impression sans fin, vécue en soirée (voir printer.js).
  *
- * @returns {Promise<'ok'|'failed'|'skipped'>}
+ * @returns {Promise<'ok'|'failed'|'ambiguous'|'skipped'>}
  */
 async function printArrivalTicket({ order, event, venue, trigger, showToast }) {
   const { data: won, error: claimErr } = await supabase.rpc('claim_ticket_print', { p_order: order.id })
@@ -5781,7 +5781,7 @@ async function printArrivalTicket({ order, event, venue, trigger, showToast }) {
         : `Imprimante : ${res.reason}`,
       'error'
     )
-    return 'failed'
+    return res.ambiguous ? 'ambiguous' : 'failed'
   }
   return 'ok'
 }
@@ -5856,8 +5856,15 @@ function AutoPrintDaemon({ event, venue, showToast }) {
           setPendingCount(orders.length - i - 1)
           if (outcome === 'failed') {
             failedOnce.current = true
-            break // imprimante muette : inutile d'insister sur les suivantes
+            break // échec net (hors ligne, refusé) : inutile d'insister sur les suivantes
           }
+          // 'ambiguous' (simple délai dépassé, Wi-Fi engorgé) N'INTERROMPT PAS
+          // le lot : contrairement à un échec net, rien ne dit que ce ticket-là
+          // n'est pas sorti quand même, juste lentement (voir printer.js). Le
+          // bloquer aurait laissé tous les tickets suivants attendre le
+          // prochain passage du démon (jusqu'à 45 s) derrière une seule
+          // réponse tardive — exactement le symptôme « ça bloque
+          // l'impression » constaté un soir de Wi-Fi très chargé.
           if (outcome === 'ok') failedOnce.current = false
         }
       } catch (e) {
